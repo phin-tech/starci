@@ -441,3 +441,39 @@ func TestAnUnreachableSharedStoreCostsOnlyARerun(t *testing.T) {
 		t.Error("the result was not kept locally when the shared store was down")
 	}
 }
+
+// The question a worker asks of a commit, asked of a checkout: needs git and
+// nothing else.
+func TestMissingInputsNamesWhatSelectsNothing(t *testing.T) {
+	r := newRepo(t)
+	r.commit(map[string]string{"src/a.go": "a", "docs/guide/intro.md": "i", "Makefile": "m"})
+	// On disk but never added: not in any commit a worker would build.
+	if err := os.WriteFile(filepath.Join(r.dir, "untracked.txt"), []byte("u"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		inputs []string
+		want   string
+	}{
+		{[]string{"."}, ""},
+		{[]string{"src", "Makefile", "docs/**/*.md"}, ""},
+		{[]string{"src", "lib"}, "lib"},
+		{[]string{"*.md", "**/*.md"}, "*.md"}, // * stays within a directory
+		{[]string{"untracked.txt", "makefile"}, "untracked.txt makefile"},
+	}
+	for _, c := range cases {
+		// Asked from a subdirectory: inputs are always from the top.
+		got, err := MissingInputs(filepath.Join(r.dir, "src"), c.inputs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Join(got, " ") != c.want {
+			t.Errorf("inputs %q: missing = %q, want %q", c.inputs, got, c.want)
+		}
+	}
+
+	if _, err := MissingInputs(t.TempDir(), []string{"."}); err == nil {
+		t.Error("a directory that is not in a repository was accepted")
+	}
+}

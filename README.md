@@ -45,6 +45,7 @@ Everything is one binary:
 | `starci serve` | Be the address a forge delivers webhooks to, relaying them to Hatchet. |
 | `starci hooks add` | Have Hatchet itself be that address. |
 | `starci compile` | Write a basic script out for GitHub Actions or CircleCI. |
+| `starci validate` | Check that a script's inputs select files and that the tools it pins download as pinned. Runs nothing. |
 | `starci workers`, `shun`, `unshun` | See the workers, and take one out of rotation. |
 
 ## Trying it
@@ -185,6 +186,21 @@ if ctx.event == "tag":
 
 compiles to a `publish` job that runs only for tags, and a script that will
 not do something for a pull request from a fork still will not once compiled.
+
+Before writing anything, `compile` downloads the script's tools for `--arch`
+and checks them as `starci validate` does, so that a pin that no longer holds
+is found here and not in every job. `--offline` skips that.
+
+A compiled file is a copy of the script, and goes stale when the script is
+edited without it. `--check` writes nothing and fails unless the file is what
+would be written, which makes it a step worth running on every push:
+
+```sh
+starci compile --check .github/workflows/ci.yml
+```
+
+It says where the two first differ and how to write the file again. It needs
+no network and downloads nothing.
 
 Some things cannot be frozen into a file, and the header of the generated
 workflow says which apply:
@@ -376,6 +392,26 @@ same tool from a mirror does not. There is no way to ask for "the latest".
 This suits programs that stand alone. A tool built against glibc will not run
 in an Alpine image.
 
+A pin can be checked without running a step:
+
+```
+$ starci validate
+inputs
+  ok       test
+tools
+  ok       bun amd64
+  failed   bun arm64
+           tool "bun": https://…/bun-linux-aarch64.zip has checksum 5f0c…, not the a27f… the script pins it to
+```
+
+Every tool the script declares is downloaded, for every architecture it lists
+whatever this machine is, and checked three ways: the address answers, what it
+serves has the pinned checksum, and each `bin` directory is in it and holds a
+program. It always downloads, since a copy this machine already has says
+nothing about whether another could get one, and it works for both modes. It
+sees tools declared at a script's top level and in `ci(ctx)`; one declared
+only inside `pipeline(ctx)` is not known until that runs.
+
 ### Packages
 
 For what a tool cannot carry — system libraries, a compiler — a step can ask
@@ -413,6 +449,13 @@ In a pattern, `*` stays within one directory and `**` crosses them. Patterns
 are matched against the commit when the step runs, so a new file that matches
 becomes an input with no change to the script, and one that does not match is
 never seen. An input that matches nothing is an error.
+
+`starci validate` finds that error without running anything. It asks, of the
+repository the script is in, whether each input selects a file that git
+tracks: a file that was never added is not in the commit a worker builds. The
+steps it asks about are those of a basic script's plan for a commit about
+which nothing is known; a step added only for some branch, and every step of
+an advanced script, is not known in advance and is not checked.
 
 That boundary is what makes skipping safe. A step's result is stored under a
 key made of its image's content id, its command, its `env`, its tools and

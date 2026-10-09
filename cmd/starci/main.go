@@ -7,11 +7,13 @@
 //	starci serve    be the address a forge delivers to, passing deliveries on
 //	starci hooks    have Hatchet itself be that address
 //	starci compile  write a basic script out for GitHub Actions or CircleCI
+//	starci validate check that a script's inputs select files and that the
+//	                tools it pins download as pinned; runs nothing
 //	starci workers  list the workers Hatchet knows, and what they offer
 //	starci shun     stop giving a worker new steps; unshun reverses it
 //
-// Everything but plan and run --local reaches Hatchet through the
-// HATCHET_CLIENT_* variables.
+// Everything but plan, validate, compile and run --local reaches Hatchet
+// through the HATCHET_CLIENT_* variables.
 package main
 
 import (
@@ -54,7 +56,8 @@ const usage = `usage:
   starci worker
   starci serve
   starci hooks add forgejo|github
-  starci compile [--target github|circleci] [--file .ci.star] [--runs-on NAME] [--arch amd64]
+  starci compile [--target github|circleci] [--file .ci.star] [--runs-on NAME] [--arch amd64] [--offline] [--check FILE]
+  starci validate [--file .ci.star] [--arch amd64,arm64]
   starci workers
   starci shun WORKER
   starci unshun WORKER`
@@ -73,6 +76,8 @@ func main() {
 		err = workerCmd()
 	case "compile":
 		err = compileCmd(os.Args[2:])
+	case "validate":
+		err = validateCmd(os.Args[2:])
 	case "serve":
 		err = serveCmd()
 	case "hooks":
@@ -836,6 +841,8 @@ func compileCmd(args []string) error {
 	runsOn := fs.String("runs-on", "", "the machines to run on: a runner label for github (default ubuntu-latest), a resource class for circleci (default medium)")
 	arch := fs.String("arch", "amd64", "architecture of those machines: amd64 or arm64")
 	defaultBranch := fs.String("default-branch", "main", "the repository's default branch")
+	offline := fs.Bool("offline", false, "do not download the script's tools to check them first")
+	check := fs.String("check", "", "write nothing: fail unless this file is what would be written")
 	fs.Parse(args)
 
 	src, err := os.ReadFile(*file)
@@ -865,6 +872,46 @@ func compileCmd(args []string) error {
 	}
 	if err != nil {
 		return err
+	}
+	// A compiled file is a copy, and a copy goes stale the moment the script
+	// is edited without it. This is the question to ask on every push; it
+	// needs no network, so it downloads nothing.
+	if *check != "" {
+		have, err := os.ReadFile(*check)
+		if err != nil {
+			return err
+		}
+		if string(have) == out {
+			fmt.Printf("%s is what %s compiles to\n", *check, *file)
+			return nil
+		}
+		again := "starci compile"
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name != "check" && f.Name != "offline" {
+				again += " --" + f.Name + " " + f.Value.String()
+			}
+		})
+		return fmt.Errorf("%s is not what %s compiles to; %s\nwrite it again with: %s > %s", *check, *file, firstDifference(string(have), out), again, *check)
+	}
+	// What is written is run later, somewhere else. A tool that cannot be
+	// fetched is better found here than in every job that wants it.
+	if !*offline {
+		// Every tool the script declares, not one plan's: a workflow holds
+		// the steps of each kind of event. One with no build for these
+		// machines is left to the compiler, which refuses a step that uses it.
+		declared, err := plan.Tools(*file, src)
+		if err != nil {
+			return err
+		}
+		var tools []plan.Tool
+		for _, t := range declared {
+			if _, ok := t.SHA256[*arch]; ok {
+				tools = append(tools, t)
+			}
+		}
+		if failed := checkTools(os.Stderr, tools, []string{*arch}); failed > 0 {
+			return fmt.Errorf("%d tool download(s) failed the check; nothing was written (--offline skips the check)", failed)
+		}
 	}
 	fmt.Print(out)
 	return nil
@@ -929,4 +976,149 @@ func describeEvent(c plan.Context) string {
 		return "push to " + c.Ref
 	}
 	return "push"
+}
+
+// firstDifference says where two texts part ways, in terms of the first.
+func firstDifference(have, want string) string {
+	h, w := strings.Split(have, "\n"), strings.Split(want, "\n")
+	for i := range h {
+		if i >= len(w) {
+			return fmt.Sprintf("it has more after line %d, where it should end", i)
+		}
+		if h[i] != w[i] {
+			return fmt.Sprintf("they first differ at line %d:\n  has:    %s\n  should: %s", i+1, h[i], w[i])
+		}
+	}
+	return fmt.Sprintf("it ends at line %d, where there should be more", len(h))
+}
+
+// validateCmd checks what a script depends on that evaluating it cannot
+// see. In the repository: that each input of each step selects a file git
+// tracks. Outside it: that each tool it pins can still be downloaded, has the
+// checksum the script gives, and unpacks to programs where the script says
+// they are, for every architecture the tool lists, whatever this machine is.
+func validateCmd(args []string) error {
+	fs := flag.NewFlagSet("validate", flag.ExitOnError)
+	file := fs.String("file", ".ci.star", "CI script to validate")
+	only := fs.String("arch", "", "architectures to check, comma-separated (default: every one a tool lists)")
+	fs.Parse(args)
+
+	var archs []string
+	for _, a := range strings.Split(*only, ",") {
+		if a = strings.TrimSpace(a); a == "amd64" || a == "arm64" {
+			archs = append(archs, a)
+		} else if a != "" {
+			return fmt.Errorf("unknown architecture %q: amd64 or arm64", a)
+		}
+	}
+	src, err := os.ReadFile(*file)
+	if err != nil {
+		return err
+	}
+	// A script that could not be run is not valid, whatever its tools are
+	// like. In basic mode that includes the plan it returns.
+	mode, err := plan.Mode(*file, src)
+	if err != nil {
+		return err
+	}
+	var problems []string
+	fmt.Println("inputs")
+	if mode == plan.Basic {
+		p, err := plan.Eval(*file, src, plan.Context{})
+		if err != nil {
+			return err
+		}
+		if failed := checkInputs(filepath.Dir(*file), p.Steps); failed > 0 {
+			problems = append(problems, fmt.Sprintf("%d step(s) have an input that selects nothing", failed))
+		}
+	} else {
+		fmt.Println("  not checked: an advanced script's steps are only known as it runs")
+	}
+
+	tools, err := plan.Tools(*file, src)
+	if err != nil {
+		return err
+	}
+	fmt.Println("tools")
+	if len(tools) == 0 {
+		fmt.Println("  none declared")
+	}
+	if failed := checkTools(os.Stdout, tools, archs); failed > 0 {
+		problems = append(problems, fmt.Sprintf("%d tool download(s) failed the check", failed))
+	}
+	if len(problems) > 0 {
+		return errors.New(strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// checkInputs asks, of the repository dir is in, whether each input of each
+// step selects a file that git tracks there. The steps are those planned for
+// a commit about which nothing is known. It prints a line per step and
+// returns how many have an input that selects nothing.
+func checkInputs(dir string, steps []plan.Step) (failed int) {
+	if err := exec.Command("git", "-C", dir, "rev-parse", "--git-dir").Run(); err != nil {
+		fmt.Println("  not checked: the script is not in a git repository")
+		return 0
+	}
+	if len(steps) == 0 {
+		fmt.Println("  no steps are planned for a commit about which nothing is known")
+	}
+	for _, s := range steps {
+		missing, err := step.MissingInputs(dir, s.Inputs)
+		switch {
+		case err != nil:
+			failed++
+			fmt.Printf("  %-8s %s\n           %v\n", "failed", s.Name, err)
+		case len(missing) > 0:
+			failed++
+			fmt.Printf("  %-8s %s\n", "failed", s.Name)
+			for _, in := range missing {
+				fmt.Printf("           input %q selects no file that git tracks here\n", in)
+			}
+		default:
+			fmt.Printf("  %-8s %s\n", "ok", s.Name)
+		}
+	}
+	return failed
+}
+
+// checkTools downloads and checks each tool for each of the given
+// architectures (all of its builds, when none are given), a few at a time. It writes a line per download to w, in order, and returns
+// how many failed.
+func checkTools(w *os.File, tools []plan.Tool, archs []string) (failed int) {
+	type check struct {
+		tool plan.Tool
+		arch string
+		done chan error
+	}
+	var checks []check
+	for _, t := range tools {
+		want := archs
+		if len(want) == 0 {
+			want = sortedKeys(t.SHA256)
+		}
+		// An architecture that was asked for and has no build is reported,
+		// not passed over.
+		for _, arch := range want {
+			checks = append(checks, check{t, arch, make(chan error, 1)})
+		}
+	}
+	slots := make(chan struct{}, 4)
+	for _, c := range checks {
+		go func() {
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			c.done <- step.CheckTool(c.tool, c.arch)
+		}()
+	}
+	for _, c := range checks {
+		if err := <-c.done; err != nil {
+			failed++
+			fmt.Fprintf(w, "  %-8s %s %s\n           %v\n", "failed", c.tool.Name, c.arch, err)
+			continue
+		}
+		fmt.Fprintf(w, "  %-8s %s %s\n", "ok", c.tool.Name, c.arch)
+	}
+	return failed
 }

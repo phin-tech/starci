@@ -76,6 +76,33 @@ type installed struct {
 	bins []string
 }
 
+// build is one architecture's build of a tool: where it is downloaded from,
+// what it must hash to, and the directories it must contain.
+type build struct {
+	url  string
+	sum  string
+	bins []string
+}
+
+// buildFor works out a tool's build for an architecture, spelling the
+// architecture the way the tool's publisher does.
+func buildFor(t plan.Tool, arch string) (build, bool) {
+	sum, ok := t.SHA256[arch]
+	if !ok {
+		return build{}, false
+	}
+	vendorArch := arch
+	if name, ok := t.ArchNames[arch]; ok {
+		vendorArch = name
+	}
+	fill := func(s string) string { return strings.ReplaceAll(s, "{arch}", vendorArch) }
+	b := build{url: fill(t.URL), sum: sum}
+	for _, dir := range t.Bin {
+		b.bins = append(b.bins, path.Clean(fill(dir)))
+	}
+	return b, true
+}
+
 // install makes a tool available on this machine for the given architecture,
 // downloading and unpacking it unless that has been done before.
 //
@@ -84,20 +111,11 @@ type installed struct {
 // read-only, and a different build of the "same" tool can never be mistaken
 // for it.
 func install(stateDir string, t plan.Tool, arch string) (installed, error) {
-	sum, ok := t.SHA256[arch]
+	b, ok := buildFor(t, arch)
 	if !ok {
 		return installed{}, fmt.Errorf("tool %q has no build for %s, which is what the step's image runs on", t.Name, arch)
 	}
-	vendorArch := arch
-	if name, ok := t.ArchNames[arch]; ok {
-		vendorArch = name
-	}
-	fill := func(s string) string { return strings.ReplaceAll(s, "{arch}", vendorArch) }
-
-	in := installed{name: t.Name, sum: sum, dir: filepath.Join(stateDir, "tools", sum)}
-	for _, b := range t.Bin {
-		in.bins = append(in.bins, path.Clean(fill(b)))
-	}
+	in := installed{name: t.Name, sum: b.sum, dir: filepath.Join(stateDir, "tools", b.sum), bins: b.bins}
 	if _, err := os.Stat(in.dir); err == nil {
 		return in, nil
 	}
@@ -112,27 +130,9 @@ func install(stateDir string, t plan.Tool, arch string) (installed, error) {
 	}
 	defer os.RemoveAll(work)
 
-	url := fill(t.URL)
-	download := filepath.Join(work, "download")
-	got, err := fetchFile(url, download)
+	unpacked, err := download(work, t.Name, b)
 	if err != nil {
-		return installed{}, fmt.Errorf("tool %q: %v", t.Name, err)
-	}
-	if got != sum {
-		return installed{}, fmt.Errorf("tool %q: %s has checksum %s, not the %s the script pins it to", t.Name, url, got, sum)
-	}
-
-	unpacked := filepath.Join(work, "unpacked")
-	if err := os.Mkdir(unpacked, 0o755); err != nil {
 		return installed{}, err
-	}
-	if err := unpack(download, url, unpacked, t.Name); err != nil {
-		return installed{}, fmt.Errorf("tool %q: %v", t.Name, err)
-	}
-	for _, b := range in.bins {
-		if info, err := os.Stat(filepath.Join(unpacked, b)); err != nil || !info.IsDir() {
-			return installed{}, fmt.Errorf("tool %q: there is no directory %q in the download", t.Name, b)
-		}
 	}
 	// Unpacked beside its final place and moved in one step, so a half
 	// unpacked tool is never visible. If another step got there first, its
@@ -143,6 +143,76 @@ func install(stateDir string, t plan.Tool, arch string) (installed, error) {
 		}
 	}
 	return in, nil
+}
+
+// download fetches a build into work and unpacks it there, refusing one whose
+// checksum is not the pinned one or which lacks a directory it should have.
+// It returns where the build is unpacked.
+func download(work, name string, b build) (string, error) {
+	file := filepath.Join(work, "download")
+	got, err := fetchFile(b.url, file)
+	if err != nil {
+		return "", fmt.Errorf("tool %q: %v", name, err)
+	}
+	if got != b.sum {
+		return "", fmt.Errorf("tool %q: %s has checksum %s, not the %s the script pins it to", name, b.url, got, b.sum)
+	}
+
+	unpacked := filepath.Join(work, "unpacked")
+	if err := os.Mkdir(unpacked, 0o755); err != nil {
+		return "", err
+	}
+	if err := unpack(file, b.url, unpacked, name); err != nil {
+		return "", fmt.Errorf("tool %q: %v", name, err)
+	}
+	for _, dir := range b.bins {
+		if info, err := os.Stat(filepath.Join(unpacked, dir)); err != nil || !info.IsDir() {
+			return "", fmt.Errorf("tool %q: there is no directory %q in the download", name, dir)
+		}
+	}
+	return unpacked, nil
+}
+
+// CheckTool reports whether a tool's build for an architecture can be
+// installed today: that its address still answers, that what it serves is
+// what the script pins, and that it unpacks to something with a program where
+// the script says programs are.
+//
+// It always downloads, and keeps nothing. A copy this machine already has
+// says nothing about whether another machine could still get one.
+func CheckTool(t plan.Tool, arch string) error {
+	b, ok := buildFor(t, arch)
+	if !ok {
+		return fmt.Errorf("tool %q has no build for %s", t.Name, arch)
+	}
+	work, err := os.MkdirTemp("", "starci-check-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(work)
+
+	unpacked, err := download(work, t.Name, b)
+	if err != nil {
+		return err
+	}
+	// A directory on PATH with no program in it is a mistake in bin that
+	// would otherwise only show as "command not found" in a step.
+	for _, dir := range b.bins {
+		entries, err := os.ReadDir(filepath.Join(unpacked, dir))
+		if err != nil {
+			return err
+		}
+		found := false
+		for _, e := range entries {
+			// Stat, not the entry itself: a program is often a symlink.
+			info, err := os.Stat(filepath.Join(unpacked, dir, e.Name()))
+			found = found || (err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0)
+		}
+		if !found {
+			return fmt.Errorf("tool %q: there is no program in the download's directory %q", t.Name, dir)
+		}
+	}
+	return nil
 }
 
 func fetchFile(url, dest string) (sum string, err error) {

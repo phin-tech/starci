@@ -13,6 +13,7 @@
 package plan
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
@@ -507,7 +508,7 @@ var (
 	archs       = map[string]bool{"amd64": true, "arm64": true}
 )
 
-func toolBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func toolBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var name, url string
 	var sums, archNames *starlark.Dict
 	var bin *starlark.List
@@ -549,7 +550,50 @@ func toolBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 	if err := t.validate(); err != nil {
 		return nil, err
 	}
+	if declared, ok := thread.Local(toolsKey).(*[]Tool); ok {
+		*declared = append(*declared, t)
+	}
 	return &toolValue{t}, nil
+}
+
+const toolsKey = "starci.tools"
+
+// Tools returns every tool the script declares, in the order it declares
+// them, whether or not a step uses it: a tool kept for one branch is as much
+// a part of the script as one every commit needs.
+//
+// The file's top level is evaluated, and in basic mode ci(ctx) is called for
+// a commit about which nothing is known. A tool declared inside pipeline(ctx),
+// or in a part of ci(ctx) that commit does not reach, is not seen; declaring
+// tools at the top level, as a script normally does, avoids both.
+func Tools(filename string, src []byte) ([]Tool, error) {
+	thread := newThread("tools")
+	declared := []Tool{}
+	thread.SetLocal(toolsKey, &declared)
+	globals, _, err := load(thread, filename, src)
+	if err != nil {
+		return nil, err
+	}
+	if ci, ok := globals["ci"].(starlark.Callable); ok {
+		if _, err := starlark.Call(thread, ci, starlark.Tuple{contextValue(Context{})}, nil); err != nil {
+			return nil, describe(err)
+		}
+	} else if _, ok := globals["pipeline"].(starlark.Callable); !ok {
+		return nil, fmt.Errorf("%s: must define ci(ctx) or pipeline(ctx)", filename)
+	}
+
+	// The same declaration reached twice, by a helper called in a loop, is
+	// one tool.
+	seen := map[string]bool{}
+	tools := []Tool{}
+	for _, t := range declared {
+		id, _ := json.Marshal(t)
+		if !seen[string(id)] {
+			seen[string(id)] = true
+			tools = append(tools, t)
+		}
+	}
+	return tools, nil
 }
 
 func (t Tool) validate() error {

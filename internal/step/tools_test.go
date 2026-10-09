@@ -198,3 +198,80 @@ func TestChangingAToolRunsTheStepAgain(t *testing.T) {
 		t.Errorf("after the tool changed = %+v, want a fresh run with version two", got)
 	}
 }
+
+// Checking a tool needs no Docker and no particular machine: every
+// architecture the script lists is downloaded, whatever this one is.
+func TestCheckToolAcceptsEachBuildAsPinned(t *testing.T) {
+	amd := tarGz(t, map[string][]byte{"pkg-x86_64/greet": script("amd")})
+	arm := tarGz(t, map[string][]byte{"pkg-aarch64/greet": script("arm")})
+	srv := serve(t, map[string][]byte{"/greet-x86_64.tar.gz": amd, "/greet-aarch64.tar.gz": arm})
+	tool := plan.Tool{
+		Name: "greet", URL: srv.URL + "/greet-{arch}.tar.gz",
+		SHA256:    map[string]string{"amd64": sumOf(amd), "arm64": sumOf(arm)},
+		ArchNames: map[string]string{"amd64": "x86_64", "arm64": "aarch64"},
+		Bin:       []string{"pkg-{arch}"},
+	}
+	for _, arch := range []string{"amd64", "arm64"} {
+		if err := CheckTool(tool, arch); err != nil {
+			t.Errorf("%s: %v", arch, err)
+		}
+	}
+}
+
+// A copy already on this machine proves nothing about the address.
+func TestCheckToolDownloadsEvenWhatIsInstalled(t *testing.T) {
+	data := script("x")
+	srv := serve(t, map[string][]byte{"/tool": data})
+	tool := plan.Tool{Name: "tool", URL: srv.URL + "/tool", SHA256: map[string]string{"amd64": sumOf(data)}, Bin: []string{"."}}
+	if _, err := install(t.TempDir(), tool, "amd64"); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := CheckTool(tool, "amd64"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if hits := srv.hits.Load(); hits != 3 {
+		t.Errorf("downloaded %d times, want once to install and once per check", hits)
+	}
+}
+
+func TestCheckToolReportsWhatIsWrong(t *testing.T) {
+	data := script("x")
+	// The program is one directory further down than bin will say.
+	nested := tarGz(t, map[string][]byte{"pkg/bin/tool": data})
+	empty := zipped(t, nil)
+	broken := []byte("not an archive")
+	srv := serve(t, map[string][]byte{"/tool": data, "/nested.tar.gz": nested, "/empty.zip": empty, "/broken.tar.gz": broken})
+	zeros := strings.Repeat("0", 64)
+	pinned := func(path string, data []byte, bin string) plan.Tool {
+		return plan.Tool{Name: "tool", URL: srv.URL + path, SHA256: map[string]string{"amd64": sumOf(data)}, Bin: []string{bin}}
+	}
+	wrongSum := pinned("/tool", data, ".")
+	wrongSum.SHA256["amd64"] = zeros
+	armOnly := pinned("/tool", data, ".")
+	armOnly.SHA256 = map[string]string{"arm64": sumOf(data)}
+
+	cases := []struct {
+		name string
+		tool plan.Tool
+		want string
+	}{
+		{"address gone", pinned("/gone", data, "."), "/gone: 404"},
+		// The checksum it does have is in the message, to pin if it is the right one.
+		{"checksum differs", wrongSum, "has checksum " + sumOf(data) + ", not the " + zeros},
+		{"bin directory missing", pinned("/tool", data, "bin"), `no directory "bin" in the download`},
+		{"nothing to run in bin", pinned("/nested.tar.gz", nested, "pkg"), `no program in the download's directory "pkg"`},
+		{"empty archive", pinned("/empty.zip", empty, "."), `no program in the download's directory "."`},
+		{"not an archive", pinned("/broken.tar.gz", broken, "."), "cannot unpack"},
+		{"no build for the architecture", armOnly, "has no build for amd64"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := CheckTool(c.tool, "amd64")
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err = %v, want one mentioning %q", err, c.want)
+			}
+		})
+	}
+}

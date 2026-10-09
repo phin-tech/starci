@@ -457,3 +457,56 @@ def ci(ctx):
 		t.Run(c.name, func(t *testing.T) { wantError(t, c.src, c.want) })
 	}
 }
+
+func TestToolsFindsEveryDeclaredTool(t *testing.T) {
+	sum := strings.Repeat("a", 64)
+	decl := func(name string) string {
+		return `tool("` + name + `", url = "https://example.com/` + name + `", sha256 = {"amd64": "` + sum + `"})`
+	}
+	names := func(tools []Tool) string {
+		var out []string
+		for _, t := range tools {
+			out = append(out, t.Name)
+		}
+		return strings.Join(out, " ")
+	}
+
+	// One no step uses, one only another branch uses, one made inside ci(),
+	// and a helper that declares the same tool for every step it builds.
+	basic := `
+unused = ` + decl("unused") + `
+release = ` + decl("release") + `
+def lint(name):
+    return step(name, image = "i", run = "r", tools = [` + decl("linter") + `])
+def ci(ctx):
+    steps = [lint("a"), lint("b"), step("t", image = "i", run = "r", tools = [` + decl("inside") + `])]
+    if ctx.ref == "refs/heads/main":
+        steps.append(step("release", image = "i", run = "r", tools = [release]))
+    return steps
+`
+	tools, err := Tools(".ci.star", []byte(basic))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := names(tools), "unused release linter inside"; got != want {
+		t.Errorf("tools = %q, want %q", got, want)
+	}
+
+	// An advanced script has no plan, but its top level is as readable.
+	advanced := `
+uv = ` + decl("uv") + `
+def pipeline(ctx):
+    run(step("t", image = "i", run = "r", tools = [uv]))
+`
+	tools, err = Tools(".ci.star", []byte(advanced))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := names(tools); got != "uv" {
+		t.Errorf("tools = %q, want uv", got)
+	}
+
+	if _, err := Tools(".ci.star", []byte(`x = 1`)); err == nil || !strings.Contains(err.Error(), "must define ci(ctx) or pipeline(ctx)") {
+		t.Errorf("err = %v, want a script with neither function refused", err)
+	}
+}

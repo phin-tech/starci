@@ -298,6 +298,27 @@ func (co *checkout) contentID(inputs []string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+// MissingInputs returns those of a step's inputs that select none of the
+// files git tracks in the repository dir is in, asked with the pathspecs a
+// worker uses. A worker refuses such a step, but only once it has been given
+// it; this is the same question, asked of a checkout before anything runs.
+//
+// It is the tracked files that are asked about, not the directory's contents:
+// a file that was never added is not in the commit a worker builds.
+func MissingInputs(dir string, inputs []string) ([]string, error) {
+	var missing []string
+	for _, in := range inputs {
+		out, err := exec.Command("git", "-C", dir, "ls-files", "--", pathspec(in)).CombinedOutput()
+		if err != nil {
+			return nil, fmt.Errorf("input %q: %s", in, strings.TrimSpace(string(out)))
+		}
+		if len(out) == 0 {
+			missing = append(missing, in)
+		}
+	}
+	return missing, nil
+}
+
 func (co *checkout) materialise(inputs []string) error {
 	args := []string{"checkout", "-q", "FETCH_HEAD", "--"}
 	for _, in := range inputs {
