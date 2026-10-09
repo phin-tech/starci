@@ -167,6 +167,24 @@ func firstLine(s string) string {
 	return strings.TrimSpace(lines[len(lines)-1])
 }
 
+// Supersedes names what a run replaces: a newer run with the same name
+// cancels one still in progress. Each branch, tag, pull request and schedule
+// is its own line of runs; a run that belongs to none of them replaces only a
+// repeat of itself.
+func Supersedes(c plan.Context) string {
+	switch {
+	case c.Event == plan.EventPullRequest && c.PR != nil:
+		return fmt.Sprintf("%s@pr-%d", c.Repo, c.PR.Number)
+	case c.Event == plan.EventTag:
+		return c.Repo + "@tag-" + c.Tag
+	case c.Event == plan.EventSchedule:
+		return c.Repo + "@schedule-" + c.Schedule
+	case c.Ref != "":
+		return c.Repo + "@" + c.Ref
+	}
+	return c.Repo + "@" + c.SHA
+}
+
 // Outcome is the status to post for a finished run.
 func Outcome(results []plan.Result, runErr string) forge.Status {
 	passed, failed, skipped := 0, []string{}, 0

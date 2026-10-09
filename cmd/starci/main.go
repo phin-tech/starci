@@ -33,6 +33,7 @@ import (
 
 	hatchet "github.com/hatchet-dev/hatchet/sdks/go"
 
+	"git.phin.tech/sam/starci/internal/ciinfo"
 	"git.phin.tech/sam/starci/internal/compile"
 	onhatchet "git.phin.tech/sam/starci/internal/engine/hatchet"
 	"git.phin.tech/sam/starci/internal/engine/local"
@@ -97,9 +98,15 @@ func planCmd(args []string) error {
 	sha := fs.String("sha", "", "commit being built")
 	ref := fs.String("ref", "", "git ref being built")
 	changed := fs.String("changed", "", "comma-separated files changed by the commit")
+	event := fs.String("event", "", "why the run starts: push (the default), tag, pull_request, schedule or manual")
+	tag := fs.String("tag", "", "the tag, for --event tag")
+	scheduleName := fs.String("schedule", "", "the schedule, for --event schedule")
 	fs.Parse(args)
 
 	c := plan.Context{Repo: *repo, SHA: *sha, Ref: *ref}
+	if err := applyEvent(&c, *event, *tag, *scheduleName); err != nil {
+		return err
+	}
 	for _, f := range strings.Split(*changed, ",") {
 		if f = strings.TrimSpace(f); f != "" {
 			c.ChangedFiles = append(c.ChangedFiles, f)
@@ -131,6 +138,9 @@ func runCmd(args []string) error {
 	ref := fs.String("ref", "", "branch this run is for; a newer run for the same branch cancels it (default: the checked-out branch when building HEAD)")
 	file := fs.String("file", "", "CI script (default: .ci.star in the checkout)")
 	repo := fs.String("repo", "", "owner/name, for display (default: from the clone URL)")
+	event := fs.String("event", "", "why the run starts, to try what a script does for it: push, tag, pull_request, schedule or manual (default: what the CI tool this is running in says, or manual)")
+	tag := fs.String("tag", "", "the tag, for --event tag")
+	scheduleName := fs.String("schedule", "", "the schedule, for --event schedule")
 	slots := fs.Int("slots", 4, "with --local, how many steps to run at once")
 	verbose := fs.Bool("v", false, "with --local, print each step's output as it runs")
 	// The checkout comes first on the command line, before the flags.
@@ -182,11 +192,41 @@ func runCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	c := plan.Context{Repo: *repo, SHA: commit, Ref: *ref, ChangedFiles: strings.Fields(changed)}
 	mode, err := plan.Mode(*file, src)
 	if err != nil {
 		return err
 	}
+
+	// Started by hand, unless something says otherwise.
+	c := plan.Context{Repo: *repo, SHA: commit, Ref: *ref, ChangedFiles: strings.Fields(changed), Event: plan.EventManual}
+	schedules, err := plan.Schedules(*file, src)
+	if err != nil {
+		return err
+	}
+	// Inside a CI tool, the tool knows why this run exists. The script is
+	// told what it would have been told had starci received the event.
+	origin := "started by hand"
+	if found, ok := ciinfo.Detect(os.Getenv, os.ReadFile, schedules); ok {
+		origin = "from " + found.Tool
+		d := found.Context
+		c.Event, c.Tag, c.PR, c.Schedule = d.Event, d.Tag, d.PR, d.Schedule
+		if d.Event == plan.EventTag || d.Ref != "" {
+			c.Ref = d.Ref
+		}
+		if *repo == "" && d.Repo != "" {
+			c.Repo = d.Repo
+		}
+		if found.ChangesKnown {
+			c.ChangedFiles = d.ChangedFiles
+		}
+	}
+	if *event != "" {
+		origin = "as asked"
+		if err := applyEvent(&c, *event, *tag, *scheduleName); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("event: %s (%s)\n", describeEvent(c), origin)
 
 	// In basic mode the plan is known now, whichever engine runs it.
 	var p *plan.Plan
@@ -308,12 +348,7 @@ func runLocally(mode string, p *plan.Plan, file string, src []byte, c plan.Conte
 
 func runOnHatchet(mode string, p *plan.Plan, file string, src []byte, c plan.Context, cloneURL string) (onhatchet.RunResult, error) {
 	var out onhatchet.RunResult
-	// A run for a branch replaces the previous run for that branch. A run for
-	// a bare commit replaces nothing but a repeat of itself.
-	supersedes := c.Repo + "@" + c.SHA
-	if c.Ref != "" {
-		supersedes = c.Repo + "@" + c.Ref
-	}
+	supersedes := trigger.Supersedes(c)
 
 	client, err := hatchet.NewClient()
 	if err != nil {
@@ -756,4 +791,65 @@ func compileCmd(args []string) error {
 	}
 	fmt.Print(out)
 	return nil
+}
+
+// applyEvent sets why a run starts, from what was asked for on the command
+// line.
+func applyEvent(c *plan.Context, event, tag, schedule string) error {
+	switch event {
+	case "":
+		if tag != "" || schedule != "" {
+			return errors.New("--tag and --schedule go with --event tag and --event schedule")
+		}
+		return nil
+	case plan.EventPush, plan.EventManual:
+	case plan.EventTag:
+		if tag == "" {
+			return errors.New("--event tag needs --tag NAME")
+		}
+		c.Tag, c.Ref = tag, ""
+	case plan.EventSchedule:
+		if schedule == "" {
+			return errors.New("--event schedule needs --schedule NAME")
+		}
+		c.Schedule = schedule
+	case plan.EventPullRequest:
+		// A stand-in: enough to see what a script does for a pull request
+		// from this repository.
+		c.PR = &plan.PullRequest{Number: 1, Base: "main", Head: c.Ref}
+	default:
+		return fmt.Errorf("unknown event %q: push, tag, pull_request, schedule or manual", event)
+	}
+	c.Event = event
+	return nil
+}
+
+func describeEvent(c plan.Context) string {
+	switch c.Event {
+	case plan.EventTag:
+		return "tag " + c.Tag
+	case plan.EventPullRequest:
+		if c.PR == nil {
+			return "pull request"
+		}
+		from := ""
+		if c.PR.Fork {
+			from = ", from a fork"
+		}
+		return fmt.Sprintf("pull request %d%s", c.PR.Number, from)
+	case plan.EventSchedule:
+		if c.Schedule == "" {
+			return "a schedule the script does not declare"
+		}
+		return "schedule " + c.Schedule
+	case plan.EventManual:
+		if c.Ref != "" {
+			return "manual run of " + c.Ref
+		}
+		return "manual run"
+	}
+	if c.Ref != "" {
+		return "push to " + c.Ref
+	}
+	return "push"
 }
