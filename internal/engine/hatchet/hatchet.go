@@ -117,6 +117,19 @@ var (
 	notEqual               = types.WorkerLabelComparator_NOT_EQUAL
 )
 
+// summary is one step's result in a line, for the run's log.
+func summary(r plan.Result) string {
+	switch {
+	case r.Cached:
+		return "passed, reused from " + r.Worker
+	case r.Status == "passed":
+		return fmt.Sprintf("passed in %.1fs on %s", r.Seconds, r.Worker)
+	case r.Status == "skipped":
+		return "skipped: " + r.Detail
+	}
+	return r.Status + ": " + strings.SplitN(r.Detail, "\n", 2)[0]
+}
+
 // Reporter posts a run's outcome to the forge it came from. A worker that
 // holds no credentials for that forge has none to give, and says so.
 type Reporter func(ctx context.Context, to trigger.Report, s forge.Status) error
@@ -165,14 +178,25 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 
 	stepTask := client.NewStandaloneTask(StepTask,
 		func(ctx sdk.Context, in StepInput) (plan.Result, error) {
-			r := step.Run(ctx, cfg, in.CloneURL, in.SHA, in.Step, func(line string) {
-				// Hatchet rejects an empty log message; a blank line still
-				// matters for reading test output, so send it as a space.
+			// Hatchet rejects an empty log message; a blank line still
+			// matters for reading test output, so send it as a space.
+			say := func(line string) {
 				if line == "" {
 					line = " "
 				}
 				ctx.Log(line)
-			})
+			}
+			r := step.Run(ctx, cfg, in.CloneURL, in.SHA, in.Step, say)
+			// A step that was not run printed nothing just now. Whoever opens
+			// it should still find what it printed when it passed, and be
+			// told that is what they are reading.
+			if r.Cached {
+				say("starci: not run again. It passed on " + r.Worker + " with the same inputs; this is what it printed then:")
+				for _, line := range strings.Split(strings.TrimRight(r.Output, "\n"), "\n") {
+					say(line)
+				}
+			}
+			say(fmt.Sprintf("starci: %s", summary(r)))
 			if r.Status != "passed" {
 				// An error is what marks the task failed in Hatchet, so a
 				// broken step is red in the dashboard instead of a green task
@@ -188,6 +212,12 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 	pipeline := client.NewStandaloneDurableTask(PipelineTask,
 		func(ctx sdk.DurableContext, in PipelineInput) (RunResult, error) {
 			began := time.Now()
+			var names []string
+			for _, st := range in.Plan.Steps {
+				names = append(names, st.Name)
+			}
+			ctx.Log(fmt.Sprintf("starci: %s @ %.8s, %d step(s): %s", in.Plan.Repo, in.Plan.SHA, len(names), strings.Join(names, ", ")))
+			defer func() { ctx.Log("starci: finished in " + time.Since(began).Round(100*time.Millisecond).String()) }()
 			results, err := plan.RunPlan(&in.Plan, children(ctx, client, stepTask, in.CloneURL, in.Plan.SHA))
 			if ctx.Err() != nil {
 				report(ctx, post, in.Report, superseded)
@@ -196,6 +226,9 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 			if err != nil {
 				report(ctx, post, in.Report, forge.Status{State: "error", Description: err.Error()})
 				return RunResult{}, sdk.NewNonRetryableError(err)
+			}
+			for _, r := range results {
+				ctx.Log("starci: " + r.Name + ": " + summary(r))
 			}
 			report(ctx, post, in.Report, trigger.Timed(trigger.Outcome(results, ""), results, time.Since(began)))
 			return RunResult{OK: plan.Passed(results), Steps: results}, nil
@@ -213,6 +246,8 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 	script := client.NewStandaloneDurableTask(ScriptTask,
 		func(ctx sdk.DurableContext, in ScriptInput) (RunResult, error) {
 			began := time.Now()
+			ctx.Log(fmt.Sprintf("starci: %s @ %.8s, running %s", in.Context.Repo, in.Context.SHA, in.Filename))
+			defer func() { ctx.Log("starci: finished in " + time.Since(began).Round(100*time.Millisecond).String()) }()
 			runner := children(ctx, client, stepTask, in.CloneURL, in.Context.SHA)
 			results, err := plan.RunPipeline(ctx, in.Filename, []byte(in.Source), in.Context, runner)
 			if ctx.Err() != nil {
@@ -222,6 +257,12 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 			out := RunResult{OK: err == nil, Steps: results}
 			if err != nil {
 				out.Error = err.Error()
+			}
+			for _, r := range results {
+				ctx.Log("starci: " + r.Name + ": " + summary(r))
+			}
+			if out.Error != "" {
+				ctx.Log("starci: the script ended early: " + out.Error)
 			}
 			report(ctx, post, in.Report, trigger.Timed(trigger.Outcome(results, out.Error), results, time.Since(began)))
 			return out, nil
