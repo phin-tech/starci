@@ -33,6 +33,7 @@ import (
 	"git.phin.tech/sam/starci/internal/engine/local"
 	"git.phin.tech/sam/starci/internal/plan"
 	"git.phin.tech/sam/starci/internal/step"
+	s3store "git.phin.tech/sam/starci/internal/store/s3"
 )
 
 const usage = `usage:
@@ -246,12 +247,15 @@ func runCmd(args []string) error {
 // sandbox and the same result cache as on a worker; no queue, no other
 // machines, and nothing to resume from if this process is stopped.
 func runLocally(mode string, p *plan.Plan, file string, src []byte, c plan.Context, cloneURL string, slots int, verbose bool) (onhatchet.RunResult, error) {
-	state := os.Getenv("STARCI_STATE")
-	if state == "" {
-		var err error
-		if state, err = step.DefaultStateDir(); err != nil {
-			return onhatchet.RunResult{}, err
-		}
+	// Named, because with a shared store this machine's results are seen
+	// from others.
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "this machine"
+	}
+	cfg, err := machineConfig(host)
+	if err != nil {
+		return onhatchet.RunResult{}, err
 	}
 	// Ctrl-C stops the steps and removes their containers.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -259,7 +263,7 @@ func runLocally(mode string, p *plan.Plan, file string, src []byte, c plan.Conte
 
 	runner := &local.Runner{
 		Ctx:      ctx,
-		Config:   step.Config{Worker: "this machine", StateDir: state},
+		Config:   cfg,
 		CloneURL: cloneURL,
 		SHA:      c.SHA,
 		Slots:    slots,
@@ -335,7 +339,8 @@ func runOnHatchet(mode string, p *plan.Plan, file string, src []byte, c plan.Con
 // workerCmd is configured by environment, since it normally runs as a service:
 //
 //	STARCI_WORKER_NAME  name recorded in results (default: hostname)
-//	STARCI_STATE        where passing results are kept (default: ~/.cache/starci)
+//	STARCI_STATE        where results and tools are kept (default: ~/.cache/starci)
+//	STARCI_STORE        a result store shared with other machines (see machineConfig)
 //	STARCI_SLOTS        steps to run at once (default: 4)
 //	STARCI_LABELS       what this machine offers, as k=v,k=v (e.g. gpu=true)
 func workerCmd() error {
@@ -343,12 +348,9 @@ func workerCmd() error {
 	if name == "" {
 		name, _ = os.Hostname()
 	}
-	state := os.Getenv("STARCI_STATE")
-	if state == "" {
-		var err error
-		if state, err = step.DefaultStateDir(); err != nil {
-			return err
-		}
+	cfg, err := machineConfig(name)
+	if err != nil {
+		return err
 	}
 	slots := 4
 	if v := os.Getenv("STARCI_SLOTS"); v != "" {
@@ -374,7 +376,7 @@ func workerCmd() error {
 	if err != nil {
 		return err
 	}
-	tasks := onhatchet.NewTasks(client, step.Config{Worker: name, StateDir: state})
+	tasks := onhatchet.NewTasks(client, cfg)
 	worker, err := client.NewWorker("starci-"+name,
 		hatchet.WithWorkflows(tasks.All()...),
 		hatchet.WithSlots(slots),
@@ -389,6 +391,36 @@ func workerCmd() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return worker.StartBlocking(ctx)
+}
+
+// machineConfig is what this machine brings to running steps, from the
+// environment: where it keeps its state, and the store it shares with others.
+//
+//	STARCI_STATE  where results and tools are kept (default: ~/.cache/starci)
+//	STARCI_STORE  a store shared with other machines, as
+//	              s3://bucket/prefix?endpoint=host, with credentials in the
+//	              usual AWS_* variables. Optional.
+func machineConfig(name string) (step.Config, error) {
+	cfg := step.Config{Worker: name, StateDir: os.Getenv("STARCI_STATE")}
+	if cfg.StateDir == "" {
+		var err error
+		if cfg.StateDir, err = step.DefaultStateDir(); err != nil {
+			return cfg, err
+		}
+	}
+	if location := os.Getenv("STARCI_STORE"); location != "" {
+		store, err := s3store.Open(location)
+		if err != nil {
+			return cfg, err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := store.Check(ctx); err != nil {
+			return cfg, fmt.Errorf("STARCI_STORE is set but unusable: %w", err)
+		}
+		cfg.Shared = store
+	}
+	return cfg, nil
 }
 
 // workerInfo is the part of a Hatchet worker record that placement depends on.

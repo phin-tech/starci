@@ -33,16 +33,28 @@ const (
 	// keyVersion is part of every result key. Raise it whenever what goes
 	// into a key changes meaning, so that results stored under the old
 	// meaning are never mistaken for results under the new one.
-	keyVersion = 4
+	keyVersion = 5
 )
 
 // Config is what Run needs to know about the machine it is on.
 type Config struct {
 	// Worker is recorded in results, so a reused pass says where it ran.
 	Worker string
-	// StateDir holds passing results, one file per key. It is per machine: a
-	// result recorded on one is not seen by another.
+	// StateDir holds what this machine keeps between steps: its own copy of
+	// passing results, and installed tools.
 	StateDir string
+	// Shared, if set, is a result store other machines use too. A step that
+	// passed on any of them is not run again here. Without it, a machine
+	// knows only its own results.
+	Shared Store
+}
+
+func (c Config) store() Store {
+	local := FileStore{Dir: filepath.Join(c.StateDir, "results")}
+	if c.Shared == nil {
+		return local
+	}
+	return Layered{Near: local, Far: c.Shared}
 }
 
 // DefaultStateDir is where results are kept when nothing else is configured.
@@ -103,15 +115,13 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	// from them: that image differs from machine to machine and from day to
 	// day, and a key made from it could never be shared or even looked up
 	// without building first.
-	stored := filepath.Join(cfg.StateDir, "results", key(s, img.id, content, toolIDs)+".json")
+	resultKey := key(s, img, content, toolIDs)
+	results := cfg.store()
 	if s.Cache {
-		if data, err := os.ReadFile(stored); err == nil {
-			var earlier plan.Result
-			if json.Unmarshal(data, &earlier) == nil && earlier.Status == "passed" {
-				log(fmt.Sprintf("same image, command and inputs as a passing run on %s; not run again", earlier.Worker))
-				earlier.Name, earlier.Cached, earlier.Seconds = s.Name, true, 0
-				return earlier
-			}
+		if earlier, ok := results.Get(ctx, resultKey); ok {
+			log(fmt.Sprintf("same image, command and inputs as a passing run on %s; not run again", earlier.Worker))
+			earlier.Name, earlier.Cached, earlier.Seconds = s.Name, true, 0
+			return earlier
 		}
 	}
 
@@ -185,10 +195,9 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	result := plan.Result{Name: s.Name, Status: "passed", Seconds: seconds, Worker: cfg.Worker, Output: output.String()}
 	if s.Cache {
 		// Only passes are remembered. A failure is always worth running again.
-		if data, err := json.Marshal(result); err == nil {
-			if os.MkdirAll(filepath.Dir(stored), 0o755) == nil {
-				_ = os.WriteFile(stored, data, 0o644)
-			}
+		// Not being able to remember one is worth saying, but the step passed.
+		if err := results.Put(ctx, resultKey, result); err != nil {
+			log("warning: this result could not be stored, so the step will run again next time: " + err.Error())
 		}
 	}
 	return result
@@ -293,12 +302,15 @@ func (co *checkout) materialise(inputs []string) error {
 // key covers everything that decides a step's outcome, as far as starci can
 // know. The step's name is deliberately absent: renaming a step is not a
 // reason to run it again.
-func key(s plan.Step, image string, content string, tools [][]string) string {
+func key(s plan.Step, img image, content string, tools [][]string) string {
 	env := [][2]string{}
 	for _, k := range sortedKeys(s.Env) {
 		env = append(env, [2]string{k, s.Env[k]})
 	}
-	material, _ := json.Marshal([]any{keyVersion, image, s.Run, env, content, tools, s.Packages})
+	// The architecture is named separately from the image id. For an image
+	// built for several architectures, the id can be the same on all of them,
+	// and a pass on arm64 says nothing about amd64.
+	material, _ := json.Marshal([]any{keyVersion, img.id, img.arch, s.Run, env, content, tools, s.Packages})
 	sum := sha256.Sum256(material)
 	return hex.EncodeToString(sum[:])
 }

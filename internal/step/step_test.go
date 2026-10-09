@@ -2,10 +2,12 @@ package step
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"git.phin.tech/sam/starci/internal/plan"
@@ -350,5 +352,92 @@ func TestPackagesNeedApt(t *testing.T) {
 	got := run(t, cfg, r, sha, plan.Step{Name: "use", Image: testImage, Packages: []string{"jq"}, Run: "jq --version"})
 	if got.Status != "failed" || !strings.Contains(got.Detail, "has no apt-get") {
 		t.Fatalf("result = %+v, want a clear refusal on an image without apt", got)
+	}
+}
+
+// memStore is a shared store that lives in the test, standing in for one on
+// the network. It can be made to fail.
+type memStore struct {
+	mu      sync.Mutex
+	results map[string]plan.Result
+	gets    int
+	down    bool
+}
+
+func (m *memStore) Get(_ context.Context, key string) (plan.Result, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.gets++
+	if m.down {
+		return plan.Result{}, false
+	}
+	r, ok := m.results[key]
+	return r, ok
+}
+
+func (m *memStore) Put(_ context.Context, key string, r plan.Result) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.down {
+		return errors.New("the shared store is unreachable")
+	}
+	if m.results == nil {
+		m.results = map[string]plan.Result{}
+	}
+	m.results[key] = r
+	return nil
+}
+
+func TestAPassOnOneMachineIsReusedOnAnother(t *testing.T) {
+	needDocker(t)
+	r := newRepo(t)
+	sha := r.commit(map[string]string{"a.txt": "hello\n"})
+	shared := &memStore{}
+	one := Config{Worker: "one", StateDir: t.TempDir(), Shared: shared}
+	two := Config{Worker: "two", StateDir: t.TempDir(), Shared: shared}
+	s := plan.Step{Name: "read", Run: "cat a.txt", Cache: true}
+
+	if got := run(t, one, r, sha, s); got.Cached || got.Worker != "one" {
+		t.Fatalf("on the first machine = %+v, want a fresh run there", got)
+	}
+	got := run(t, two, r, sha, s)
+	if !got.Cached || got.Worker != "one" || got.Output != "hello\n" {
+		t.Errorf("on the second machine = %+v, want the first machine's pass, output included", got)
+	}
+
+	// Having fetched it once, the second machine does not ask again.
+	asked := shared.gets
+	run(t, two, r, sha, s)
+	if shared.gets != asked {
+		t.Errorf("the shared store was asked again for a result this machine already holds")
+	}
+
+	// A machine with no shared store knows nothing about it.
+	alone := Config{Worker: "three", StateDir: t.TempDir()}
+	if got := run(t, alone, r, sha, s); got.Cached {
+		t.Error("a machine without the shared store reused a result it could not have seen")
+	}
+}
+
+func TestAnUnreachableSharedStoreCostsOnlyARerun(t *testing.T) {
+	needDocker(t)
+	r := newRepo(t)
+	sha := r.commit(map[string]string{"a.txt": "a"})
+	shared := &memStore{down: true}
+	cfg := Config{Worker: "one", StateDir: t.TempDir(), Shared: shared}
+	s := plan.Step{Name: "read", Run: "cat a.txt", Cache: true}
+
+	var logged []string
+	got := Run(context.Background(), cfg, r.dir, sha, plan.Step{Name: s.Name, Image: testImage, Inputs: []string{"."}, Run: s.Run, Cache: true},
+		func(line string) { logged = append(logged, line) })
+	if got.Status != "passed" {
+		t.Fatalf("with the shared store down = %+v, want the step to run and pass", got)
+	}
+	if !strings.Contains(strings.Join(logged, "\n"), "could not be stored") {
+		t.Error("nothing said that the result could not be stored")
+	}
+	// It is still remembered on this machine.
+	if got := run(t, cfg, r, sha, s); !got.Cached {
+		t.Error("the result was not kept locally when the shared store was down")
 	}
 }

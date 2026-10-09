@@ -1,2 +1,3 @@
 /starci
 .env
+*.env

@@ -109,7 +109,8 @@ reach the Hatchet engine and the git server; nothing connects in to it.
 | `STARCI_WORKER_NAME` | Name recorded in results. Default: the hostname. |
 | `STARCI_SLOTS` | Steps to run at once. Default: 4. |
 | `STARCI_LABELS` | What the machine offers, as `gpu=true,arch=arm64`. |
-| `STARCI_STATE` | Where passing results are kept. Default: `~/.cache/starci`. |
+| `STARCI_STATE` | Where this machine keeps results and tools. Default: `~/.cache/starci`. |
+| `STARCI_STORE` | A result store shared with other machines. Optional. |
 
 ### Placing steps
 
@@ -286,7 +287,30 @@ the missing file rather than passing on a stale result.
 
 What the key cannot see is anything outside the inputs: the network, the date,
 a floating version resolved at run time. Give such a step `cache = False`.
-Only passes are stored, and for now each worker keeps its own results.
+Only passes are stored.
+
+### Sharing results between machines
+
+By default a machine knows only the results of steps it ran itself. Point
+several at one store and a step that passed on any of them is skipped on all:
+
+```sh
+export STARCI_STORE='s3://starci-results/v1?endpoint=<account>.r2.cloudflarestorage.com'
+export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+```
+
+Any S3-compatible bucket works; it has been run against Cloudflare R2. Each
+machine still keeps its own copy and asks the shared store only for what it
+does not have. The store is checked when a worker or a local run starts, so a
+wrong address or credential is an error then, not steps quietly running again.
+If it becomes unreachable later, steps run and their results are kept locally.
+
+Results are keyed on the architecture as well as the image, so a pass on an
+arm64 laptop is never taken as a pass on an amd64 server.
+
+**Whoever can write to the store can make every machine skip a step**, by
+storing a pass it never earned. Give its credentials only to machines you
+trust to run steps honestly.
 
 `caches = {"bun": "/root/.bun/install/cache"}` keeps a directory between runs
 on a worker. It makes a step that does run faster, and is not part of the key.
