@@ -1,10 +1,12 @@
 // Command starci plans and runs a repository's Starlark CI script.
 //
-//	starci plan    evaluate a script and print the plan; runs nothing
-//	starci run     plan a commit of a local checkout and execute it on Hatchet
-//	starci worker  execute steps on this machine
+//	starci plan     evaluate a script and print the plan; runs nothing
+//	starci run      plan a commit of a local checkout and execute it on Hatchet
+//	starci worker   execute steps on this machine
+//	starci workers  list the workers Hatchet knows, and what they offer
+//	starci shun     stop giving a worker new steps; unshun reverses it
 //
-// run and worker reach Hatchet through the usual HATCHET_CLIENT_* variables.
+// Everything but plan reaches Hatchet through the HATCHET_CLIENT_* variables.
 package main
 
 import (
@@ -16,6 +18,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -29,8 +32,11 @@ import (
 
 const usage = `usage:
   starci plan   [--file .ci.star] [--repo owner/name] [--sha SHA] [--ref REF] [--changed a,b,c]
-  starci run    CHECKOUT --clone-url URL [--sha SHA] [--file FILE] [--repo owner/name]
-  starci worker`
+  starci run    CHECKOUT --clone-url URL [--sha SHA] [--ref BRANCH] [--file FILE] [--repo owner/name]
+  starci worker
+  starci workers
+  starci shun WORKER
+  starci unshun WORKER`
 
 func main() {
 	if len(os.Args) < 2 {
@@ -44,6 +50,13 @@ func main() {
 		err = runCmd(os.Args[2:])
 	case "worker":
 		err = workerCmd()
+	case "workers":
+		err = workersCmd()
+	case "shun", "unshun":
+		if len(os.Args) != 3 {
+			die(usage)
+		}
+		err = shunCmd(os.Args[2], os.Args[1] == "shun")
 	default:
 		die(usage)
 	}
@@ -94,6 +107,7 @@ func runCmd(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	cloneURL := fs.String("clone-url", "", "URL workers fetch the commit from")
 	sha := fs.String("sha", "HEAD", "commit to build")
+	ref := fs.String("ref", "", "branch this run is for; a newer run for the same branch cancels it (default: the checked-out branch when building HEAD)")
 	file := fs.String("file", "", "CI script (default: .ci.star in the checkout)")
 	repo := fs.String("repo", "", "owner/name, for display (default: from the clone URL)")
 	// The checkout comes first on the command line, before the flags.
@@ -121,6 +135,9 @@ func runCmd(args []string) error {
 	if *file == "" {
 		*file = filepath.Join(dir, ".ci.star")
 	}
+	if *ref == "" && *sha == "HEAD" {
+		*ref, _ = git("symbolic-ref", "-q", "--short", "HEAD")
+	}
 	if *repo == "" {
 		parts := strings.Split(strings.TrimSuffix(*cloneURL, ".git"), "/")
 		if len(parts) >= 2 {
@@ -128,7 +145,7 @@ func runCmd(args []string) error {
 		}
 	}
 
-	p, err := evalFile(*file, plan.Context{Repo: *repo, SHA: commit, ChangedFiles: strings.Fields(changed)})
+	p, err := evalFile(*file, plan.Context{Repo: *repo, SHA: commit, Ref: *ref, ChangedFiles: strings.Fields(changed)})
 	if err != nil {
 		return err
 	}
@@ -151,9 +168,30 @@ func runCmd(args []string) error {
 	}
 	_, pipeline := executor.Tasks(client, executor.Config{})
 
+	// A step nobody can take waits in silence until Hatchet gives up on it.
+	// Say so now, while the cause is still obvious.
+	if workers, err := listWorkers(client); err == nil {
+		for _, s := range p.Steps {
+			if !anyCanTake(workers, s) {
+				fmt.Printf("warning: no connected worker can take step %q (needs %s); it will wait for one\n", s.Name, describePlacement(s))
+			}
+		}
+	}
+
+	// A run for a branch replaces the previous run for that branch. A run for
+	// a bare commit replaces nothing but a repeat of itself.
+	supersedes := p.Repo + "@" + commit
+	if *ref != "" {
+		supersedes = p.Repo + "@" + *ref
+	}
+
 	started := time.Now()
-	res, err := pipeline.Run(context.Background(), executor.PipelineInput{Plan: *p, CloneURL: *cloneURL})
+	res, err := pipeline.Run(context.Background(), executor.PipelineInput{Plan: *p, CloneURL: *cloneURL, Supersedes: supersedes})
 	if err != nil {
+		// A cancelled run comes back as an error with nothing in it.
+		if strings.TrimSpace(err.Error()) == "" || strings.Contains(strings.ToLower(err.Error()), "cancel") {
+			return fmt.Errorf("the run was cancelled (a newer run for %s replaces it)", supersedes)
+		}
 		return err
 	}
 	var result executor.PipelineResult
@@ -251,4 +289,151 @@ func workerCmd() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return worker.StartBlocking(ctx)
+}
+
+// workerInfo is the part of a Hatchet worker record that placement depends on.
+type workerInfo struct {
+	id, name, status string
+	labels           map[string]string
+}
+
+func listWorkers(client *hatchet.Client) ([]workerInfo, error) {
+	list, err := client.Workers().List(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	var out []workerInfo
+	if list.Rows == nil {
+		return out, nil
+	}
+	for _, w := range *list.Rows {
+		info := workerInfo{id: w.Metadata.Id, name: w.Name, labels: map[string]string{}}
+		if w.Status != nil {
+			info.status = string(*w.Status)
+		}
+		if w.Labels != nil {
+			for _, l := range *w.Labels {
+				if l.Value != nil {
+					info.labels[l.Key] = *l.Value
+				}
+			}
+		}
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out, nil
+}
+
+// anyCanTake reports whether some active worker satisfies the step's hard
+// rules. Preferences are ignored: they never stop a step from running.
+func anyCanTake(workers []workerInfo, s plan.Step) bool {
+	for _, w := range workers {
+		if w.status != "ACTIVE" {
+			continue
+		}
+		ok := true
+		for k, v := range s.Worker {
+			ok = ok && w.labels[k] == v
+		}
+		for k, v := range s.Avoid {
+			ok = ok && w.labels[k] != v
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
+func describePlacement(s plan.Step) string {
+	var parts []string
+	for _, k := range sortedKeys(s.Worker) {
+		parts = append(parts, k+"="+s.Worker[k])
+	}
+	for _, k := range sortedKeys(s.Avoid) {
+		parts = append(parts, "not "+k+"="+s.Avoid[k])
+	}
+	if len(parts) == 0 {
+		return "any worker"
+	}
+	return strings.Join(parts, ", ")
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func workersCmd() error {
+	client, err := hatchet.NewClient()
+	if err != nil {
+		return err
+	}
+	workers, err := listWorkers(client)
+	if err != nil {
+		return err
+	}
+	shown := 0
+	for _, w := range workers {
+		// Hatchet keeps a record of every worker that ever connected.
+		if w.status == "INACTIVE" {
+			continue
+		}
+		var labels []string
+		for _, k := range sortedKeys(w.labels) {
+			labels = append(labels, k+"="+w.labels[k])
+		}
+		state := "taking work"
+		if w.status == "PAUSED" {
+			state = "shunned"
+		}
+		fmt.Printf("%-24s %-12s %s\n", w.name, state, strings.Join(labels, " "))
+		shown++
+	}
+	if shown == 0 {
+		fmt.Println("no workers connected")
+	}
+	return nil
+}
+
+// shunCmd stops (or resumes) Hatchet assigning new work to a worker. Steps it
+// is already running finish; nothing new arrives. For a machine that is
+// misbehaving, or about to be taken down.
+func shunCmd(name string, shun bool) error {
+	client, err := hatchet.NewClient()
+	if err != nil {
+		return err
+	}
+	workers, err := listWorkers(client)
+	if err != nil {
+		return err
+	}
+	done := 0
+	for _, w := range workers {
+		if w.status == "INACTIVE" || (w.name != name && w.name != "starci-"+name) {
+			continue
+		}
+		if shun {
+			_, err = client.Workers().Pause(context.Background(), w.id)
+		} else {
+			_, err = client.Workers().Unpause(context.Background(), w.id)
+		}
+		if err != nil {
+			return err
+		}
+		done++
+	}
+	if done == 0 {
+		return fmt.Errorf("no connected worker is named %q", name)
+	}
+	if shun {
+		fmt.Printf("%s is shunned: it will finish what it has and get nothing new\n", name)
+	} else {
+		fmt.Printf("%s is taking work again\n", name)
+	}
+	return nil
 }

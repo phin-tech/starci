@@ -9,6 +9,7 @@ package executor
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -22,6 +23,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/hatchet-dev/hatchet/pkg/client/rest"
+	"github.com/hatchet-dev/hatchet/pkg/client/types"
 	hatchet "github.com/hatchet-dev/hatchet/sdks/go"
 
 	"git.phin.tech/sam/starci/internal/plan"
@@ -39,6 +43,11 @@ const (
 type PipelineInput struct {
 	Plan     plan.Plan `json:"plan"`
 	CloneURL string    `json:"clone_url"`
+	// Supersedes names what this run replaces: a new run with the same value
+	// cancels any still in progress. A branch, so that a push makes the run
+	// for the previous push pointless; or the commit, for a one-off run that
+	// should not disturb anything.
+	Supersedes string `json:"supersedes"`
 }
 
 type StepInput struct {
@@ -72,6 +81,12 @@ type Config struct {
 	StateDir string
 }
 
+var (
+	one              int32 = 1
+	cancelInProgress       = types.CancelInProgress
+	notEqual               = types.WorkerLabelComparator_NOT_EQUAL
+)
+
 // Tasks defines both tasks on the client. Register them on a worker to
 // execute plans, or use them from any process to trigger and await runs.
 func Tasks(client *hatchet.Client, cfg Config) (step, pipeline *hatchet.StandaloneTask) {
@@ -81,14 +96,19 @@ func Tasks(client *hatchet.Client, cfg Config) (step, pipeline *hatchet.Standalo
 	)
 	pipeline = client.NewStandaloneDurableTask(PipelineTask,
 		func(ctx hatchet.DurableContext, in PipelineInput) (PipelineResult, error) {
-			return runPipeline(ctx, step, in)
+			return runPipeline(ctx, client, step, in)
 		},
 		hatchet.WithExecutionTimeout(time.Hour),
+		hatchet.WithConcurrency(&hatchet.Concurrency{
+			Expression:    "input.supersedes",
+			MaxRuns:       &one,
+			LimitStrategy: &cancelInProgress,
+		}),
 	)
 	return step, pipeline
 }
 
-func runPipeline(ctx hatchet.DurableContext, step *hatchet.StandaloneTask, in PipelineInput) (PipelineResult, error) {
+func runPipeline(ctx hatchet.DurableContext, client *hatchet.Client, step *hatchet.StandaloneTask, in PipelineInput) (PipelineResult, error) {
 	if err := in.Plan.Validate(); err != nil {
 		return PipelineResult{}, hatchet.NewNonRetryableError(fmt.Errorf("invalid plan: %w", err))
 	}
@@ -113,8 +133,8 @@ func runPipeline(ctx hatchet.DurableContext, step *hatchet.StandaloneTask, in Pi
 				continue
 			}
 			opt := hatchet.RunManyOpt{Input: StepInput{CloneURL: in.CloneURL, SHA: in.Plan.SHA, Step: s}}
-			if len(s.Worker) > 0 {
-				opt.Opts = append(opt.Opts, hatchet.WithDesiredWorkerLabels(requiredLabels(s.Worker)))
+			if labels := placement(s); len(labels) > 0 {
+				opt.Opts = append(opt.Opts, hatchet.WithDesiredWorkerLabels(labels))
 			}
 			runnable = append(runnable, s)
 			inputs = append(inputs, opt)
@@ -127,8 +147,14 @@ func runPipeline(ctx hatchet.DurableContext, step *hatchet.StandaloneTask, in Pi
 		if err != nil {
 			return PipelineResult{}, fmt.Errorf("starting steps: %w", err)
 		}
+		settled := make(chan struct{})
+		go cancelWithParent(ctx, client, refs, settled)
 		for i, s := range runnable {
 			results[s.Name] = await(&refs[i], s.Name)
+		}
+		close(settled)
+		if ctx.Err() != nil {
+			return PipelineResult{}, hatchet.NewNonRetryableError(errors.New("cancelled"))
 		}
 	}
 
@@ -141,10 +167,39 @@ func runPipeline(ctx hatchet.DurableContext, step *hatchet.StandaloneTask, in Pi
 	return out, nil
 }
 
-func requiredLabels(want map[string]string) map[string]*hatchet.DesiredWorkerLabel {
+// cancelWithParent cancels the steps a pipeline started if the pipeline itself
+// is cancelled before they settle. Hatchet stops the pipeline but leaves its
+// children running, and a superseded run's steps are exactly the work that
+// should stop.
+func cancelWithParent(ctx hatchet.DurableContext, client *hatchet.Client, refs []hatchet.WorkflowRunRef, settled <-chan struct{}) {
+	select {
+	case <-settled:
+		return
+	case <-ctx.Done():
+	}
+	var ids []uuid.UUID
+	for _, ref := range refs {
+		if id, err := uuid.Parse(ref.RunId); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	// The pipeline's own context is finished; this needs one that is not.
+	bg, stop := context.WithTimeout(context.Background(), 15*time.Second)
+	defer stop()
+	_, _ = client.Runs().Cancel(bg, rest.V1CancelTaskRequest{ExternalIds: &ids})
+}
+
+// placement turns a step's worker, prefer and avoid into Hatchet's rules.
+func placement(s plan.Step) map[string]*hatchet.DesiredWorkerLabel {
 	labels := map[string]*hatchet.DesiredWorkerLabel{}
-	for k, v := range want {
+	for k, v := range s.Worker {
 		labels[k] = &hatchet.DesiredWorkerLabel{Value: v, Required: true}
+	}
+	for k, v := range s.Prefer {
+		labels[k] = &hatchet.DesiredWorkerLabel{Value: v, Weight: 10}
+	}
+	for k, v := range s.Avoid {
+		labels[k] = &hatchet.DesiredWorkerLabel{Value: v, Required: true, Comparator: &notEqual}
 	}
 	return labels
 }
@@ -224,7 +279,10 @@ func runStep(ctx hatchet.Context, cfg Config, in StepInput) (StepResult, error) 
 		return StepResult{}, fail("checkout failed: %v", err)
 	}
 
-	args := []string{"run", "--rm", "-v", co.workspace + ":/workspace", "-w", "/workspace"}
+	// Named, so that it can be removed if the run is cancelled: stopping the
+	// docker client alone leaves the container running.
+	container := "starci-" + filepath.Base(root)
+	args := []string{"run", "--rm", "--name", container, "-v", co.workspace + ":/workspace", "-w", "/workspace"}
 	for _, name := range sortedKeys(s.Caches) {
 		args = append(args, "-v", "starci-cache-"+name+":"+s.Caches[name])
 	}
@@ -258,6 +316,10 @@ func runStep(ctx hatchet.Context, cfg Config, in StepInput) (StepResult, error) 
 		ctx.Log(line)
 	}
 	runErr := cmd.Wait()
+	if ctx.Err() != nil {
+		_ = exec.Command("docker", "rm", "-f", container).Run()
+		return StepResult{}, fail("cancelled")
+	}
 
 	seconds := float64(time.Since(started).Round(100*time.Millisecond)) / float64(time.Second)
 	if runErr != nil {

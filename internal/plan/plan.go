@@ -59,6 +59,12 @@ type Step struct {
 	// Worker restricts the step to workers carrying these labels, for steps
 	// that need particular hardware. Empty means any worker.
 	Worker map[string]string `json:"worker"`
+	// Prefer names labels the step would like but can do without: a matching
+	// worker is chosen when one is free, any other when not.
+	Prefer map[string]string `json:"prefer"`
+	// Avoid keeps the step off workers carrying these labels, for work that
+	// must not run in a particular place.
+	Avoid map[string]string `json:"avoid"`
 }
 
 // Plan is the evaluated script: steps in the order the script returned them.
@@ -225,11 +231,12 @@ func (s *stepValue) Hash() (uint32, error) { return starlark.String(s.Name).Hash
 func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var name, image, run string
 	var needs, inputs *starlark.List
-	var env, caches, worker *starlark.Dict
+	var env, caches, worker, prefer, avoid *starlark.Dict
 	cache := true
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
 		"name", &name, "image", &image, "run", &run, "needs?", &needs, "env?", &env,
-		"inputs?", &inputs, "caches?", &caches, "cache?", &cache, "worker?", &worker); err != nil {
+		"inputs?", &inputs, "caches?", &caches, "cache?", &cache,
+		"worker?", &worker, "prefer?", &prefer, "avoid?", &avoid); err != nil {
 		return nil, err
 	}
 	if name == "" || image == "" || run == "" {
@@ -239,16 +246,30 @@ func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 	s := Step{
 		Name: name, Image: image, Run: run, Cache: cache,
 		Needs: []string{}, Env: map[string]string{}, Inputs: []string{"."}, Caches: map[string]string{},
-		Worker: map[string]string{},
+		Worker: map[string]string{}, Prefer: map[string]string{}, Avoid: map[string]string{},
 	}
-	if worker != nil {
-		for _, item := range worker.Items() {
+	// A label can be constrained one way per step: Hatchet takes a single
+	// rule per label, and "require gpu, avoid gpu" has no meaning anyway.
+	constrained := map[string]string{}
+	for _, c := range []struct {
+		arg  string
+		from *starlark.Dict
+		into map[string]string
+	}{{"worker", worker, s.Worker}, {"prefer", prefer, s.Prefer}, {"avoid", avoid, s.Avoid}} {
+		if c.from == nil {
+			continue
+		}
+		for _, item := range c.from.Items() {
 			k, kok := item[0].(starlark.String)
 			v, vok := item[1].(starlark.String)
 			if !kok || !vok || k == "" {
-				return nil, fmt.Errorf("step %q: worker labels must be non-empty strings mapped to strings", name)
+				return nil, fmt.Errorf("step %q: %s labels must be non-empty strings mapped to strings", name, c.arg)
 			}
-			s.Worker[string(k)] = string(v)
+			if other, taken := constrained[string(k)]; taken {
+				return nil, fmt.Errorf("step %q: label %q is in both %s and %s", name, string(k), other, c.arg)
+			}
+			constrained[string(k)] = c.arg
+			c.into[string(k)] = string(v)
 		}
 	}
 	if inputs != nil {

@@ -3,6 +3,7 @@ module git.phin.tech/sam/starci
 go 1.26.5
 
 require (
+	github.com/google/uuid v1.6.0
 	github.com/hatchet-dev/hatchet v0.107.0
 	go.starlark.net v0.0.0-20261005163335-bcb1a1a55bf9
 )
@@ -31,7 +32,6 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/google/cel-go v0.29.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.4 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect

@@ -270,3 +270,19 @@ def ci(ctx):
 		})
 	}
 }
+
+func TestWorkerPlacement(t *testing.T) {
+	p := mustEval(t, `
+def ci(ctx):
+    return [step("train", image = "i", run = "r",
+                 worker = {"gpu": "true"}, prefer = {"speed": "fast"}, avoid = {"network": "home"})]
+`)
+	s := p.Steps[0]
+	if s.Worker["gpu"] != "true" || s.Prefer["speed"] != "fast" || s.Avoid["network"] != "home" {
+		t.Errorf("placement = worker %v, prefer %v, avoid %v", s.Worker, s.Prefer, s.Avoid)
+	}
+	wantError(t, `
+def ci(ctx):
+    return [step("a", image = "i", run = "r", worker = {"gpu": "true"}, avoid = {"gpu": "true"})]
+`, `label "gpu" is in both worker and avoid`)
+}

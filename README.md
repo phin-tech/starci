@@ -38,6 +38,7 @@ Everything is one binary:
 | `starci plan` | Evaluate a script and print the plan as JSON. Runs nothing. |
 | `starci run` | Plan a commit of a local checkout and execute it on Hatchet. |
 | `starci worker` | Execute steps on this machine. |
+| `starci workers`, `shun`, `unshun` | See the workers, and take one out of rotation. |
 
 ## Trying it
 
@@ -84,14 +85,35 @@ reach the Hatchet engine and the git server; nothing connects in to it.
 | `STARCI_LABELS` | What the machine offers, as `gpu=true,arch=arm64`. |
 | `STARCI_STATE` | Where passing results are kept. Default: `~/.cache/starci`. |
 
-A step with `worker = {"gpu": "true"}` runs only on a worker carrying that
-label, and waits until one is available.
+### Placing steps
+
+| On a step | |
+|---|---|
+| `worker = {"gpu": "true"}` | Only on a worker with that label. Waits until one is free. |
+| `prefer = {"speed": "fast"}` | On such a worker when one is free, on any other when not. |
+| `avoid = {"network": "home"}` | Never on a worker with that label. |
+
+`starci run` warns before submitting when no connected worker can take a step.
+
+### Looking after workers
+
+```sh
+starci workers          # who is connected, and what they offer
+starci shun luigi       # finish what it has, take nothing new
+starci unshun luigi
+```
+
+### Superseded runs
+
+A run for a branch replaces the run before it: starting one cancels any still
+in progress for the same repository and branch, and stops their containers.
+Runs for different branches, or for a bare commit, leave each other alone.
 
 ## What a script can do
 
 | | |
 |---|---|
-| `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True, worker = {})` | Declare a container to run. Returns a handle usable in another step's `needs`. |
+| `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {})` | Declare a container to run. Returns a handle usable in another step's `needs`. |
 | `ctx.repo`, `ctx.sha`, `ctx.ref` | What is being built. |
 | `ctx.changed_files` | Files the commit changed, sorted. |
 | `ctx.changed_dirs` | Their top-level directories, sorted (`.` for files at the root). |
