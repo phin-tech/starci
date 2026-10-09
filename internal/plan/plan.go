@@ -56,6 +56,9 @@ type Step struct {
 	// Cache is false for a step that must run every time, because it depends
 	// on something outside its inputs (the network, the date).
 	Cache bool `json:"cache"`
+	// Worker restricts the step to workers carrying these labels, for steps
+	// that need particular hardware. Empty means any worker.
+	Worker map[string]string `json:"worker"`
 }
 
 // Plan is the evaluated script: steps in the order the script returned them.
@@ -64,6 +67,62 @@ type Plan struct {
 	SHA   string `json:"sha"`
 	Ref   string `json:"ref"`
 	Steps []Step `json:"steps"`
+}
+
+// Validate reports whether the plan can be executed. Eval only returns valid
+// plans; this is for a plan that arrived as JSON from somewhere else.
+func (p *Plan) Validate() error {
+	for _, s := range p.Steps {
+		if s.Name == "" || s.Image == "" || s.Run == "" {
+			return fmt.Errorf("step %q: name, image and run must not be empty", s.Name)
+		}
+		if len(s.Inputs) == 0 {
+			return fmt.Errorf("step %q: inputs must not be empty", s.Name)
+		}
+		for _, in := range s.Inputs {
+			if c := path.Clean(in); in == "" || path.IsAbs(c) || c == ".." || strings.HasPrefix(c, "../") {
+				return fmt.Errorf("step %q: input %q must be a path inside the repository", s.Name, in)
+			}
+		}
+		for name, dir := range s.Caches {
+			if !cacheName.MatchString(name) || !path.IsAbs(dir) {
+				return fmt.Errorf("step %q: cache %q -> %q is not a valid name and absolute path", s.Name, name, dir)
+			}
+		}
+	}
+	return validate(p.Steps)
+}
+
+// Layers groups the steps so that each layer depends only on earlier ones.
+// Within a layer, steps keep the order the script returned them, so an
+// executor that starts them in this order starts them identically every time.
+func (p *Plan) Layers() [][]Step {
+	done := map[string]bool{}
+	remaining := append([]Step(nil), p.Steps...)
+	var layers [][]Step
+	for len(remaining) > 0 {
+		var ready, rest []Step
+		for _, s := range remaining {
+			ok := true
+			for _, n := range s.Needs {
+				ok = ok && done[n]
+			}
+			if ok {
+				ready = append(ready, s)
+			} else {
+				rest = append(rest, s)
+			}
+		}
+		if len(ready) == 0 {
+			break // a cycle; Validate reports it
+		}
+		for _, s := range ready {
+			done[s.Name] = true
+		}
+		layers = append(layers, ready)
+		remaining = rest
+	}
+	return layers
 }
 
 // Eval runs the script in src and returns its plan. filename is used only in
@@ -166,11 +225,11 @@ func (s *stepValue) Hash() (uint32, error) { return starlark.String(s.Name).Hash
 func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var name, image, run string
 	var needs, inputs *starlark.List
-	var env, caches *starlark.Dict
+	var env, caches, worker *starlark.Dict
 	cache := true
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
 		"name", &name, "image", &image, "run", &run, "needs?", &needs, "env?", &env,
-		"inputs?", &inputs, "caches?", &caches, "cache?", &cache); err != nil {
+		"inputs?", &inputs, "caches?", &caches, "cache?", &cache, "worker?", &worker); err != nil {
 		return nil, err
 	}
 	if name == "" || image == "" || run == "" {
@@ -180,6 +239,17 @@ func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 	s := Step{
 		Name: name, Image: image, Run: run, Cache: cache,
 		Needs: []string{}, Env: map[string]string{}, Inputs: []string{"."}, Caches: map[string]string{},
+		Worker: map[string]string{},
+	}
+	if worker != nil {
+		for _, item := range worker.Items() {
+			k, kok := item[0].(starlark.String)
+			v, vok := item[1].(starlark.String)
+			if !kok || !vok || k == "" {
+				return nil, fmt.Errorf("step %q: worker labels must be non-empty strings mapped to strings", name)
+			}
+			s.Worker[string(k)] = string(v)
+		}
 	}
 	if inputs != nil {
 		paths, err := inputPaths(name, inputs)

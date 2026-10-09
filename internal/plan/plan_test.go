@@ -216,3 +216,57 @@ func TestInvalidInputsAndCaches(t *testing.T) {
 		})
 	}
 }
+
+func TestLayers(t *testing.T) {
+	p := mustEval(t, `
+def ci(ctx):
+    a = step("a", image = "i", run = "r")
+    b = step("b", image = "i", run = "r", needs = [a])
+    c = step("c", image = "i", run = "r")
+    d = step("d", image = "i", run = "r", needs = [b, c])
+    return [d, c, b, a]
+`)
+	var got []string
+	for _, layer := range p.Layers() {
+		var names []string
+		for _, s := range layer {
+			names = append(names, s.Name)
+		}
+		got = append(got, strings.Join(names, ","))
+	}
+	if want := "c,a | b | d"; strings.Join(got, " | ") != want {
+		t.Errorf("layers = %s, want %s", strings.Join(got, " | "), want)
+	}
+}
+
+func TestValidateRejectsWhatEvalWould(t *testing.T) {
+	good := mustEval(t, `
+def ci(ctx):
+    return [step("a", image = "i", run = "r")]
+`)
+	if err := good.Validate(); err != nil {
+		t.Fatalf("a plan from Eval should validate: %v", err)
+	}
+	bad := []struct {
+		name string
+		edit func(*Step)
+		want string
+	}{
+		{"input outside the repository", func(s *Step) { s.Inputs = []string{"../x"} }, "inside the repository"},
+		{"no inputs", func(s *Step) { s.Inputs = nil }, "inputs must not be empty"},
+		{"relative cache path", func(s *Step) { s.Caches = map[string]string{"c": "rel"} }, "not a valid name"},
+		{"unknown need", func(s *Step) { s.Needs = []string{"zz"} }, `needs "zz"`},
+		{"no command", func(s *Step) { s.Run = "" }, "must not be empty"},
+	}
+	for _, c := range bad {
+		t.Run(c.name, func(t *testing.T) {
+			p := *good
+			p.Steps = append([]Step(nil), good.Steps...)
+			c.edit(&p.Steps[0])
+			err := p.Validate()
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("Validate() = %v, want an error containing %q", err, c.want)
+			}
+		})
+	}
+}

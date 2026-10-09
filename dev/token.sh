@@ -1,6 +1,6 @@
 #!/bin/sh
 # Prints an env file with worker credentials for the dev Hatchet stack.
-#   dev/token.sh > executor/.env
+#   dev/token.sh > dev/.env
 set -eu
 cd "$(dirname "$0")"
 token=$(docker compose -p starci-dev exec -T hatchet ./hatchet-admin token create \

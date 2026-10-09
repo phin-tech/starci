@@ -2,7 +2,7 @@
 # runs on luigi. Nothing here is shared with any real instance.
 #
 #   docker compose -f dev/docker-compose.yml up -d
-#   dev/token.sh > executor/.env        # worker credentials for this stack
+#   dev/token.sh > dev/.env             # worker credentials for this stack
 #
 # Dashboard: http://localhost:18888  (admin@example.com / Admin123!!)
 services:

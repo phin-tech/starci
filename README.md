@@ -17,31 +17,81 @@ def ci(ctx):
 
 ## Status
 
-Experimental. A plan can be computed and executed against a local Hatchet;
-nothing is deployed and nothing triggers it automatically.
+Experimental. Plans are computed and executed against a local Hatchet; nothing
+is deployed and nothing triggers a run automatically.
 
-- [x] **Planner** (Go, `cmd/starci`) — evaluate `.ci.star` into a JSON plan.
-- [x] **Executor** (Python, `executor/`) — validate the plan with Pydantic and
-      run its steps as Hatchet tasks, in dependency order, each in a container
-      against a fresh checkout of the commit.
+- [x] **Planner** — evaluate `.ci.star` into a plan.
+- [x] **Executor** — run a plan's steps as Hatchet tasks, in dependency order,
+      each in a container that sees only the step's inputs.
+- [x] **Skipping** — reuse an earlier pass when a step's image, command and
+      input contents are unchanged.
 - [ ] **Deploy** — workers on real machines, with their own Hatchet tenant.
 - [ ] **Trigger and report** — start a run from a Forgejo push webhook and post
       the result as a commit status.
 - [ ] **Scripts as workflows** — let a script wait on a step's result and
       branch or loop on it, instead of returning a fixed plan up front.
 
-## Using the planner
+Everything is one binary:
+
+| | |
+|---|---|
+| `starci plan` | Evaluate a script and print the plan as JSON. Runs nothing. |
+| `starci run` | Plan a commit of a local checkout and execute it on Hatchet. |
+| `starci worker` | Execute steps on this machine. |
+
+## Trying it
+
+Needs Go, Docker and git.
 
 ```sh
-go run ./cmd/starci plan --file examples/pi-gamebook.ci.star \
-  --repo sam/pi-gamebook --sha e8da515 --changed src/combat.ts,README.md
+go build -o starci ./cmd/starci
+
+docker compose -f dev/docker-compose.yml -p starci-dev up -d   # throwaway Hatchet
+dev/token.sh > dev/.env                                        # credentials for it
+set -a; . dev/.env; set +a
+
+./starci worker &
+./starci run ~/src/pi-gamebook \
+  --clone-url https://git.phin.tech/sam/pi-gamebook.git \
+  --file examples/pi-gamebook.ci.star
 ```
+
+`run` prints the plan's layers, waits, and reports each step:
+
+```
+sam/pi-gamebook @ e8da515a: 2 step(s)
+  check  |  test
+
+  passed   check  4.7s on mac
+  passed   test  2.9s on mac
+
+PASSED in 5.1s
+```
+
+The dashboard at http://localhost:18888 (admin@example.com / Admin123!!) shows
+each run as a `ci-pipeline` parent with one `ci-step` child per step.
+
+## Workers
+
+A worker is the binary plus Docker, git, and a Hatchet token. It needs to
+reach the Hatchet engine and the git server; nothing connects in to it.
+
+| Variable | |
+|---|---|
+| `HATCHET_CLIENT_TOKEN` | Credentials for the Hatchet tenant. |
+| `STARCI_WORKER_NAME` | Name recorded in results. Default: the hostname. |
+| `STARCI_SLOTS` | Steps to run at once. Default: 4. |
+| `STARCI_LABELS` | What the machine offers, as `gpu=true,arch=arm64`. |
+| `STARCI_STATE` | Where passing results are kept. Default: `~/.cache/starci`. |
+
+A step with `worker = {"gpu": "true"}` runs only on a worker carrying that
+label, and waits until one is available.
 
 ## What a script can do
 
 | | |
 |---|---|
-| `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True)` | Declare a container to run. Returns a handle usable in another step's `needs`. |
+| `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True, worker = {})` | Declare a container to run. Returns a handle usable in another step's `needs`. |
 | `ctx.repo`, `ctx.sha`, `ctx.ref` | What is being built. |
 | `ctx.changed_files` | Files the commit changed, sorted. |
 | `ctx.changed_dirs` | Their top-level directories, sorted (`.` for files at the root). |
@@ -50,39 +100,6 @@ Nothing else. A script cannot read files, reach the network, read the clock or
 `load()` another file, and it is stopped if it runs too long. The same script
 and inputs always give the same plan, so a plan can be computed in one place
 and executed in another, and a script from any repository is safe to evaluate.
-
-## Running a plan locally
-
-Needs Docker, Go and uv.
-
-```sh
-docker compose -f dev/docker-compose.yml -p starci-dev up -d   # throwaway Hatchet
-dev/token.sh > executor/.env                                   # worker credentials
-
-cd executor
-uv run python -m starci_executor.worker &                      # a worker on this machine
-uv run python -m starci_executor.trigger ~/src/pi-gamebook \
-  --clone-url https://git.phin.tech/sam/pi-gamebook.git \
-  --file ../examples/pi-gamebook.ci.star
-```
-
-The trigger prints the plan's layers, waits, and reports each step:
-
-```
-sam/pi-gamebook @ e8da515a: 2 step(s)
-  check  |  test
-
-  passed   check  4.0s on mac
-  passed   test  2.1s on mac
-
-PASSED in 5.1s
-```
-
-Two Hatchet tasks do the work (`executor/starci_executor/worker.py`):
-`ci-step` runs one container, and `ci-pipeline` walks the plan one layer at a
-time, starting a `ci-step` child for each step whose dependencies passed and
-marking the rest skipped. The dashboard at http://localhost:18888 shows the
-run as a parent with one child per step.
 
 ## Inputs and skipped steps
 
