@@ -32,6 +32,10 @@ type Options struct {
 	Slots int
 	// Labels are what this machine offers to steps that ask.
 	Labels map[string]string
+	// Dashboard is the address of Hatchet's dashboard, as a person reaches
+	// it. With it, the status a run posts links to the run's page there,
+	// which has each step's output and how long it took.
+	Dashboard string
 }
 
 // Engine is Hatchet, as starci uses it. It does everything an engine may:
@@ -59,7 +63,7 @@ func New(o Options) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Engine{client: client, tasks: NewTasks(client, o.Machine, o.Post, o.Reception), opts: o}, nil
+	return &Engine{client: client, tasks: NewTasks(client, o.Machine, o.Post, o.Reception, o.Dashboard), opts: o}, nil
 }
 
 func (e *Engine) Name() string { return "hatchet" }

@@ -360,6 +360,32 @@ func Supersedes(c plan.Context) string {
 	return c.Repo + "@" + c.SHA
 }
 
+// Timed adds to a finished run's status how long the run took and how many
+// of its steps were answered from an earlier pass rather than run. A status
+// is one line on a commit; this is what makes "passed" worth a second look.
+func Timed(s forge.Status, results []plan.Result, elapsed time.Duration) forge.Status {
+	reused := 0
+	for _, r := range results {
+		if r.Cached {
+			reused++
+		}
+	}
+	s.Description += " in " + spell(elapsed)
+	if reused > 0 {
+		s.Description += fmt.Sprintf(", %d reused", reused)
+	}
+	return s
+}
+
+// spell writes a duration the way a person would say it.
+func spell(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
+	d = d.Round(time.Second)
+	return fmt.Sprintf("%dm %02ds", int(d.Minutes()), int(d.Seconds())%60)
+}
+
 // Outcome is the status to post for a finished run.
 func Outcome(results []plan.Result, runErr string) forge.Status {
 	passed, failed, skipped := 0, []string{}, 0

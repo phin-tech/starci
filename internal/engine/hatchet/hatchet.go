@@ -147,7 +147,14 @@ var superseded = forge.Status{State: "error", Description: "superseded by a newe
 // NewTasks defines the tasks on the client. Register them on a worker to
 // execute runs, or use them from any process to trigger and await runs. cfg,
 // post and reception matter only to a worker; reception may be nil.
-func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Reception) Tasks {
+func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Reception, dashboard string) Tasks {
+	// Every status a run posts links to the run, when there is a page to link to.
+	report := func(ctx sdk.DurableContext, post Reporter, to *trigger.Report, s forge.Status) {
+		if dashboard != "" && s.URL == "" {
+			s.URL = strings.TrimRight(dashboard, "/") + "/tenants/" + ctx.TenantId() + "/runs/" + ctx.WorkflowRunId()
+		}
+		report(ctx, post, to, s)
+	}
 	// A newer run for the same branch makes the one before it pointless.
 	// And of runs that are exclusive with one another, the one in progress
 	// stays and a newer one is turned away.
@@ -180,6 +187,7 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 
 	pipeline := client.NewStandaloneDurableTask(PipelineTask,
 		func(ctx sdk.DurableContext, in PipelineInput) (RunResult, error) {
+			began := time.Now()
 			results, err := plan.RunPlan(&in.Plan, children(ctx, client, stepTask, in.CloneURL, in.Plan.SHA))
 			if ctx.Err() != nil {
 				report(ctx, post, in.Report, superseded)
@@ -189,7 +197,7 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 				report(ctx, post, in.Report, forge.Status{State: "error", Description: err.Error()})
 				return RunResult{}, sdk.NewNonRetryableError(err)
 			}
-			report(ctx, post, in.Report, trigger.Outcome(results, ""))
+			report(ctx, post, in.Report, trigger.Timed(trigger.Outcome(results, ""), results, time.Since(began)))
 			return RunResult{OK: plan.Passed(results), Steps: results}, nil
 		},
 		sdk.WithExecutionTimeout(time.Hour),
@@ -204,6 +212,7 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 	// answers, which a Starlark script cannot fail to do.
 	script := client.NewStandaloneDurableTask(ScriptTask,
 		func(ctx sdk.DurableContext, in ScriptInput) (RunResult, error) {
+			began := time.Now()
 			runner := children(ctx, client, stepTask, in.CloneURL, in.Context.SHA)
 			results, err := plan.RunPipeline(ctx, in.Filename, []byte(in.Source), in.Context, runner)
 			if ctx.Err() != nil {
@@ -214,7 +223,7 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 			if err != nil {
 				out.Error = err.Error()
 			}
-			report(ctx, post, in.Report, trigger.Outcome(results, out.Error))
+			report(ctx, post, in.Report, trigger.Timed(trigger.Outcome(results, out.Error), results, time.Since(began)))
 			return out, nil
 		},
 		sdk.WithExecutionTimeout(time.Hour),

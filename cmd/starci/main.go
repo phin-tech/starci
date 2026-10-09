@@ -367,6 +367,7 @@ func localEngine(slots int, verbose bool) (engine.Engine, error) {
 //	STARCI_STORE        a result store shared with other machines (see machineConfig)
 //	STARCI_SLOTS        steps to run at once (default: 4)
 //	STARCI_LABELS       what this machine offers, as k=v,k=v (e.g. gpu=true)
+//	STARCI_DASHBOARD    Hatchet's dashboard, as a person reaches it; statuses then link to the run
 func workerCmd() error {
 	name := os.Getenv("STARCI_WORKER_NAME")
 	if name == "" {
@@ -409,7 +410,7 @@ func workerCmd() error {
 		}
 	}
 
-	eng, err := onhatchet.New(onhatchet.Options{Machine: cfg, Post: reporter(forges), Reception: reception, Slots: slots, Labels: labels})
+	eng, err := onhatchet.New(onhatchet.Options{Machine: cfg, Post: reporter(forges), Reception: reception, Slots: slots, Labels: labels, Dashboard: os.Getenv("STARCI_DASHBOARD")})
 	if err != nil {
 		return err
 	}
