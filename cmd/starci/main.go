@@ -652,6 +652,7 @@ func shunCmd(name string, shun bool) error {
 //	STARCI_FORGEJO_TOKEN_FILE   file holding an access token for it
 //	STARCI_FORGEJO_SECRET_FILE  file holding its webhook secret (serve only)
 //	STARCI_GITHUB_TOKEN_FILE    file holding a GitHub token
+//	STARCI_GITHUB_API           the API's address, for GitHub Enterprise
 //	STARCI_GITHUB_SECRET_FILE   file holding its webhook secret (serve only)
 //
 // Secrets are named by file, not given by value, so that they are never in a
@@ -686,7 +687,8 @@ func forgesFromEnv() (forges map[string]forge.Forge, secrets map[string][]byte, 
 		return nil, nil, err
 	}
 	if token != "" {
-		forges["github"] = forge.GitHub{Token: token}
+		// The API's address, for GitHub Enterprise; github.com when unset.
+		forges["github"] = forge.GitHub{Token: token, API: os.Getenv("STARCI_GITHUB_API")}
 		secret, err := read("STARCI_GITHUB_SECRET_FILE")
 		if err != nil {
 			return nil, nil, err

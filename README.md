@@ -129,6 +129,7 @@ webhook secret:
 | `STARCI_FORGEJO_TOKEN_FILE` | File holding an access token: read repositories, write commit statuses. |
 | `STARCI_FORGEJO_SECRET_FILE` | File holding the webhook secret. |
 | `STARCI_GITHUB_TOKEN_FILE`, `STARCI_GITHUB_SECRET_FILE` | The same, for GitHub. |
+| `STARCI_GITHUB_API` | The API's address, for GitHub Enterprise. Default: github.com. |
 | `STARCI_ALLOW_FORK_PULL_REQUESTS` | `true` to run pull requests from forks. Off by default. |
 
 With the token, a worker also fetches from private repositories; it is handed
