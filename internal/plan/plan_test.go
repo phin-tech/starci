@@ -286,3 +286,13 @@ def ci(ctx):
     return [step("a", image = "i", run = "r", worker = {"gpu": "true"}, avoid = {"gpu": "true"})]
 `, `label "gpu" is in both worker and avoid`)
 }
+
+func TestInputPatternsAreKeptAsWritten(t *testing.T) {
+	p := mustEval(t, `
+def ci(ctx):
+    return [step("a", image = "i", run = "r", inputs = ["src/**/*.py", "tests/test_*.py", "pyproject.toml"])]
+`)
+	if got, want := strings.Join(p.Steps[0].Inputs, " "), "pyproject.toml src/**/*.py tests/test_*.py"; got != want {
+		t.Errorf("inputs = %s, want %s", got, want)
+	}
+}

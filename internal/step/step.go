@@ -30,6 +30,10 @@ const (
 	tailLines = 40
 	// How much of a step's output is kept in its result, for a script to read.
 	outputLimit = 64 * 1024
+	// keyVersion is part of every result key. Raise it whenever what goes
+	// into a key changes meaning, so that results stored under the old
+	// meaning are never mistaken for results under the new one.
+	keyVersion = 2
 )
 
 // Config is what Run needs to know about the machine it is on.
@@ -72,7 +76,7 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	if err != nil {
 		return failed("fetch of %s failed: %v", sha, err)
 	}
-	content, err := co.contentIDs(s.Inputs)
+	content, err := co.contentID(s.Inputs)
 	if err != nil {
 		return failed("%v", err)
 	}
@@ -186,6 +190,11 @@ func fetch(cloneURL, sha, root string) (*checkout, error) {
 	if _, err := co.git("fetch", "-q", "--depth", "1", cloneURL, sha); err != nil {
 		return nil, err
 	}
+	// Load the commit into the index, which is what lets git's full pathspec
+	// matching be asked about it before any file is written out.
+	if _, err := co.git("read-tree", "FETCH_HEAD"); err != nil {
+		return nil, err
+	}
 	return co, nil
 }
 
@@ -198,27 +207,59 @@ func (co *checkout) git(args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// contentIDs returns git's own hash of each input: a blob id for a file, a
-// tree id for a directory. Two commits with identical content under a path
-// share it.
-func (co *checkout) contentIDs(paths []string) ([][2]string, error) {
-	var ids [][2]string
-	for _, p := range paths {
-		spec := "FETCH_HEAD:" + p
-		if p == "." {
-			spec = "FETCH_HEAD^{tree}"
-		}
-		id, err := co.git("rev-parse", "--verify", "-q", spec)
-		if err != nil {
-			return nil, fmt.Errorf("input %q does not exist in this commit", p)
-		}
-		ids = append(ids, [2]string{p, id})
+// pathspec turns an input into the git pathspec that selects it. An input
+// with wildcards is a pattern in git's glob syntax, where * stays within a
+// directory and ** crosses them; anything else is a literal path, which as a
+// directory means everything beneath it.
+func pathspec(input string) string {
+	if input == "." {
+		return ":(top)"
 	}
-	return ids, nil
+	if strings.ContainsAny(input, "*?[") {
+		return ":(top,glob)" + input
+	}
+	return ":(top,literal)" + input
 }
 
-func (co *checkout) materialise(paths []string) error {
-	_, err := co.git(append([]string{"checkout", "-q", "FETCH_HEAD", "--"}, paths...)...)
+// contentID identifies exactly the files the inputs select in this commit: a
+// hash over each one's path, mode and blob id.
+//
+// Git does the matching here and in materialise, from the same pathspecs, so
+// the set a result is keyed on and the set a step is given cannot disagree.
+// A new file that matches a pattern changes the id; one that does not, does
+// not.
+func (co *checkout) contentID(inputs []string) (string, error) {
+	// Each input is checked on its own first: one that selects nothing is a
+	// mistake in the script, and would otherwise vanish into the union.
+	for _, in := range inputs {
+		out, err := co.git("ls-files", "--", pathspec(in))
+		if err != nil {
+			return "", fmt.Errorf("input %q: %v", in, err)
+		}
+		if out == "" {
+			return "", fmt.Errorf("input %q matches nothing in this commit", in)
+		}
+	}
+	specs := make([]string, len(inputs))
+	for i, in := range inputs {
+		specs[i] = pathspec(in)
+	}
+	// One line per selected file, with its mode and blob id, in a stable
+	// order, each file once however many inputs select it.
+	listing, err := co.git(append([]string{"ls-files", "-s", "--"}, specs...)...)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(listing))
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func (co *checkout) materialise(inputs []string) error {
+	args := []string{"checkout", "-q", "FETCH_HEAD", "--"}
+	for _, in := range inputs {
+		args = append(args, pathspec(in))
+	}
+	_, err := co.git(args...)
 	return err
 }
 
@@ -241,12 +282,12 @@ func imageID(image string) (string, error) {
 // key covers everything that decides a step's outcome, as far as starci can
 // know. The step's name is deliberately absent: renaming a step is not a
 // reason to run it again.
-func key(s plan.Step, image string, content [][2]string) string {
+func key(s plan.Step, image string, content string) string {
 	env := [][2]string{}
 	for _, k := range sortedKeys(s.Env) {
 		env = append(env, [2]string{k, s.Env[k]})
 	}
-	material, _ := json.Marshal([]any{image, s.Run, env, content})
+	material, _ := json.Marshal([]any{keyVersion, image, s.Run, env, content})
 	sum := sha256.Sum256(material)
 	return hex.EncodeToString(sum[:])
 }

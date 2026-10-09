@@ -181,7 +181,8 @@ func TestStepsThatCannotStartFailClearly(t *testing.T) {
 		step plan.Step
 		want string
 	}{
-		{"missing input", sha, plan.Step{Name: "s", Inputs: []string{"nope"}, Run: "true"}, `input "nope" does not exist in this commit`},
+		{"missing input", sha, plan.Step{Name: "s", Inputs: []string{"nope"}, Run: "true"}, `input "nope" matches nothing in this commit`},
+		{"pattern matching nothing", sha, plan.Step{Name: "s", Inputs: []string{"**/*.py"}, Run: "true"}, `input "**/*.py" matches nothing in this commit`},
 		{"unknown commit", strings.Repeat("0", 40), plan.Step{Name: "s", Run: "true"}, "fetch of"},
 		{"unknown image", sha, plan.Step{Name: "s", Image: "starci.invalid/no-such-image:1", Run: "true"}, "cannot pull image"},
 	}
@@ -239,5 +240,66 @@ func TestCancelStopsTheContainer(t *testing.T) {
 	out, _ := exec.Command("docker", "ps", "-q", "--filter", "name=starci-starci").Output()
 	if strings.TrimSpace(string(out)) != "" {
 		t.Errorf("a step container is still running after cancel: %s", out)
+	}
+}
+
+func TestInputPatterns(t *testing.T) {
+	needDocker(t)
+	r := newRepo(t)
+	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	s := plan.Step{
+		Name:   "list",
+		Inputs: []string{"src/**/*.py", "tests/test_*.py", "pyproject.toml"},
+		Run:    "find . -type f | sort",
+		Cache:  true,
+	}
+
+	first := r.commit(map[string]string{
+		"src/app.py":          "a",
+		"src/pkg/deep/mod.py": "b",
+		"src/pkg/data.json":   "{}",
+		"src/notes.md":        "n",
+		"tests/test_app.py":   "t",
+		"tests/helpers.py":    "h",
+		"pyproject.toml":      "p",
+		"README.md":           "r",
+	})
+	got := run(t, cfg, r, first, s)
+	if got.Status != "passed" {
+		t.Fatalf("status = %s, detail: %s", got.Status, got.Detail)
+	}
+	want := "./pyproject.toml\n./src/app.py\n./src/pkg/deep/mod.py\n./tests/test_app.py\n"
+	if got.Output != want {
+		t.Errorf("the step saw:\n%swant:\n%s", got.Output, want)
+	}
+
+	// A new file no pattern matches leaves the result standing.
+	unmatched := r.commit(map[string]string{"src/pkg/more.json": "{}", "docs/guide.md": "g", "tests/conftest.py": "c"})
+	if got := run(t, cfg, r, unmatched, s); !got.Cached {
+		t.Errorf("after adding files no pattern matches = %+v, want the earlier pass reused", got)
+	}
+
+	// A new file a pattern does match is a new input, with no change to the script.
+	matched := r.commit(map[string]string{"src/pkg/new.py": "n"})
+	got = run(t, cfg, r, matched, s)
+	if got.Cached || !strings.Contains(got.Output, "./src/pkg/new.py") {
+		t.Errorf("after adding a matching file = %+v, want a fresh run that sees it", got)
+	}
+
+	// So is an edit to a matched file, and a deletion.
+	edited := r.commit(map[string]string{"src/pkg/deep/mod.py": "changed"})
+	if got := run(t, cfg, r, edited, s); got.Cached {
+		t.Error("an edit to a matched file reused the earlier pass")
+	}
+}
+
+func TestPatternStarStaysInOneDirectory(t *testing.T) {
+	needDocker(t)
+	r := newRepo(t)
+	sha := r.commit(map[string]string{"src/top.py": "a", "src/sub/inner.py": "b"})
+	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	got := run(t, cfg, r, sha, plan.Step{Name: "list", Inputs: []string{"src/*.py"}, Run: "find . -type f | sort"})
+	if strings.TrimSpace(got.Output) != "./src/top.py" {
+		t.Errorf("src/*.py gave the step:\n%s\nwant only ./src/top.py", got.Output)
 	}
 }

@@ -198,12 +198,25 @@ commit; an advanced script's depends on what its steps return.
 
 ## Inputs and skipped steps
 
-A step sees only its `inputs` — repository paths, by default the whole
-repository. Nothing else is mounted, not even `.git`.
+A step sees only its `inputs`, by default the whole repository. Nothing else
+is mounted, not even `.git`. An input is a file, a directory (everything
+beneath it), or a pattern:
+
+```python
+BASE = ["src/**/*.py", "pyproject.toml", "uv.lock"]
+
+step("unit", ..., inputs = BASE + ["tests/test_runs.py", "tests/conftest.py"])
+step("gpu",  ..., inputs = BASE + ["tests/test_gpu.py"], worker = {"gpu": "true"})
+```
+
+In a pattern, `*` stays within one directory and `**` crosses them. Patterns
+are matched against the commit when the step runs, so a new file that matches
+becomes an input with no change to the script, and one that does not match is
+never seen. An input that matches nothing is an error.
 
 That boundary is what makes skipping safe. A step's result is stored under a
-key made of its image's content id, its command, its `env`, and git's hash of
-each input. When a later run produces the same key, the earlier pass stands in
+key made of its image's content id, its command, its `env`, and the path and
+content of every file its inputs select. When a later run produces the same key, the earlier pass stands in
 and the step is not run:
 
 ```
