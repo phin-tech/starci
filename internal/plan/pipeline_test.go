@@ -279,3 +279,37 @@ func TestEvalExplainsAnAdvancedScript(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestRunPlanSkipsWhatDependsOnAFailure(t *testing.T) {
+	p := mustEval(t, `
+def ci(ctx):
+    ok = step("ok", image = "i", run = "r")
+    bad = step("bad", image = "i", run = "r")
+    return [
+        ok,
+        bad,
+        step("after-ok", image = "i", run = "r", needs = [ok]),
+        step("after-bad", image = "i", run = "r", needs = [bad]),
+        step("after-both", image = "i", run = "r", needs = ["after-ok", "after-bad"]),
+    ]
+`)
+	r := &fakeRunner{outcomes: map[string][]Result{"bad": {{Status: "failed"}}}}
+	results, err := RunPlan(p, r)
+	if err != nil {
+		t.Fatalf("RunPlan: %v", err)
+	}
+	if got, want := r.trace(), "ok+bad > after-ok"; got != want {
+		t.Errorf("ran %s, want %s", got, want)
+	}
+	var got []string
+	for _, res := range results {
+		got = append(got, res.Name+"="+res.Status)
+	}
+	want := "ok=passed bad=failed after-ok=passed after-bad=skipped after-both=skipped"
+	if strings.Join(got, " ") != want {
+		t.Errorf("results = %s, want %s", strings.Join(got, " "), want)
+	}
+	if Passed(results) {
+		t.Error("Passed() = true for a plan with a failed step")
+	}
+}

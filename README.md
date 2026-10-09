@@ -17,8 +17,8 @@ def ci(ctx):
 
 ## Status
 
-Experimental. Plans are computed and executed against a local Hatchet; nothing
-is deployed and nothing triggers a run automatically.
+Experimental. Runs execute on this machine or against a throwaway Hatchet;
+nothing is deployed and nothing triggers a run automatically.
 
 - [x] **Planner** — evaluate `.ci.star` into a plan.
 - [x] **Executor** — run a plan's steps as Hatchet tasks, in dependency order,
@@ -35,9 +35,10 @@ Everything is one binary:
 
 | | |
 |---|---|
-| `starci plan` | Evaluate a script and print the plan as JSON. Runs nothing. |
-| `starci run` | Plan a commit of a local checkout and execute it on Hatchet. |
-| `starci worker` | Execute steps on this machine. |
+| `starci plan` | Evaluate a basic script and print the plan as JSON. Runs nothing. |
+| `starci run --local` | Execute a commit on this machine, with nothing but Docker. |
+| `starci run` | Execute a commit on Hatchet's workers. |
+| `starci worker` | Execute steps on this machine, for Hatchet. |
 | `starci workers`, `shun`, `unshun` | See the workers, and take one out of rotation. |
 
 ## Trying it
@@ -47,6 +48,28 @@ Needs Go, Docker and git.
 ```sh
 go build -o starci ./cmd/starci
 
+./starci run ~/src/pi-gamebook --local --file examples/pi-gamebook.ci.star
+```
+
+```
+src/pi-gamebook @ e8da515a: 2 step(s)
+  check  |  test
+
+  passed   check  2.9s on this machine
+  passed   test  2.0s on this machine
+
+PASSED in 2.9s
+```
+
+`--local` builds what is committed, fetched from the checkout itself, in the
+same sandbox and with the same result cache as a worker. `-v` prints each
+step's output as it runs; Ctrl-C stops the steps and removes their containers.
+There is no queue and nothing to resume from: it is for trying a script, not
+for running CI.
+
+### On Hatchet
+
+```sh
 docker compose -f dev/docker-compose.yml -p starci-dev up -d   # throwaway Hatchet
 dev/token.sh > dev/.env                                        # credentials for it
 set -a; . dev/.env; set +a
@@ -57,21 +80,23 @@ set -a; . dev/.env; set +a
   --file examples/pi-gamebook.ci.star
 ```
 
-`run` prints the plan's layers, waits, and reports each step:
-
-```
-sam/pi-gamebook @ e8da515a: 2 step(s)
-  check  |  test
-
-  passed   check  4.7s on mac
-  passed   test  2.9s on mac
-
-PASSED in 5.1s
-```
-
 The dashboard at http://localhost:18888 (admin@example.com / Admin123!!) shows
 each run as a `ci-pipeline` (basic) or `ci-script` (advanced) parent with one
 `ci-step` child per step.
+
+## How it fits together
+
+| Package | |
+|---|---|
+| `internal/plan` | The language: evaluating scripts in both modes, and walking a plan. Knows no engine; it asks a `Runner` to "run these steps together and hand back their results". |
+| `internal/step` | Running one step on one machine: fetch, sandbox, container, result cache. Knows no engine either. |
+| `internal/engine/local` | A `Runner` that calls `step` directly, concurrently. |
+| `internal/engine/hatchet` | A `Runner` that starts each step as a Hatchet task, plus the tasks themselves. |
+
+An engine is whatever implements `Runner`. To run advanced scripts durably it
+must also remember the results it handed back, so that a script evaluated
+again after an interruption is given the same answers. Hatchet does; the local
+engine does not, and says so.
 
 ## Workers
 
@@ -203,5 +228,6 @@ on a worker. It makes a step that does run faster, and is not part of the key.
 ## Development
 
 ```sh
-go test ./...
+go test ./...          # the step tests run real containers
+go test -short ./...   # without them
 ```

@@ -1,12 +1,14 @@
 // Command starci plans and runs a repository's Starlark CI script.
 //
 //	starci plan     evaluate a script and print the plan; runs nothing
-//	starci run      plan a commit of a local checkout and execute it on Hatchet
+//	starci run      execute a commit of a local checkout: on Hatchet's workers,
+//	                or with --local on this machine with nothing but Docker
 //	starci worker   execute steps on this machine
 //	starci workers  list the workers Hatchet knows, and what they offer
 //	starci shun     stop giving a worker new steps; unshun reverses it
 //
-// Everything but plan reaches Hatchet through the HATCHET_CLIENT_* variables.
+// Everything but plan and run --local reaches Hatchet through the
+// HATCHET_CLIENT_* variables.
 package main
 
 import (
@@ -21,18 +23,22 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	hatchet "github.com/hatchet-dev/hatchet/sdks/go"
 
-	"git.phin.tech/sam/starci/internal/executor"
+	onhatchet "git.phin.tech/sam/starci/internal/engine/hatchet"
+	"git.phin.tech/sam/starci/internal/engine/local"
 	"git.phin.tech/sam/starci/internal/plan"
+	"git.phin.tech/sam/starci/internal/step"
 )
 
 const usage = `usage:
   starci plan   [--file .ci.star] [--repo owner/name] [--sha SHA] [--ref REF] [--changed a,b,c]
   starci run    CHECKOUT --clone-url URL [--sha SHA] [--ref BRANCH] [--file FILE] [--repo owner/name]
+  starci run    CHECKOUT --local [-v] [--slots N] [--sha SHA] [--file FILE]
   starci worker
   starci workers
   starci shun WORKER
@@ -105,19 +111,32 @@ func evalFile(file string, c plan.Context) (*plan.Plan, error) {
 
 func runCmd(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	cloneURL := fs.String("clone-url", "", "URL workers fetch the commit from")
+	localRun := fs.Bool("local", false, "run the steps on this machine with Docker, without Hatchet")
+	cloneURL := fs.String("clone-url", "", "URL workers fetch the commit from (with --local, defaults to the checkout)")
 	sha := fs.String("sha", "HEAD", "commit to build")
 	ref := fs.String("ref", "", "branch this run is for; a newer run for the same branch cancels it (default: the checked-out branch when building HEAD)")
 	file := fs.String("file", "", "CI script (default: .ci.star in the checkout)")
 	repo := fs.String("repo", "", "owner/name, for display (default: from the clone URL)")
+	slots := fs.Int("slots", 4, "with --local, how many steps to run at once")
+	verbose := fs.Bool("v", false, "with --local, print each step's output as it runs")
 	// The checkout comes first on the command line, before the flags.
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		die(usage)
 	}
 	dir := args[0]
 	fs.Parse(args[1:])
+
 	if *cloneURL == "" {
-		die(usage)
+		if !*localRun {
+			die(usage)
+		}
+		// The checkout is a perfectly good place to fetch a commit from. Only
+		// what is committed is built, the same as on a worker.
+		abs, err := filepath.Abs(dir)
+		if err != nil {
+			return err
+		}
+		*cloneURL = abs
 	}
 
 	git := func(a ...string) (string, error) {
@@ -155,30 +174,11 @@ func runCmd(args []string) error {
 		return err
 	}
 
-	// A run for a branch replaces the previous run for that branch. A run for
-	// a bare commit replaces nothing but a repeat of itself.
-	supersedes := c.Repo + "@" + commit
-	if *ref != "" {
-		supersedes = c.Repo + "@" + *ref
-	}
-
-	client, err := hatchet.NewClient()
-	if err != nil {
-		return err
-	}
-	tasks := executor.NewTasks(client, executor.Config{})
-	started := time.Now()
-	var res *hatchet.TaskResult
-
-	if mode == plan.Advanced {
-		fmt.Printf("%s @ %.8s: advanced script, steps are decided as it runs\n", c.Repo, c.SHA)
-		res, err = tasks.Script.Run(context.Background(), executor.ScriptInput{
-			Filename: filepath.Base(*file), Source: string(src), Context: c, CloneURL: *cloneURL, Supersedes: supersedes,
-		})
-	} else {
-		p, perr := plan.Eval(*file, src, c)
-		if perr != nil {
-			return perr
+	// In basic mode the plan is known now, whichever engine runs it.
+	var p *plan.Plan
+	if mode == plan.Basic {
+		if p, err = plan.Eval(*file, src, c); err != nil {
+			return err
 		}
 		fmt.Printf("%s @ %.8s: %d step(s)\n", p.Repo, p.SHA, len(p.Steps))
 		for _, layer := range p.Layers() {
@@ -192,26 +192,18 @@ func runCmd(args []string) error {
 			fmt.Println("nothing to run")
 			return nil
 		}
-		// A step nobody can take waits in silence until Hatchet gives up on
-		// it. Say so now, while the cause is still obvious.
-		if workers, werr := listWorkers(client); werr == nil {
-			for _, s := range p.Steps {
-				if !anyCanTake(workers, s) {
-					fmt.Printf("warning: no connected worker can take step %q (needs %s); it will wait for one\n", s.Name, describePlacement(s))
-				}
-			}
-		}
-		res, err = tasks.Pipeline.Run(context.Background(), executor.PipelineInput{Plan: *p, CloneURL: *cloneURL, Supersedes: supersedes})
+	} else {
+		fmt.Printf("%s @ %.8s: advanced script, steps are decided as it runs\n", c.Repo, c.SHA)
+	}
+
+	started := time.Now()
+	var result onhatchet.RunResult
+	if *localRun {
+		result, err = runLocally(mode, p, *file, src, c, *cloneURL, *slots, *verbose)
+	} else {
+		result, err = runOnHatchet(mode, p, *file, src, c, *cloneURL)
 	}
 	if err != nil {
-		// A cancelled run comes back as an error with nothing in it.
-		if strings.TrimSpace(err.Error()) == "" || strings.Contains(strings.ToLower(err.Error()), "cancel") {
-			return fmt.Errorf("the run was cancelled (a newer run for %s replaces it)", supersedes)
-		}
-		return err
-	}
-	var result executor.PipelineResult
-	if err := res.Into(&result); err != nil {
 		return err
 	}
 
@@ -250,6 +242,96 @@ func runCmd(args []string) error {
 	return nil
 }
 
+// runLocally executes the run on this machine. The same script, the same
+// sandbox and the same result cache as on a worker; no queue, no other
+// machines, and nothing to resume from if this process is stopped.
+func runLocally(mode string, p *plan.Plan, file string, src []byte, c plan.Context, cloneURL string, slots int, verbose bool) (onhatchet.RunResult, error) {
+	state := os.Getenv("STARCI_STATE")
+	if state == "" {
+		var err error
+		if state, err = step.DefaultStateDir(); err != nil {
+			return onhatchet.RunResult{}, err
+		}
+	}
+	// Ctrl-C stops the steps and removes their containers.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	runner := &local.Runner{
+		Ctx:      ctx,
+		Config:   step.Config{Worker: "this machine", StateDir: state},
+		CloneURL: cloneURL,
+		SHA:      c.SHA,
+		Slots:    slots,
+	}
+	if verbose {
+		var mu sync.Mutex
+		runner.Log = func(name, line string) {
+			mu.Lock()
+			defer mu.Unlock()
+			fmt.Printf("  [%s] %s\n", name, line)
+		}
+	}
+
+	var out onhatchet.RunResult
+	if mode == plan.Advanced {
+		results, err := plan.RunPipeline(ctx, filepath.Base(file), src, c, runner)
+		out = onhatchet.RunResult{OK: err == nil, Steps: results}
+		if err != nil {
+			out.Error = err.Error()
+		}
+		return out, nil
+	}
+	results, err := plan.RunPlan(p, runner)
+	if err != nil {
+		return out, err
+	}
+	return onhatchet.RunResult{OK: plan.Passed(results), Steps: results}, nil
+}
+
+func runOnHatchet(mode string, p *plan.Plan, file string, src []byte, c plan.Context, cloneURL string) (onhatchet.RunResult, error) {
+	var out onhatchet.RunResult
+	// A run for a branch replaces the previous run for that branch. A run for
+	// a bare commit replaces nothing but a repeat of itself.
+	supersedes := c.Repo + "@" + c.SHA
+	if c.Ref != "" {
+		supersedes = c.Repo + "@" + c.Ref
+	}
+
+	client, err := hatchet.NewClient()
+	if err != nil {
+		return out, err
+	}
+	tasks := onhatchet.NewTasks(client, step.Config{})
+
+	var res *hatchet.TaskResult
+	if mode == plan.Advanced {
+		res, err = tasks.Script.Run(context.Background(), onhatchet.ScriptInput{
+			Filename: filepath.Base(file), Source: string(src), Context: c, CloneURL: cloneURL, Supersedes: supersedes,
+		})
+	} else {
+		// A step nobody can take waits in silence until Hatchet gives up on
+		// it. Say so now, while the cause is still obvious.
+		if workers, werr := listWorkers(client); werr == nil {
+			for _, s := range p.Steps {
+				if !anyCanTake(workers, s) {
+					fmt.Printf("warning: no connected worker can take step %q (needs %s); it will wait for one\n", s.Name, describePlacement(s))
+				}
+			}
+		}
+		res, err = tasks.Pipeline.Run(context.Background(), onhatchet.PipelineInput{Plan: *p, CloneURL: cloneURL, Supersedes: supersedes})
+	}
+	if err != nil {
+		// A cancelled run comes back as an error with nothing in it.
+		if strings.TrimSpace(err.Error()) == "" || strings.Contains(strings.ToLower(err.Error()), "cancel") {
+			return out, fmt.Errorf("the run was cancelled (a newer run for %s replaces it)", supersedes)
+		}
+		return out, err
+	}
+	err = res.Into(&out)
+	return out, err
+}
+
 // workerCmd is configured by environment, since it normally runs as a service:
 //
 //	STARCI_WORKER_NAME  name recorded in results (default: hostname)
@@ -263,11 +345,10 @@ func workerCmd() error {
 	}
 	state := os.Getenv("STARCI_STATE")
 	if state == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
+		var err error
+		if state, err = step.DefaultStateDir(); err != nil {
 			return err
 		}
-		state = filepath.Join(home, ".cache", "starci")
 	}
 	slots := 4
 	if v := os.Getenv("STARCI_SLOTS"); v != "" {
@@ -293,7 +374,7 @@ func workerCmd() error {
 	if err != nil {
 		return err
 	}
-	tasks := executor.NewTasks(client, executor.Config{WorkerName: name, StateDir: state})
+	tasks := onhatchet.NewTasks(client, step.Config{Worker: name, StateDir: state})
 	worker, err := client.NewWorker("starci-"+name,
 		hatchet.WithWorkflows(tasks.All()...),
 		hatchet.WithSlots(slots),
