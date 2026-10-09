@@ -43,6 +43,7 @@ Everything is one binary:
 | `starci run` | Execute a commit on Hatchet's workers. |
 | `starci worker` | Execute steps on this machine, for Hatchet. |
 | `starci serve` | Receive pushes from a forge and start a run for each. |
+| `starci compile` | Write a basic script out as a GitHub Actions workflow. |
 | `starci workers`, `shun`, `unshun` | See the workers, and take one out of rotation. |
 
 ## Trying it
@@ -125,6 +126,35 @@ handed to git through its environment and never appears in a clone URL.
 Without a webhook secret the receiver refuses to start: anyone who could reach
 it could otherwise start runs.
 
+## Where starci is not running: compiling to a workflow
+
+A basic script can be written out as a GitHub Actions workflow, which Forgejo
+and Gitea Actions read too:
+
+```sh
+starci compile > .github/workflows/ci.yml
+```
+
+Each step becomes a job that does what a worker does: checks out only the
+step's inputs, downloads its tools and checks their checksums, builds an image
+with its packages, and runs its command in that container. A job that has
+already passed with the same inputs skips the work, using the Actions cache as
+the record. `needs` and `worker` carry over, as job dependencies and runner
+labels.
+
+Some things cannot be frozen into a file, and the header of the generated
+workflow says which apply:
+
+- A plan that depends on the commit (`ctx.changed_files`, `ctx.ref`) is
+  compiled for a commit about which nothing is known. Steps the script would
+  add or drop for a branch or a set of changes are not represented.
+- `prefer` and `avoid` are dropped.
+- Advanced scripts cannot be compiled at all: their steps are only known as
+  they run.
+
+The other way to use starci from an Action is to run it there: a workflow
+whose one job calls `starci run --local`, which handles both modes.
+
 ## How it fits together
 
 | Package | |
@@ -133,6 +163,7 @@ it could otherwise start runs.
 | `internal/step` | Running one step on one machine: fetch, sandbox, container, result cache. Knows no engine either. |
 | `internal/engine/local` | A `Runner` that calls `step` directly, concurrently. |
 | `internal/engine/hatchet` | A `Runner` that starts each step as a Hatchet task, plus the tasks themselves. |
+| `internal/compile` | Writing a basic plan out as a GitHub Actions workflow. |
 | `internal/forge` | Talking to Forgejo and GitHub: reading a push, fetching a script, posting a status. |
 | `internal/trigger` | Turning a push delivery into a run. |
 | `internal/store/s3` | The shared result store. |

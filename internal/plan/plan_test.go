@@ -362,3 +362,23 @@ def ci(ctx):
 		wantError(t, "def ci(ctx):\n    return [step(\"s\", image = \"i\", run = \"r\", packages = ["+bad+"])]\n", "packages must be apt package names")
 	}
 }
+
+func TestEvalTrackedReportsWhatTheScriptRead(t *testing.T) {
+	read := func(src string) string {
+		t.Helper()
+		_, got, err := EvalTracked("ci.star", []byte(src), ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(got, ",")
+	}
+	if got := read("def ci(ctx):\n    return [step(\"a\", image = \"i\", run = \"r\")]\n"); got != "" {
+		t.Errorf("a script that ignores ctx read %q", got)
+	}
+	if got := read("def ci(ctx):\n    if ctx.ref == \"main\" and ctx.changed_files:\n        return []\n    return []\n"); got != "ref" {
+		t.Errorf("read = %q, want only ref: the second test is not reached off main", got)
+	}
+	if got := read("def ci(ctx):\n    return [step(d + ctx.sha, image = \"i\", run = \"r\") for d in ctx.changed_dirs]\n"); got != "changed_dirs,sha" {
+		t.Errorf("read = %q, want changed_dirs,sha", got)
+	}
+}

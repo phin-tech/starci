@@ -173,6 +173,51 @@ func (p *Plan) Layers() [][]Step {
 // Eval runs the script in src and returns its plan. filename is used only in
 // error messages.
 func Eval(filename string, src []byte, c Context) (*Plan, error) {
+	p, _, err := EvalTracked(filename, src, c)
+	return p, err
+}
+
+// EvalTracked is Eval that also reports which fields of ctx the script read.
+// A plan that read none of them is the same for every commit; one that read
+// ctx.changed_files or ctx.ref is this commit's plan and may not be the next
+// one's. Anything that wants to freeze a plan needs to know which it has.
+func EvalTracked(filename string, src []byte, c Context) (*Plan, []string, error) {
+	p, read, err := evalTracking(filename, src, c)
+	sort.Strings(read)
+	return p, read, err
+}
+
+func evalTracking(filename string, src []byte, c Context) (*Plan, []string, error) {
+	tracked := &trackedContext{inner: contextValue(c).(starlark.HasAttrs), read: map[string]bool{}}
+	p, err := evalWith(filename, src, c, tracked)
+	var read []string
+	for name := range tracked.read {
+		read = append(read, name)
+	}
+	return p, read, err
+}
+
+// trackedContext is ctx, remembering which of its fields were asked for.
+type trackedContext struct {
+	inner starlark.HasAttrs
+	read  map[string]bool
+}
+
+func (t *trackedContext) String() string        { return t.inner.String() }
+func (t *trackedContext) Type() string          { return "ctx" }
+func (t *trackedContext) Freeze()               { t.inner.Freeze() }
+func (t *trackedContext) Truth() starlark.Bool  { return starlark.True }
+func (t *trackedContext) Hash() (uint32, error) { return 0, fmt.Errorf("ctx is not hashable") }
+func (t *trackedContext) AttrNames() []string   { return t.inner.AttrNames() }
+func (t *trackedContext) Attr(name string) (starlark.Value, error) {
+	v, err := t.inner.Attr(name)
+	if v != nil {
+		t.read[name] = true
+	}
+	return v, err
+}
+
+func evalWith(filename string, src []byte, c Context, ctxValue starlark.Value) (*Plan, error) {
 	thread := newThread("plan")
 	globals, err := starlark.ExecFileOptions(&syntax.FileOptions{}, thread, filename, src, predeclared())
 	if err != nil {
@@ -186,7 +231,7 @@ func Eval(filename string, src []byte, c Context) (*Plan, error) {
 		}
 		return nil, fmt.Errorf("%s: must define a function ci(ctx)", filename)
 	}
-	result, err := starlark.Call(thread, ci, starlark.Tuple{contextValue(c)}, nil)
+	result, err := starlark.Call(thread, ci, starlark.Tuple{ctxValue}, nil)
 	if err != nil {
 		return nil, describe(err)
 	}

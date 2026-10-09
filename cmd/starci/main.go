@@ -5,6 +5,7 @@
 //	                or with --local on this machine with nothing but Docker
 //	starci worker   execute steps on this machine
 //	starci serve    receive pushes from a forge and start a run for each
+//	starci compile  write a basic script out as a GitHub Actions workflow
 //	starci workers  list the workers Hatchet knows, and what they offer
 //	starci shun     stop giving a worker new steps; unshun reverses it
 //
@@ -32,6 +33,7 @@ import (
 
 	hatchet "github.com/hatchet-dev/hatchet/sdks/go"
 
+	"git.phin.tech/sam/starci/internal/compile"
 	onhatchet "git.phin.tech/sam/starci/internal/engine/hatchet"
 	"git.phin.tech/sam/starci/internal/engine/local"
 	"git.phin.tech/sam/starci/internal/forge"
@@ -47,6 +49,7 @@ const usage = `usage:
   starci run    CHECKOUT --local [-v] [--slots N] [--sha SHA] [--file FILE]
   starci worker
   starci serve
+  starci compile [--file .ci.star] [--runs-on ubuntu-latest] [--arch amd64]
   starci workers
   starci shun WORKER
   starci unshun WORKER`
@@ -63,6 +66,8 @@ func main() {
 		err = runCmd(os.Args[2:])
 	case "worker":
 		err = workerCmd()
+	case "compile":
+		err = compileCmd(os.Args[2:])
 	case "serve":
 		err = serveCmd()
 	case "workers":
@@ -703,4 +708,39 @@ func serveCmd() error {
 	fmt.Fprintf(os.Stderr, "listening on %s for %s\n", listen, strings.Join(names, ", "))
 	server := &http.Server{Addr: listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	return server.ListenAndServe()
+}
+
+// compileCmd writes a basic script out as a GitHub Actions workflow, for a
+// repository hosted where starci is not running:
+//
+//	starci compile > .github/workflows/ci.yml
+//
+// Forgejo and Gitea Actions read the same file.
+func compileCmd(args []string) error {
+	fs := flag.NewFlagSet("compile", flag.ExitOnError)
+	file := fs.String("file", ".ci.star", "CI script to compile")
+	runsOn := fs.String("runs-on", "ubuntu-latest", "runner for steps that do not ask for particular workers")
+	arch := fs.String("arch", "amd64", "architecture of those runners: amd64 or arm64")
+	fs.Parse(args)
+
+	src, err := os.ReadFile(*file)
+	if err != nil {
+		return err
+	}
+	// Compiled for a commit about which nothing is known: no branch, no list
+	// of changes. That is the plan a script falls back to, and the only one
+	// that can stand for every push.
+	p, read, err := plan.EvalTracked(*file, src, plan.Context{})
+	if err != nil {
+		return err
+	}
+	if len(p.Steps) == 0 {
+		return fmt.Errorf("%s plans no steps for a commit about which nothing is known; there is nothing to compile", *file)
+	}
+	out, err := compile.GitHub(p, compile.Options{Source: filepath.Base(*file), RunsOn: *runsOn, Arch: *arch, Read: read})
+	if err != nil {
+		return err
+	}
+	fmt.Print(out)
+	return nil
 }
