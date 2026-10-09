@@ -145,48 +145,64 @@ func runCmd(args []string) error {
 		}
 	}
 
-	p, err := evalFile(*file, plan.Context{Repo: *repo, SHA: commit, Ref: *ref, ChangedFiles: strings.Fields(changed)})
+	src, err := os.ReadFile(*file)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%s @ %.8s: %d step(s)\n", p.Repo, p.SHA, len(p.Steps))
-	for _, layer := range p.Layers() {
-		var names []string
-		for _, s := range layer {
-			names = append(names, s.Name)
-		}
-		fmt.Println("  " + strings.Join(names, "  |  "))
+	c := plan.Context{Repo: *repo, SHA: commit, Ref: *ref, ChangedFiles: strings.Fields(changed)}
+	mode, err := plan.Mode(*file, src)
+	if err != nil {
+		return err
 	}
-	if len(p.Steps) == 0 {
-		fmt.Println("nothing to run")
-		return nil
+
+	// A run for a branch replaces the previous run for that branch. A run for
+	// a bare commit replaces nothing but a repeat of itself.
+	supersedes := c.Repo + "@" + commit
+	if *ref != "" {
+		supersedes = c.Repo + "@" + *ref
 	}
 
 	client, err := hatchet.NewClient()
 	if err != nil {
 		return err
 	}
-	_, pipeline := executor.Tasks(client, executor.Config{})
+	tasks := executor.NewTasks(client, executor.Config{})
+	started := time.Now()
+	var res *hatchet.TaskResult
 
-	// A step nobody can take waits in silence until Hatchet gives up on it.
-	// Say so now, while the cause is still obvious.
-	if workers, err := listWorkers(client); err == nil {
-		for _, s := range p.Steps {
-			if !anyCanTake(workers, s) {
-				fmt.Printf("warning: no connected worker can take step %q (needs %s); it will wait for one\n", s.Name, describePlacement(s))
+	if mode == plan.Advanced {
+		fmt.Printf("%s @ %.8s: advanced script, steps are decided as it runs\n", c.Repo, c.SHA)
+		res, err = tasks.Script.Run(context.Background(), executor.ScriptInput{
+			Filename: filepath.Base(*file), Source: string(src), Context: c, CloneURL: *cloneURL, Supersedes: supersedes,
+		})
+	} else {
+		p, perr := plan.Eval(*file, src, c)
+		if perr != nil {
+			return perr
+		}
+		fmt.Printf("%s @ %.8s: %d step(s)\n", p.Repo, p.SHA, len(p.Steps))
+		for _, layer := range p.Layers() {
+			var names []string
+			for _, s := range layer {
+				names = append(names, s.Name)
+			}
+			fmt.Println("  " + strings.Join(names, "  |  "))
+		}
+		if len(p.Steps) == 0 {
+			fmt.Println("nothing to run")
+			return nil
+		}
+		// A step nobody can take waits in silence until Hatchet gives up on
+		// it. Say so now, while the cause is still obvious.
+		if workers, werr := listWorkers(client); werr == nil {
+			for _, s := range p.Steps {
+				if !anyCanTake(workers, s) {
+					fmt.Printf("warning: no connected worker can take step %q (needs %s); it will wait for one\n", s.Name, describePlacement(s))
+				}
 			}
 		}
+		res, err = tasks.Pipeline.Run(context.Background(), executor.PipelineInput{Plan: *p, CloneURL: *cloneURL, Supersedes: supersedes})
 	}
-
-	// A run for a branch replaces the previous run for that branch. A run for
-	// a bare commit replaces nothing but a repeat of itself.
-	supersedes := p.Repo + "@" + commit
-	if *ref != "" {
-		supersedes = p.Repo + "@" + *ref
-	}
-
-	started := time.Now()
-	res, err := pipeline.Run(context.Background(), executor.PipelineInput{Plan: *p, CloneURL: *cloneURL, Supersedes: supersedes})
 	if err != nil {
 		// A cancelled run comes back as an error with nothing in it.
 		if strings.TrimSpace(err.Error()) == "" || strings.Contains(strings.ToLower(err.Error()), "cancel") {
@@ -219,6 +235,9 @@ func runCmd(args []string) error {
 				fmt.Println("           " + l)
 			}
 		}
+	}
+	if result.Error != "" {
+		fmt.Println("\n" + result.Error)
 	}
 	verdict := "PASSED"
 	if !result.OK {
@@ -274,12 +293,12 @@ func workerCmd() error {
 	if err != nil {
 		return err
 	}
-	step, pipeline := executor.Tasks(client, executor.Config{WorkerName: name, StateDir: state})
+	tasks := executor.NewTasks(client, executor.Config{WorkerName: name, StateDir: state})
 	worker, err := client.NewWorker("starci-"+name,
-		hatchet.WithWorkflows(step, pipeline),
+		hatchet.WithWorkflows(tasks.All()...),
 		hatchet.WithSlots(slots),
-		// Pipelines only wait on their steps, so they get their own pool and
-		// can never occupy the slots those steps need.
+		// Pipelines and scripts only wait on their steps, so they get their
+		// own pool and can never occupy the slots those steps need.
 		hatchet.WithDurableSlots(20),
 		hatchet.WithLabels(labels),
 	)

@@ -134,25 +134,17 @@ func (p *Plan) Layers() [][]Step {
 // Eval runs the script in src and returns its plan. filename is used only in
 // error messages.
 func Eval(filename string, src []byte, c Context) (*Plan, error) {
-	thread := &starlark.Thread{
-		Name:  "plan",
-		Print: func(*starlark.Thread, string) {}, // output would be the one impure thing a script can do
-		Load: func(_ *starlark.Thread, module string) (starlark.StringDict, error) {
-			return nil, fmt.Errorf("load(%q): loading other files is not supported", module)
-		},
-	}
-	thread.SetMaxExecutionSteps(maxSteps)
-
-	predeclared := starlark.StringDict{
-		"step": starlark.NewBuiltin("step", stepBuiltin),
-	}
-	globals, err := starlark.ExecFileOptions(&syntax.FileOptions{}, thread, filename, src, predeclared)
+	thread := newThread("plan")
+	globals, err := starlark.ExecFileOptions(&syntax.FileOptions{}, thread, filename, src, predeclared())
 	if err != nil {
 		return nil, describe(err)
 	}
 
 	ci, ok := globals["ci"].(starlark.Callable)
 	if !ok {
+		if _, advanced := globals["pipeline"].(starlark.Callable); advanced {
+			return nil, fmt.Errorf("%s: defines pipeline(ctx), whose steps are only known as it runs; there is no plan to compute", filename)
+		}
 		return nil, fmt.Errorf("%s: must define a function ci(ctx)", filename)
 	}
 	result, err := starlark.Call(thread, ci, starlark.Tuple{contextValue(c)}, nil)

@@ -28,8 +28,8 @@ is deployed and nothing triggers a run automatically.
 - [ ] **Deploy** — workers on real machines, with their own Hatchet tenant.
 - [ ] **Trigger and report** — start a run from a Forgejo push webhook and post
       the result as a commit status.
-- [ ] **Scripts as workflows** — let a script wait on a step's result and
-      branch or loop on it, instead of returning a fixed plan up front.
+- [x] **Advanced mode** — a script that runs steps itself, sees their
+      results, and branches or loops on them.
 
 Everything is one binary:
 
@@ -70,7 +70,8 @@ PASSED in 5.1s
 ```
 
 The dashboard at http://localhost:18888 (admin@example.com / Admin123!!) shows
-each run as a `ci-pipeline` parent with one `ci-step` child per step.
+each run as a `ci-pipeline` (basic) or `ci-script` (advanced) parent with one
+`ci-step` child per step.
 
 ## Workers
 
@@ -122,6 +123,53 @@ Nothing else. A script cannot read files, reach the network, read the clock or
 `load()` another file, and it is stopped if it runs too long. The same script
 and inputs always give the same plan, so a plan can be computed in one place
 and executed in another, and a script from any repository is safe to evaluate.
+
+## Two modes
+
+A script is in one of two modes, told apart by the function it defines.
+
+**Basic** — `ci(ctx)` returns the steps. The whole graph is known before
+anything runs; `starci plan` prints it.
+
+**Advanced** — `pipeline(ctx)` runs steps itself and reacts to what comes back:
+
+```python
+def pipeline(ctx):
+    run(build)
+
+    # How wide to fan out is read from a step, not written down.
+    files = run(list_tests).output.splitlines()
+    results = parallel([test(f) for f in files], allow_failure = True)
+
+    # One more try for whatever failed, and only for that.
+    failed = [r.name for r in results if not r.ok]
+    if failed:
+        results = parallel([test(n) for n in failed], allow_failure = True)
+    if [r for r in results if not r.ok]:
+        fail("failed twice")
+```
+
+| | |
+|---|---|
+| `run(step, allow_failure = False)` | Run one step and return its result. |
+| `parallel(steps, allow_failure = False)` | Run several together; results come back in the same order. |
+| `result.ok`, `.status`, `.output`, `.name`, `.seconds`, `.cached`, `.worker`, `.detail` | What a result carries. `output` is what the step printed, up to 64 KB. |
+| `fail(message)` | End the run as failed. |
+
+A step that fails ends the run, unless `allow_failure` hands the script the
+failed result to decide on. Steps are the same `step(...)` as in basic mode,
+with the same inputs, skipping and placement; `needs` is not used, since the
+script's own order says what runs after what.
+
+An advanced script runs on a worker, as a durable task. If that worker dies
+partway, another picks the run up: the script is evaluated again from the top
+and each step it asks for is answered from the record of the run, so finished
+steps are not repeated. This is why the language matters. A script that cannot
+read a clock or a file asks for the same steps, in the same order, whenever it
+is given the same answers.
+
+The trade is predictability. A basic script's graph depends only on the
+commit; an advanced script's depends on what its steps return.
 
 ## Inputs and skipped steps
 

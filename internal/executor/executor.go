@@ -4,7 +4,9 @@
 // because the shape of a run is only known once its script has been evaluated:
 //
 //	ci-step      runs one container against the inputs of one step
-//	ci-pipeline  walks a plan and starts a ci-step child per step
+//	ci-pipeline  walks a plan and starts a ci-step child per step (basic mode)
+//	ci-script    runs an advanced script, starting a ci-step child each time
+//	             the script runs a step
 package executor
 
 import (
@@ -34,6 +36,10 @@ import (
 const (
 	StepTask     = "ci-step"
 	PipelineTask = "ci-pipeline"
+	ScriptTask   = "ci-script"
+
+	// How much of a step's output is kept in its result, for a script to read.
+	outputLimit = 64 * 1024
 
 	// How much of a failed step's output is carried in its error, for the
 	// caller. The full output is in the task's logs.
@@ -56,11 +62,25 @@ type StepInput struct {
 	Step     plan.Step `json:"step"`
 }
 
+// ScriptInput is an advanced script and what it is being run for. The script
+// travels as source: it is evaluated on a worker, as the run unfolds.
+type ScriptInput struct {
+	Filename   string       `json:"filename"`
+	Source     string       `json:"source"`
+	Context    plan.Context `json:"context"`
+	CloneURL   string       `json:"clone_url"`
+	Supersedes string       `json:"supersedes"`
+}
+
 type StepResult struct {
 	Name    string  `json:"name"`
 	Status  string  `json:"status"` // passed, failed or skipped
 	Seconds float64 `json:"seconds"`
 	Worker  string  `json:"worker"`
+	// Output is what the step printed, up to outputLimit. It is part of a
+	// stored result, so a step that is skipped still hands a script the
+	// output it produced when it ran.
+	Output string `json:"output,omitempty"`
 	// Cached is true when an earlier passing run with the same key stood in
 	// for this one.
 	Cached bool   `json:"cached"`
@@ -70,6 +90,9 @@ type StepResult struct {
 type PipelineResult struct {
 	OK    bool         `json:"ok"`
 	Steps []StepResult `json:"steps"`
+	// Error is why an advanced script ended early: a failed step it did not
+	// allow for, its own fail(), or a mistake in the script.
+	Error string `json:"error,omitempty"`
 }
 
 // Config is what a worker needs to know about the machine it is on.
@@ -87,9 +110,25 @@ var (
 	notEqual               = types.WorkerLabelComparator_NOT_EQUAL
 )
 
-// Tasks defines both tasks on the client. Register them on a worker to
-// execute plans, or use them from any process to trigger and await runs.
-func Tasks(client *hatchet.Client, cfg Config) (step, pipeline *hatchet.StandaloneTask) {
+// Tasks is the set of tasks a worker registers and a client triggers.
+type Tasks struct {
+	Step, Pipeline, Script *hatchet.StandaloneTask
+}
+
+func (t Tasks) All() []hatchet.WorkflowBase {
+	return []hatchet.WorkflowBase{t.Step, t.Pipeline, t.Script}
+}
+
+// NewTasks defines the tasks on the client. Register them on a worker to
+// execute runs, or use them from any process to trigger and await runs.
+func NewTasks(client *hatchet.Client, cfg Config) Tasks {
+	var step, pipeline *hatchet.StandaloneTask
+	// A newer run for the same branch makes the one before it pointless.
+	supersede := hatchet.WithConcurrency(&hatchet.Concurrency{
+		Expression:    "input.supersedes",
+		MaxRuns:       &one,
+		LimitStrategy: &cancelInProgress,
+	})
 	step = client.NewStandaloneTask(StepTask,
 		func(ctx hatchet.Context, in StepInput) (StepResult, error) { return runStep(ctx, cfg, in) },
 		hatchet.WithExecutionTimeout(30*time.Minute),
@@ -99,13 +138,86 @@ func Tasks(client *hatchet.Client, cfg Config) (step, pipeline *hatchet.Standalo
 			return runPipeline(ctx, client, step, in)
 		},
 		hatchet.WithExecutionTimeout(time.Hour),
-		hatchet.WithConcurrency(&hatchet.Concurrency{
-			Expression:    "input.supersedes",
-			MaxRuns:       &one,
-			LimitStrategy: &cancelInProgress,
-		}),
+		supersede,
 	)
-	return step, pipeline
+	script := client.NewStandaloneDurableTask(ScriptTask,
+		func(ctx hatchet.DurableContext, in ScriptInput) (PipelineResult, error) {
+			return runScript(ctx, client, step, in)
+		},
+		hatchet.WithExecutionTimeout(time.Hour),
+		supersede,
+	)
+	return Tasks{Step: step, Pipeline: pipeline, Script: script}
+}
+
+// runScript evaluates an advanced script, executing each run() and parallel()
+// it makes as ci-step children.
+//
+// The script is not checkpointed; the children are. If this task is restarted
+// partway, the script is evaluated again from the top, and each batch of
+// children it asks for is answered from Hatchet's record of the run instead of
+// being started a second time. That only works because the script asks for
+// the same children in the same order when given the same answers, which a
+// Starlark script cannot fail to do.
+func runScript(ctx hatchet.DurableContext, client *hatchet.Client, step *hatchet.StandaloneTask, in ScriptInput) (PipelineResult, error) {
+	runner := &childRunner{ctx: ctx, client: client, step: step, cloneURL: in.CloneURL, sha: in.Context.SHA}
+	results, err := plan.RunPipeline(ctx, in.Filename, []byte(in.Source), in.Context, runner)
+	if ctx.Err() != nil {
+		return PipelineResult{}, hatchet.NewNonRetryableError(errors.New("cancelled"))
+	}
+
+	out := PipelineResult{OK: err == nil}
+	if err != nil {
+		out.Error = err.Error()
+	}
+	for _, r := range results {
+		out.Steps = append(out.Steps, StepResult{
+			Name: r.Name, Status: r.Status, Seconds: r.Seconds, Worker: r.Worker,
+			Output: r.Output, Cached: r.Cached, Detail: r.Detail,
+		})
+	}
+	return out, nil
+}
+
+// childRunner runs a script's steps as ci-step children of the script's task.
+type childRunner struct {
+	ctx      hatchet.DurableContext
+	client   *hatchet.Client
+	step     *hatchet.StandaloneTask
+	cloneURL string
+	sha      string
+}
+
+func (c *childRunner) Run(steps []plan.Step) ([]plan.Result, error) {
+	single := plan.Plan{SHA: c.sha}
+	inputs := make([]hatchet.RunManyOpt, len(steps))
+	for i, s := range steps {
+		single.Steps = []plan.Step{s}
+		if err := single.Validate(); err != nil {
+			return nil, err
+		}
+		inputs[i] = hatchet.RunManyOpt{Input: StepInput{CloneURL: c.cloneURL, SHA: c.sha, Step: s}}
+		if labels := placement(s); len(labels) > 0 {
+			inputs[i].Opts = append(inputs[i].Opts, hatchet.WithDesiredWorkerLabels(labels))
+		}
+	}
+	refs, err := c.step.RunMany(c.ctx, inputs)
+	if err != nil {
+		return nil, fmt.Errorf("starting steps: %w", err)
+	}
+	settled := make(chan struct{})
+	go cancelWithParent(c.ctx, c.client, refs, settled)
+	defer close(settled)
+
+	out := make([]plan.Result, len(steps))
+	for i, s := range steps {
+		r := await(&refs[i], s.Name)
+		out[i] = plan.Result{
+			Name: r.Name, Status: r.Status, Output: r.Output, Seconds: r.Seconds,
+			Worker: r.Worker, Cached: r.Cached, Detail: r.Detail,
+		}
+	}
+	return out, nil
 }
 
 func runPipeline(ctx hatchet.DurableContext, client *hatchet.Client, step *hatchet.StandaloneTask, in PipelineInput) (PipelineResult, error) {
@@ -301,12 +413,17 @@ func runStep(ctx hatchet.Context, cfg Config, in StepInput) (StepResult, error) 
 		return StepResult{}, fail("cannot start docker: %v", err)
 	}
 	var tail []string
+	var output strings.Builder
 	lines := bufio.NewScanner(out)
 	lines.Buffer(make([]byte, 64*1024), 1024*1024)
 	for lines.Scan() {
 		line := lines.Text()
 		if tail = append(tail, line); len(tail) > tailLines {
 			tail = tail[1:]
+		}
+		if output.Len()+len(line) < outputLimit {
+			output.WriteString(line)
+			output.WriteByte('\n')
 		}
 		// Hatchet rejects an empty log message; a blank line still matters
 		// for reading test output, so send it as a space.
@@ -334,7 +451,7 @@ func runStep(ctx hatchet.Context, cfg Config, in StepInput) (StepResult, error) 
 		return StepResult{}, fail("exit code %d after %.1fs\n%s", code, seconds, strings.Join(tail, "\n"))
 	}
 
-	result := StepResult{Name: s.Name, Status: "passed", Seconds: seconds, Worker: cfg.WorkerName}
+	result := StepResult{Name: s.Name, Status: "passed", Seconds: seconds, Worker: cfg.WorkerName, Output: output.String()}
 	if s.Cache {
 		// Only passes are remembered. A failure is always worth running again.
 		if data, err := json.Marshal(result); err == nil {
