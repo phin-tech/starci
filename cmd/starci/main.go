@@ -5,7 +5,7 @@
 //	                or with --local on this machine with nothing but Docker
 //	starci worker   execute steps on this machine
 //	starci serve    receive pushes from a forge and start a run for each
-//	starci compile  write a basic script out as a GitHub Actions workflow
+//	starci compile  write a basic script out for GitHub Actions or CircleCI
 //	starci workers  list the workers Hatchet knows, and what they offer
 //	starci shun     stop giving a worker new steps; unshun reverses it
 //
@@ -49,7 +49,7 @@ const usage = `usage:
   starci run    CHECKOUT --local [-v] [--slots N] [--sha SHA] [--file FILE]
   starci worker
   starci serve
-  starci compile [--file .ci.star] [--runs-on ubuntu-latest] [--arch amd64]
+  starci compile [--target github|circleci] [--file .ci.star] [--runs-on NAME] [--arch amd64]
   starci workers
   starci shun WORKER
   starci unshun WORKER`
@@ -710,17 +710,19 @@ func serveCmd() error {
 	return server.ListenAndServe()
 }
 
-// compileCmd writes a basic script out as a GitHub Actions workflow, for a
-// repository hosted where starci is not running:
+// compileCmd writes a basic script out as another CI system's configuration,
+// for a repository hosted where starci is not running:
 //
 //	starci compile > .github/workflows/ci.yml
+//	starci compile --target circleci > .circleci/config.yml
 //
-// Forgejo and Gitea Actions read the same file.
+// Forgejo and Gitea Actions read the GitHub file.
 func compileCmd(args []string) error {
 	fs := flag.NewFlagSet("compile", flag.ExitOnError)
 	file := fs.String("file", ".ci.star", "CI script to compile")
-	runsOn := fs.String("runs-on", "ubuntu-latest", "runner for steps that do not ask for particular workers")
-	arch := fs.String("arch", "amd64", "architecture of those runners: amd64 or arm64")
+	target := fs.String("target", "github", "what to write: github (also read by Forgejo and Gitea) or circleci")
+	runsOn := fs.String("runs-on", "", "the machines to run on: a runner label for github (default ubuntu-latest), a resource class for circleci (default medium)")
+	arch := fs.String("arch", "amd64", "architecture of those machines: amd64 or arm64")
 	fs.Parse(args)
 
 	src, err := os.ReadFile(*file)
@@ -737,7 +739,16 @@ func compileCmd(args []string) error {
 	if len(p.Steps) == 0 {
 		return fmt.Errorf("%s plans no steps for a commit about which nothing is known; there is nothing to compile", *file)
 	}
-	out, err := compile.GitHub(p, compile.Options{Source: filepath.Base(*file), RunsOn: *runsOn, Arch: *arch, Read: read})
+	opts := compile.Options{Source: filepath.Base(*file), RunsOn: *runsOn, Arch: *arch, Read: read}
+	var out string
+	switch *target {
+	case "github":
+		out, err = compile.GitHub(p, opts)
+	case "circleci":
+		out, err = compile.CircleCI(p, opts)
+	default:
+		return fmt.Errorf("unknown target %q: github or circleci", *target)
+	}
 	if err != nil {
 		return err
 	}
