@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go.opentelemetry.io/otel/trace"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,6 +72,14 @@ func DefaultStateDir() (string, error) {
 	return filepath.Join(home, ".cache", "starci"), nil
 }
 
+// phase marks one part of running a step, for whoever is tracing the run:
+// where a step's time went is otherwise one number. It costs nothing when
+// nobody is. The returned function ends the phase, and may be called twice.
+func phase(ctx context.Context, name string) (done func()) {
+	_, span := trace.SpanFromContext(ctx).TracerProvider().Tracer("starci").Start(ctx, name)
+	return func() { span.End() }
+}
+
 // Run executes s against the commit sha fetched from cloneURL. Each line the
 // step prints is passed to log.
 //
@@ -89,21 +98,29 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	}
 	defer os.RemoveAll(root)
 
+	done := phase(ctx, "fetch the commit")
 	co, err := fetch(cloneURL, sha, root, cfg.GitEnv)
+	done()
 	if err != nil {
 		return failed("fetch of %s failed: %v", sha, err)
 	}
+	done = phase(ctx, "identify the inputs")
 	content, err := co.contentID(s.Inputs)
+	done()
 	if err != nil {
 		return failed("%v", err)
 	}
+	done = phase(ctx, "find the image")
 	img, err := inspectImage(s.Image)
+	done()
 	if err != nil {
 		return failed("%v", err)
 	}
 	var tools []installed
 	for _, t := range s.Tools {
+		done := phase(ctx, "install "+t.Name)
 		in, err := install(cfg.StateDir, t, img.arch)
+		done()
 		if err != nil {
 			return failed("%v", err)
 		}
@@ -123,21 +140,30 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	resultKey := key(s, img, content, toolIDs)
 	results := cfg.store()
 	if s.Cache {
-		if earlier, ok := results.Get(ctx, resultKey); ok {
+		done := phase(ctx, "look for an earlier pass")
+		earlier, ok := results.Get(ctx, resultKey)
+		done()
+		if ok {
 			log(fmt.Sprintf("same image, command and inputs as a passing run on %s; not run again", earlier.Worker))
 			earlier.Name, earlier.Cached, earlier.Seconds = s.Name, true, 0
 			return earlier
 		}
 	}
 
-	if err := co.materialise(s.Inputs); err != nil {
+	done = phase(ctx, "check out the inputs")
+	err = co.materialise(s.Inputs)
+	done()
+	if err != nil {
 		return failed("checkout failed: %v", err)
 	}
 
 	runImage := s.Image
 	if len(s.Packages) > 0 {
 		log("preparing an image with " + strings.Join(s.Packages, ", "))
-		if runImage, err = withPackages(s.Image, img.id, s.Packages); err != nil {
+		done := phase(ctx, "prepare an image with packages")
+		runImage, err = withPackages(s.Image, img.id, s.Packages)
+		done()
+		if err != nil {
 			return failed("%v", err)
 		}
 	}
@@ -158,6 +184,8 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	args = append(args, toolMounts...)
 	args = append(args, runImage, "sh", "-c", s.Run)
 
+	done = phase(ctx, "run the command")
+	defer done()
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	out, err := cmd.StdoutPipe()
 	if err != nil {

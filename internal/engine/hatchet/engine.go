@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	hatchetotel "github.com/hatchet-dev/hatchet/sdks/go/opentelemetry"
 	"os"
 	"sort"
 	"strings"
@@ -32,6 +33,10 @@ type Options struct {
 	Slots int
 	// Labels are what this machine offers to steps that ask.
 	Labels map[string]string
+	// Traces has each step send Hatchet a trace of where its time went:
+	// fetching, finding the image, looking for an earlier pass, running.
+	// Hatchet must have been started with SERVER_OBSERVABILITY_ENABLED.
+	Traces bool
 	// Dashboard is the address of Hatchet's dashboard, as a person reaches
 	// it. With it, the status a run posts links to the run's page there,
 	// which has each step's output and how long it took.
@@ -117,6 +122,18 @@ func (e *Engine) Work(ctx context.Context) error {
 	)
 	if err != nil {
 		return err
+	}
+	if e.opts.Traces {
+		tracing, err := hatchetotel.NewInstrumentor()
+		if err != nil {
+			return fmt.Errorf("setting up traces: %w", err)
+		}
+		worker.Use(tracing.Middleware())
+		defer func() {
+			flush, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stop()
+			_ = tracing.Shutdown(flush)
+		}()
 	}
 
 	// A worker that fires schedules also looks, as it starts and from time to

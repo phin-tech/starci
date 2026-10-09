@@ -130,6 +130,7 @@ webhook secret:
 | `STARCI_FORGEJO_TOKEN_FILE` | File holding an access token: read repositories, write commit statuses. |
 | `STARCI_FORGEJO_SECRET_FILE` | File holding the webhook secret. |
 | `STARCI_DASHBOARD` | Hatchet's dashboard, as a person reaches it. The status a run posts then links to the run's page there, with each step's output and timing. Optional. |
+| `STARCI_TRACES` | `true` to send Hatchet a trace of each step: how long fetching the commit, finding the image, looking for an earlier pass and running the command each took. Hatchet needs `SERVER_OBSERVABILITY_ENABLED=t`. Optional. |
 | `STARCI_GITHUB_TOKEN_FILE`, `STARCI_GITHUB_SECRET_FILE` | The same, for GitHub. |
 | `STARCI_GITHUB_API` | The API's address, for GitHub Enterprise. Default: github.com. |
 | `STARCI_ALLOW_FORK_PULL_REQUESTS` | `true` to run pull requests from forks. Off by default. |
