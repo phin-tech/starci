@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"git.phin.tech/sam/starci/internal/engine"
 	"git.phin.tech/sam/starci/internal/forge"
 	"git.phin.tech/sam/starci/internal/plan"
 )
@@ -17,14 +18,17 @@ import (
 // Script is where a repository keeps its CI script.
 const Script = ".ci.star"
 
-// Report says where a run's outcome is to be posted when it finishes.
-type Report struct {
-	Forge string `json:"forge"`
-	Repo  string `json:"repo"`
-	SHA   string `json:"sha"`
-	// Context is the name the status appears under on the commit.
-	Context string `json:"context,omitempty"`
-}
+// The things a delivery leads to are an engine's to carry out, and are
+// described where engines are.
+type (
+	Run       = engine.Run
+	Report    = engine.Report
+	Delivery  = engine.Delivery
+	Scheduler = engine.Scheduler
+)
+
+// DeliveryEvent is the name a door gives the event it raises.
+const DeliveryEvent = engine.DeliveryEvent
 
 // statusContext names the line a run's status goes on. A commit pushed to a
 // branch that also has a pull request open gets a run for each, and they
@@ -37,30 +41,6 @@ func statusContext(event string) string {
 		return forge.StatusContext + "/tag"
 	}
 	return forge.StatusContext
-}
-
-// Run is everything needed to start a run for a push.
-type Run struct {
-	Mode       string
-	Plan       *plan.Plan // basic mode
-	Filename   string     // advanced mode
-	Source     []byte     // advanced mode
-	Context    plan.Context
-	CloneURL   string
-	Supersedes string
-	// Exclusive, if set, names runs of which there is to be only one at a
-	// time, where a newer one gives way to the one in progress. It is the
-	// reverse of Supersedes, where the one in progress gives way.
-	Exclusive string
-	Report    Report
-	// Broken is why the script could not be evaluated, for a run that was
-	// asked for anyway. There is then nothing to execute, only this to say.
-	Broken string
-}
-
-// Submitter hands a run to whatever will execute it, without waiting for it.
-type Submitter interface {
-	Submit(ctx context.Context, r Run) error
 }
 
 // Hook is a forge and the secret it signs deliveries with.
@@ -81,23 +61,6 @@ type Hook struct {
 // A Receiver is where a Delivery is acted on, on a worker. It checks the
 // signature itself, with the secret it holds, so a door does not have to be
 // trusted; then it fetches the script, evaluates it, and starts the run.
-
-// DeliveryEvent is the name a door gives the event it raises.
-const DeliveryEvent = "starci:delivery"
-
-// Delivery is one webhook delivery, as a door passes it on: enough to check
-// it and act on it, and nothing interpreted.
-type Delivery struct {
-	// Forge is which forge it came from, as the door's address said:
-	// "forgejo" or "github".
-	Forge string `json:"forge"`
-	// Event is the kind of delivery, from the forge's event header.
-	Event string `json:"event"`
-	// Signature is the forge's signature header, as it arrived.
-	Signature string `json:"signature"`
-	// Body is the request body, byte for byte: the signature is over it.
-	Body string `json:"body"`
-}
 
 // Door receives deliveries at /hooks/<forge name> and sends each on.
 type Door struct {
@@ -155,17 +118,11 @@ func (d *Door) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "accepted")
 }
 
-// Scheduler keeps an engine's timers in step with what scripts declare.
-type Scheduler interface {
-	// Sync makes the schedules that fire for a repository exactly these:
-	// adding, changing and removing as needed.
-	Sync(ctx context.Context, forgeName, repo string, schedules []plan.Schedule) error
-}
-
 // Receiver acts on deliveries.
 type Receiver struct {
-	Hooks  map[string]Hook
-	Submit Submitter
+	Hooks map[string]Hook
+	// Submit is what a delivery's run is handed to.
+	Submit engine.Starter
 	Log    func(format string, args ...any)
 	// Schedules, if set, is told what a repository's default branch
 	// declares each time that branch is pushed to.
@@ -270,7 +227,7 @@ func (h *Receiver) handle(ctx context.Context, f forge.Forge, push forge.Push) (
 		Context:    c,
 		CloneURL:   push.CloneURL,
 		Supersedes: Supersedes(c),
-		Report:     Report{Forge: f.Name(), Repo: push.Repo, SHA: push.SHA, Context: line},
+		Report:     &Report{Forge: f.Name(), Repo: push.Repo, SHA: push.SHA, Context: line},
 	}
 
 	run.Mode, err = plan.Mode(Script, src)
@@ -303,7 +260,7 @@ func (h *Receiver) handle(ctx context.Context, f forge.Forge, push forge.Push) (
 	if err := status("pending", queued); err != nil {
 		return "", err
 	}
-	if err := h.Submit.Submit(ctx, run); err != nil {
+	if err := h.Submit.Start(ctx, run); err != nil {
 		_ = status("error", "could not be queued: "+firstLine(err.Error()))
 		return "", fmt.Errorf("submitting the run: %w", err)
 	}
@@ -342,7 +299,7 @@ func (h *Receiver) Scheduled(ctx context.Context, forgeName, repo, name string) 
 		Context:    c,
 		CloneURL:   head.CloneURL,
 		Supersedes: Supersedes(c),
-		Report:     Report{Forge: f.Name(), Repo: repo, SHA: head.SHA, Context: line},
+		Report:     &Report{Forge: f.Name(), Repo: repo, SHA: head.SHA, Context: line},
 	}
 
 	declared, err := plan.Schedules(Script, src)

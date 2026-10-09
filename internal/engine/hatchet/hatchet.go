@@ -25,6 +25,7 @@ import (
 	"github.com/hatchet-dev/hatchet/pkg/client/types"
 	sdk "github.com/hatchet-dev/hatchet/sdks/go"
 
+	"git.phin.tech/sam/starci/internal/engine"
 	"git.phin.tech/sam/starci/internal/forge"
 	"git.phin.tech/sam/starci/internal/plan"
 	"git.phin.tech/sam/starci/internal/step"
@@ -73,13 +74,7 @@ type ScriptInput struct {
 }
 
 // RunResult is how a run ended, in either mode.
-type RunResult struct {
-	OK    bool          `json:"ok"`
-	Steps []plan.Result `json:"steps"`
-	// Error is why an advanced script ended early: a failed step it did not
-	// allow for, its own fail(), or a mistake in the script.
-	Error string `json:"error,omitempty"`
-}
+type RunResult = engine.Result
 
 // Tasks is the set of tasks a worker registers and a client triggers.
 type Tasks struct {
@@ -280,23 +275,35 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 // because the tasks that receive deliveries are among them.
 type submitter func() Tasks
 
-func (s submitter) Submit(ctx context.Context, r trigger.Run) error { return s().Submit(ctx, r) }
+func (s submitter) Start(ctx context.Context, r trigger.Run) error { return s().Start(ctx, r) }
 
-// Submit starts a run and returns as soon as Hatchet has it. It is what a
-// webhook receiver calls: the run reports its own outcome.
-func (t Tasks) Submit(ctx context.Context, r trigger.Run) error {
+// Start hands Hatchet a run and returns as soon as it has it. The run
+// reports its own outcome.
+func (t Tasks) Start(ctx context.Context, r trigger.Run) error {
 	var err error
 	if r.Mode == plan.Advanced {
-		_, err = t.Script.RunNoWait(ctx, ScriptInput{
-			Filename: r.Filename, Source: string(r.Source), Context: r.Context,
-			CloneURL: r.CloneURL, Supersedes: r.Supersedes, Exclusive: OrUnique(r.Exclusive), Report: &r.Report,
-		})
+		_, err = t.Script.RunNoWait(ctx, scriptInput(r))
 	} else {
-		_, err = t.Pipeline.RunNoWait(ctx, PipelineInput{
-			Plan: *r.Plan, CloneURL: r.CloneURL, Supersedes: r.Supersedes, Exclusive: OrUnique(r.Exclusive), Report: &r.Report,
-		})
+		_, err = t.Pipeline.RunNoWait(ctx, pipelineInput(r))
 	}
 	return err
+}
+
+// Runs are grouped by what they supersede and what they are exclusive with,
+// so a run that has neither is given names of its own.
+
+func pipelineInput(r engine.Run) PipelineInput {
+	return PipelineInput{
+		Plan: *r.Plan, CloneURL: r.CloneURL,
+		Supersedes: OrUnique(r.Supersedes), Exclusive: OrUnique(r.Exclusive), Report: r.Report,
+	}
+}
+
+func scriptInput(r engine.Run) ScriptInput {
+	return ScriptInput{
+		Filename: r.Filename, Source: string(r.Source), Context: r.Context, CloneURL: r.CloneURL,
+		Supersedes: OrUnique(r.Supersedes), Exclusive: OrUnique(r.Exclusive), Report: r.Report,
+	}
 }
 
 // OrUnique returns name, or if it is empty a value nothing else has. Runs

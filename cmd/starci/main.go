@@ -34,12 +34,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/hatchet-dev/hatchet/pkg/client/rest"
-	hatchet "github.com/hatchet-dev/hatchet/sdks/go"
-	"github.com/hatchet-dev/hatchet/sdks/go/features"
-
 	"git.phin.tech/sam/starci/internal/ciinfo"
 	"git.phin.tech/sam/starci/internal/compile"
+	"git.phin.tech/sam/starci/internal/engine"
 	onhatchet "git.phin.tech/sam/starci/internal/engine/hatchet"
 	"git.phin.tech/sam/starci/internal/engine/local"
 	"git.phin.tech/sam/starci/internal/forge"
@@ -261,13 +258,43 @@ func runCmd(args []string) error {
 		fmt.Printf("%s @ %.8s: advanced script, steps are decided as it runs\n", c.Repo, c.SHA)
 	}
 
-	started := time.Now()
-	var result onhatchet.RunResult
-	if *localRun {
-		result, err = runLocally(mode, p, *file, src, c, *cloneURL, *slots, *verbose)
-	} else {
-		result, err = runOnHatchet(mode, p, *file, src, c, *cloneURL)
+	run := engine.Run{Mode: mode, Plan: p, Context: c, CloneURL: *cloneURL, Supersedes: trigger.Supersedes(c)}
+	if mode == plan.Advanced {
+		run.Filename, run.Source = filepath.Base(*file), src
 	}
+
+	// Ctrl-C stops the run; where the engine can, its steps too.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	var eng engine.Engine
+	if *localRun {
+		eng, err = localEngine(*slots, *verbose)
+	} else {
+		eng, err = onhatchet.New(onhatchet.Options{})
+	}
+	if err != nil {
+		return err
+	}
+	// Whatever the run asks for that this engine does not do is said now,
+	// not left to be discovered.
+	for _, lost := range eng.Can().Missing(run) {
+		fmt.Println("note: " + lost)
+	}
+	// A step nobody can take waits in silence until the engine gives up on
+	// it. Say so now, while the cause is still obvious.
+	if fleet, ok := eng.(engine.Fleet); ok && p != nil {
+		if workers, werr := fleet.Workers(ctx); werr == nil {
+			for _, s := range p.Steps {
+				if !engine.CanTake(workers, s) {
+					fmt.Printf("warning: no connected worker can take step %q (needs %s); it will wait for one\n", s.Name, engine.Placement(s))
+				}
+			}
+		}
+	}
+
+	started := time.Now()
+	result, err := eng.Execute(ctx, run)
 	if err != nil {
 		return err
 	}
@@ -307,10 +334,10 @@ func runCmd(args []string) error {
 	return nil
 }
 
-// runLocally executes the run on this machine. The same script, the same
-// sandbox and the same result cache as on a worker; no queue, no other
+// localEngine is this machine, with nothing but Docker: the same script, the
+// same sandbox and the same result cache as a worker, and no queue, no other
 // machines, and nothing to resume from if this process is stopped.
-func runLocally(mode string, p *plan.Plan, file string, src []byte, c plan.Context, cloneURL string, slots int, verbose bool) (onhatchet.RunResult, error) {
+func localEngine(slots int, verbose bool) (engine.Engine, error) {
 	// Named, because with a shared store this machine's results are seen
 	// from others.
 	host, _ := os.Hostname()
@@ -319,83 +346,18 @@ func runLocally(mode string, p *plan.Plan, file string, src []byte, c plan.Conte
 	}
 	cfg, err := machineConfig(host)
 	if err != nil {
-		return onhatchet.RunResult{}, err
+		return nil, err
 	}
-	// Ctrl-C stops the steps and removes their containers.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	runner := &local.Runner{
-		Ctx:      ctx,
-		Config:   cfg,
-		CloneURL: cloneURL,
-		SHA:      c.SHA,
-		Slots:    slots,
-	}
+	eng := &local.Engine{Config: cfg, Slots: slots}
 	if verbose {
 		var mu sync.Mutex
-		runner.Log = func(name, line string) {
+		eng.Log = func(name, line string) {
 			mu.Lock()
 			defer mu.Unlock()
 			fmt.Printf("  [%s] %s\n", name, line)
 		}
 	}
-
-	var out onhatchet.RunResult
-	if mode == plan.Advanced {
-		results, err := plan.RunPipeline(ctx, filepath.Base(file), src, c, runner)
-		out = onhatchet.RunResult{OK: err == nil, Steps: results}
-		if err != nil {
-			out.Error = err.Error()
-		}
-		return out, nil
-	}
-	results, err := plan.RunPlan(p, runner)
-	if err != nil {
-		return out, err
-	}
-	return onhatchet.RunResult{OK: plan.Passed(results), Steps: results}, nil
-}
-
-func runOnHatchet(mode string, p *plan.Plan, file string, src []byte, c plan.Context, cloneURL string) (onhatchet.RunResult, error) {
-	var out onhatchet.RunResult
-	supersedes := trigger.Supersedes(c)
-
-	client, err := hatchet.NewClient()
-	if err != nil {
-		return out, err
-	}
-	tasks := onhatchet.NewTasks(client, step.Config{}, nil, nil)
-
-	var res *hatchet.TaskResult
-	if mode == plan.Advanced {
-		res, err = tasks.Script.Run(context.Background(), onhatchet.ScriptInput{
-			Filename: filepath.Base(file), Source: string(src), Context: c, CloneURL: cloneURL,
-			Supersedes: supersedes, Exclusive: onhatchet.OrUnique(""),
-		})
-	} else {
-		// A step nobody can take waits in silence until Hatchet gives up on
-		// it. Say so now, while the cause is still obvious.
-		if workers, werr := listWorkers(client); werr == nil {
-			for _, s := range p.Steps {
-				if !anyCanTake(workers, s) {
-					fmt.Printf("warning: no connected worker can take step %q (needs %s); it will wait for one\n", s.Name, describePlacement(s))
-				}
-			}
-		}
-		res, err = tasks.Pipeline.Run(context.Background(), onhatchet.PipelineInput{
-			Plan: *p, CloneURL: cloneURL, Supersedes: supersedes, Exclusive: onhatchet.OrUnique(""),
-		})
-	}
-	if err != nil {
-		// A cancelled run comes back as an error with nothing in it.
-		if strings.TrimSpace(err.Error()) == "" || strings.Contains(strings.ToLower(err.Error()), "cancel") {
-			return out, fmt.Errorf("the run was cancelled (a newer run for %s replaces it)", supersedes)
-		}
-		return out, err
-	}
-	err = res.Into(&out)
-	return out, err
+	return eng, nil
 }
 
 // workerCmd is configured by environment, since it normally runs as a service:
@@ -422,7 +384,7 @@ func workerCmd() error {
 		}
 		slots = n
 	}
-	labels := map[string]any{}
+	labels := map[string]string{}
 	for _, pair := range strings.Split(os.Getenv("STARCI_LABELS"), ",") {
 		if pair = strings.TrimSpace(pair); pair == "" {
 			continue
@@ -434,10 +396,6 @@ func workerCmd() error {
 		labels[k] = v
 	}
 
-	client, err := hatchet.NewClient()
-	if err != nil {
-		return err
-	}
 	forges, secrets, err := forgesFromEnv()
 	if err != nil {
 		return err
@@ -450,48 +408,14 @@ func workerCmd() error {
 			reception.Hooks[forgeName] = trigger.Hook{Forge: f, Secret: secrets[forgeName]}
 		}
 	}
-	tasks := onhatchet.NewTasks(client, cfg, reporter(forges), reception)
-	worker, err := client.NewWorker("starci-"+name,
-		hatchet.WithWorkflows(tasks.All()...),
-		hatchet.WithSlots(slots),
-		// Pipelines and scripts only wait on their steps, so they get their
-		// own pool and can never occupy the slots those steps need.
-		hatchet.WithDurableSlots(20),
-		hatchet.WithLabels(labels),
-	)
+
+	eng, err := onhatchet.New(onhatchet.Options{Machine: cfg, Post: reporter(forges), Reception: reception, Slots: slots, Labels: labels})
 	if err != nil {
 		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	// A worker that fires schedules also looks, as it starts and from time to
-	// time, for ones that asked to be caught up and missed a firing while
-	// nothing was running to fire it.
-	if len(reception.Hooks) > 0 {
-		go func() {
-			tick := time.NewTicker(10 * time.Minute)
-			defer tick.Stop()
-			// Not at once: the worker has to be known to Hatchet first.
-			wait := time.After(time.Minute)
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-wait:
-				case <-tick.C:
-				}
-				started, err := tasks.CatchUp(ctx, client, cfg.StateDir, time.Now())
-				if err != nil {
-					fmt.Fprintln(os.Stderr, "starci: catching up schedules:", err)
-				}
-				for _, s := range started {
-					fmt.Fprintln(os.Stderr, "starci: caught up a missed firing of", s)
-				}
-			}
-		}()
-	}
-	return worker.StartBlocking(ctx)
+	return engine.Host(eng).Work(ctx)
 }
 
 // machineConfig is what this machine brings to running steps, from the
@@ -533,74 +457,6 @@ func machineConfig(name string) (step.Config, error) {
 	return cfg, nil
 }
 
-// workerInfo is the part of a Hatchet worker record that placement depends on.
-type workerInfo struct {
-	id, name, status string
-	labels           map[string]string
-}
-
-func listWorkers(client *hatchet.Client) ([]workerInfo, error) {
-	list, err := client.Workers().List(context.Background())
-	if err != nil {
-		return nil, err
-	}
-	var out []workerInfo
-	if list.Rows == nil {
-		return out, nil
-	}
-	for _, w := range *list.Rows {
-		info := workerInfo{id: w.Metadata.Id, name: w.Name, labels: map[string]string{}}
-		if w.Status != nil {
-			info.status = string(*w.Status)
-		}
-		if w.Labels != nil {
-			for _, l := range *w.Labels {
-				if l.Value != nil {
-					info.labels[l.Key] = *l.Value
-				}
-			}
-		}
-		out = append(out, info)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
-	return out, nil
-}
-
-// anyCanTake reports whether some active worker satisfies the step's hard
-// rules. Preferences are ignored: they never stop a step from running.
-func anyCanTake(workers []workerInfo, s plan.Step) bool {
-	for _, w := range workers {
-		if w.status != "ACTIVE" {
-			continue
-		}
-		ok := true
-		for k, v := range s.Worker {
-			ok = ok && w.labels[k] == v
-		}
-		for k, v := range s.Avoid {
-			ok = ok && w.labels[k] != v
-		}
-		if ok {
-			return true
-		}
-	}
-	return false
-}
-
-func describePlacement(s plan.Step) string {
-	var parts []string
-	for _, k := range sortedKeys(s.Worker) {
-		parts = append(parts, k+"="+s.Worker[k])
-	}
-	for _, k := range sortedKeys(s.Avoid) {
-		parts = append(parts, "not "+k+"="+s.Avoid[k])
-	}
-	if len(parts) == 0 {
-		return "any worker"
-	}
-	return strings.Join(parts, ", ")
-}
-
 func sortedKeys(m map[string]string) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -611,66 +467,41 @@ func sortedKeys(m map[string]string) []string {
 }
 
 func workersCmd() error {
-	client, err := hatchet.NewClient()
+	eng, err := onhatchet.New(onhatchet.Options{})
 	if err != nil {
 		return err
 	}
-	workers, err := listWorkers(client)
+	workers, err := engine.Fleet(eng).Workers(context.Background())
 	if err != nil {
 		return err
 	}
-	shown := 0
 	for _, w := range workers {
-		// Hatchet keeps a record of every worker that ever connected.
-		if w.status == "INACTIVE" {
-			continue
-		}
 		var labels []string
-		for _, k := range sortedKeys(w.labels) {
-			labels = append(labels, k+"="+w.labels[k])
+		for _, k := range sortedKeys(w.Labels) {
+			labels = append(labels, k+"="+w.Labels[k])
 		}
 		state := "taking work"
-		if w.status == "PAUSED" {
+		if w.Shunned {
 			state = "shunned"
 		}
-		fmt.Printf("%-24s %-12s %s\n", w.name, state, strings.Join(labels, " "))
-		shown++
+		fmt.Printf("%-24s %-12s %s\n", w.Name, state, strings.Join(labels, " "))
 	}
-	if shown == 0 {
+	if len(workers) == 0 {
 		fmt.Println("no workers connected")
 	}
 	return nil
 }
 
-// shunCmd stops (or resumes) Hatchet assigning new work to a worker. Steps it
-// is already running finish; nothing new arrives. For a machine that is
+// shunCmd stops (or resumes) new work being given to a worker. Steps it is
+// already running finish; nothing new arrives. For a machine that is
 // misbehaving, or about to be taken down.
 func shunCmd(name string, shun bool) error {
-	client, err := hatchet.NewClient()
+	eng, err := onhatchet.New(onhatchet.Options{})
 	if err != nil {
 		return err
 	}
-	workers, err := listWorkers(client)
-	if err != nil {
+	if err := engine.Fleet(eng).Shun(context.Background(), name, shun); err != nil {
 		return err
-	}
-	done := 0
-	for _, w := range workers {
-		if w.status == "INACTIVE" || (w.name != name && w.name != "starci-"+name) {
-			continue
-		}
-		if shun {
-			_, err = client.Workers().Pause(context.Background(), w.id)
-		} else {
-			_, err = client.Workers().Unpause(context.Background(), w.id)
-		}
-		if err != nil {
-			return err
-		}
-		done++
-	}
-	if done == 0 {
-		return fmt.Errorf("no connected worker is named %q", name)
 	}
 	if shun {
 		fmt.Printf("%s is shunned: it will finish what it has and get nothing new\n", name)
@@ -769,7 +600,7 @@ func serveCmd() error {
 	if len(forges) == 0 {
 		return errors.New("no forge is configured; set STARCI_FORGEJO_URL or STARCI_GITHUB_TOKEN_FILE")
 	}
-	client, err := hatchet.NewClient()
+	eng, err := onhatchet.New(onhatchet.Options{})
 	if err != nil {
 		return err
 	}
@@ -782,14 +613,7 @@ func serveCmd() error {
 		listen = ":8080"
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/hooks/", &trigger.Door{
-		Forges:  forges,
-		Secrets: secrets,
-		Send: func(ctx context.Context, d trigger.Delivery) error {
-			return client.Events().Push(ctx, trigger.DeliveryEvent, d)
-		},
-		Log: logf,
-	})
+	mux.Handle("/hooks/", &trigger.Door{Forges: forges, Secrets: secrets, Send: engine.Relay(eng).Relay, Log: logf})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "ok") })
 
 	var names []string
@@ -821,39 +645,17 @@ func hooksCmd(args []string) error {
 		return err
 	}
 	if len(secrets[name]) == 0 {
-		return fmt.Errorf("no webhook secret is configured for %s; Hatchet needs it to check deliveries", name)
+		return fmt.Errorf("no webhook secret is configured for %s; the engine needs it to check deliveries", name)
 	}
-	auth := features.HMACAuth{
-		SigningSecret: string(secrets[name]),
-		Algorithm:     rest.SHA256,
-		Encoding:      rest.HEX,
-	}
-	source := rest.GENERIC
-	switch name {
-	case "forgejo":
-		auth.SignatureHeaderName = "X-Forgejo-Signature"
-	case "github":
-		auth.SignatureHeaderName = "X-Hub-Signature-256"
-		source = rest.GITHUB
-	default:
-		return fmt.Errorf("unknown forge %q: forgejo or github", name)
-	}
-	client, err := hatchet.NewClient()
+	eng, err := onhatchet.New(onhatchet.Options{})
 	if err != nil {
 		return err
 	}
-	hook, err := client.Webhooks().Create(context.Background(), features.CreateWebhookOpts{
-		Name:       "starci-" + name,
-		SourceName: source,
-		// A constant: every delivery from this forge is the same event, and
-		// the worker reads what happened out of it.
-		EventKeyExpression: "'" + onhatchet.HookEvent(name) + "'",
-		Auth:               auth,
-	})
+	path, err := engine.Relay(eng).AcceptWebhooks(context.Background(), name, secrets[name])
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Hatchet now accepts %s deliveries. Point the forge's webhook at:\n\n  <hatchet address>/api/v1/stable/tenants/%s/webhooks/%s\n\nwith content type application/json and the same secret.\n", name, hook.TenantId, hook.Name)
+	fmt.Printf("%s now accepts %s deliveries. Point the forge's webhook at:\n\n  <%s address>%s\n\nwith content type application/json and the same secret.\n", eng.Name(), name, eng.Name(), path)
 	return nil
 }
 

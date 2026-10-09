@@ -76,7 +76,7 @@ type submitted struct {
 	err  error
 }
 
-func (s *submitted) Submit(_ context.Context, r Run) error {
+func (s *submitted) Start(_ context.Context, r Run) error {
 	if s.err != nil {
 		return s.err
 	}
@@ -171,7 +171,7 @@ func TestPushStartsARun(t *testing.T) {
 	if run.Supersedes != "sam/app@main" || run.CloneURL != "https://git.example/sam/app.git" || run.Context.SHA != "abc123" || run.Context.Event != plan.EventPush {
 		t.Errorf("run = %+v", run)
 	}
-	if run.Report != (Report{Forge: "forgejo", Repo: "sam/app", SHA: "abc123", Context: "starci"}) {
+	if *run.Report != (Report{Forge: "forgejo", Repo: "sam/app", SHA: "abc123", Context: "starci"}) {
 		t.Errorf("report = %+v", run.Report)
 	}
 	if got, want := fake.last(), "pending: queued: 2 step(s)"; got != want {

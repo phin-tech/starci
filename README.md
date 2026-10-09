@@ -277,8 +277,10 @@ and advanced scripts work.
 |---|---|
 | `internal/plan` | The language: evaluating scripts in both modes, and walking a plan. Knows no engine; it asks a `Runner` to "run these steps together and hand back their results". |
 | `internal/step` | Running one step on one machine: fetch, sandbox, container, result cache. Knows no engine either. |
-| `internal/engine/local` | A `Runner` that calls `step` directly, concurrently. |
-| `internal/engine/hatchet` | A `Runner` that starts each step as a Hatchet task, plus the tasks themselves. |
+| `internal/engine` | What starci asks of whatever carries a run out: the `Engine` interface, and the optional abilities beside it. |
+| `internal/engine/local` | The engine that is this machine: it calls `step` directly, concurrently. |
+| `internal/engine/hatchet` | The engine that is Hatchet: each step a task, a basic plan or an advanced script a durable one above them. |
+| `internal/engine/enginetest` | What an engine has to get right, as tests every engine is put through. |
 | `internal/compile` | Writing a basic plan out for GitHub Actions or CircleCI. |
 | `internal/ciinfo` | Reading why a run started from the CI tool starci is running inside. |
 | `internal/forge` | Talking to Forgejo and GitHub: reading a push, fetching a script, posting a status. |
@@ -286,10 +288,51 @@ and advanced scripts work.
 | `doors/` | The contract for a door, and ones that are not Go: a Cloudflare Worker, an AWS Lambda. |
 | `internal/store/s3` | The shared result store. |
 
-An engine is whatever implements `Runner`. To run advanced scripts durably it
-must also remember the results it handed back, so that a script evaluated
-again after an interruption is given the same answers. Hatchet does; the local
-engine does not, and says so.
+### Engines
+
+starci decides what a run is: which steps, in what order, each given which
+files. Getting those steps onto machines, waiting for them, and surviving a
+machine going away is an engine's job. An engine has to do one thing:
+
+```go
+type Engine interface {
+    Name() string
+    Can() Capabilities
+    Execute(ctx context.Context, r Run) (Result, error)
+}
+```
+
+`Can` says which of the things a run may ask for the engine honours: surviving
+an interruption, placing steps by label, superseding, and running one at a
+time. What a run asks for that its engine cannot do is said before the run
+starts, not dropped. `starci run --local` on a script with `worker` rules
+prints which steps lost them.
+
+Everything else is optional, and each ability is its own small interface that
+a caller asks for with a type assertion:
+
+| Interface | An engine that has it can | Used by |
+|---|---|---|
+| `Starter` | be handed a run and left with it | deliveries, schedules |
+| `Scheduler` | fire the schedules a script declares | `starci worker` |
+| `Host` | make this process a worker | `starci worker` |
+| `Fleet` | list its workers, shun and unshun them | `starci workers`, `shun`, `unshun` |
+| `Relay` | be passed a forge's deliveries, or receive them itself | `starci serve`, `starci hooks add` |
+
+Hatchet has all of them. The local engine has none, and no capabilities
+either: there is nowhere else to place a step, no other run to supersede, and
+no record to resume from.
+
+A new engine is a package that implements `Engine` and passes the shared
+tests, which put real containers through basic and advanced runs and hold the
+engine to what `Can` claims:
+
+```go
+func TestEngine(t *testing.T) { enginetest.Run(t, myEngine) }
+```
+
+The optional interfaces have only ever been shaped by Hatchet. Expect them to
+move when a second engine with workers of its own is written.
 
 ## Workers
 
@@ -565,4 +608,13 @@ on a worker. It makes a step that does run faster, and is not part of the key.
 ```sh
 go test ./...          # the step tests run real containers
 go test -short ./...   # without them
+```
+
+The engine tests run against the local engine with everything else. Against
+Hatchet they need one to talk to, so they run when asked, with this process
+as the worker:
+
+```sh
+set -a; . dev/.env; set +a
+STARCI_TEST_HATCHET=1 go test ./internal/engine/hatchet -run TestEngine
 ```

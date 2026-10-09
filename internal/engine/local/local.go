@@ -6,8 +6,10 @@ package local
 
 import (
 	"context"
+	"errors"
 	"sync"
 
+	"git.phin.tech/sam/starci/internal/engine"
 	"git.phin.tech/sam/starci/internal/plan"
 	"git.phin.tech/sam/starci/internal/step"
 )
@@ -48,4 +50,42 @@ func (r *Runner) Run(steps []plan.Step) ([]plan.Result, error) {
 	}
 	wg.Wait()
 	return results, nil
+}
+
+// Engine carries a run out on this machine, start to finish, in the process
+// that asked. It can do the one thing every engine must and none of the
+// optional ones: there is nowhere else to place a step, no other run to
+// supersede, and no record to resume from.
+type Engine struct {
+	Config step.Config
+	// Slots is how many steps run at once.
+	Slots int
+	// Log receives each line a step prints, with the step's name. Optional.
+	Log func(stepName, line string)
+}
+
+var _ engine.Engine = (*Engine)(nil)
+
+func (e *Engine) Name() string { return "local" }
+
+func (e *Engine) Can() engine.Capabilities { return engine.Capabilities{} }
+
+func (e *Engine) Execute(ctx context.Context, r engine.Run) (engine.Result, error) {
+	runner := &Runner{Ctx: ctx, Config: e.Config, CloneURL: r.CloneURL, SHA: r.Context.SHA, Slots: e.Slots, Log: e.Log}
+	if r.Mode == plan.Advanced {
+		results, err := plan.RunPipeline(ctx, r.Filename, r.Source, r.Context, runner)
+		out := engine.Result{OK: err == nil, Steps: results}
+		if err != nil {
+			out.Error = err.Error()
+		}
+		return out, nil
+	}
+	if r.Plan == nil {
+		return engine.Result{}, errors.New("a basic run needs a plan")
+	}
+	results, err := plan.RunPlan(r.Plan, runner)
+	if err != nil {
+		return engine.Result{}, err
+	}
+	return engine.Result{OK: plan.Passed(results), Steps: results}, nil
 }

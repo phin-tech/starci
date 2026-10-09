@@ -173,7 +173,7 @@ func scheduledTask(client *sdk.Client, receiver *trigger.Receiver, timers *crons
 					ctx.Log("this worker has no forge credentials; the outcome was not posted to " + in.Repo)
 					return
 				}
-				if err := post(ctx, run.Report, s); err != nil {
+				if err := post(ctx, *run.Report, s); err != nil {
 					ctx.Log("could not post the outcome: " + err.Error())
 				}
 			}
@@ -197,7 +197,7 @@ func scheduledTask(client *sdk.Client, receiver *trigger.Receiver, timers *crons
 			default:
 				run.Exclusive, run.Supersedes = run.Supersedes, OrUnique("")
 			}
-			if err := receiver.Submit.Submit(ctx, run); err != nil {
+			if err := receiver.Submit.Start(ctx, run); err != nil {
 				return DeliveryResult{}, fmt.Errorf("starting the run: %w", err)
 			}
 			return DeliveryResult{Said: "started"}, nil
