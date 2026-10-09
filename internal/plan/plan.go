@@ -22,7 +22,6 @@ import (
 
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
-	"go.starlark.net/syntax"
 )
 
 // maxSteps bounds how long a script may run, so `while`-style mistakes (or a
@@ -31,10 +30,53 @@ const maxSteps = 10_000_000
 
 // Context is everything a script is told about the run.
 type Context struct {
-	Repo         string   `json:"repo"`
-	SHA          string   `json:"sha"`
+	Repo string `json:"repo"`
+	SHA  string `json:"sha"`
+	// Ref is the branch, for a push or a manual run of one; the branch a pull
+	// request would merge from; empty for a tag.
 	Ref          string   `json:"ref"`
 	ChangedFiles []string `json:"changed_files"`
+	// Event is why the run was started: push, tag, pull_request, schedule or
+	// manual. Empty means push, which is what a run with nothing else known
+	// about it is taken to be.
+	Event string `json:"event,omitempty"`
+	// Tag is the tag's name, for a tag.
+	Tag string `json:"tag,omitempty"`
+	// PR describes the pull request, for a pull_request.
+	PR *PullRequest `json:"pr,omitempty"`
+	// Schedule is the name of the schedule that fired, for a schedule.
+	Schedule string `json:"schedule,omitempty"`
+}
+
+// PullRequest is what a script is told about a pull request.
+type PullRequest struct {
+	Number int `json:"number"`
+	// Base is the branch it would merge into; Head the branch it comes from.
+	Base string `json:"base"`
+	Head string `json:"head"`
+	// Fork is true when it comes from another repository, which is to say
+	// from someone who cannot push to this one.
+	Fork bool `json:"fork"`
+}
+
+// The events a run can be started by.
+const (
+	EventPush        = "push"
+	EventTag         = "tag"
+	EventPullRequest = "pull_request"
+	EventSchedule    = "schedule"
+	EventManual      = "manual"
+)
+
+// Schedule is a time-based trigger a script declares at its top level:
+//
+//	schedule("nightly", cron = "0 3 * * *")
+//
+// Every other event is caused by something. A schedule is caused by nothing,
+// so it is the one trigger that has to be written down.
+type Schedule struct {
+	Name string `json:"name"`
+	Cron string `json:"cron"`
 }
 
 // Step is one container to run.
@@ -219,9 +261,9 @@ func (t *trackedContext) Attr(name string) (starlark.Value, error) {
 
 func evalWith(filename string, src []byte, c Context, ctxValue starlark.Value) (*Plan, error) {
 	thread := newThread("plan")
-	globals, err := starlark.ExecFileOptions(&syntax.FileOptions{}, thread, filename, src, predeclared())
+	globals, _, err := load(thread, filename, src)
 	if err != nil {
-		return nil, describe(err)
+		return nil, err
 	}
 
 	ci, ok := globals["ci"].(starlark.Callable)
@@ -275,12 +317,31 @@ func contextValue(c Context) starlark.Value {
 	}
 	sort.Strings(dirs)
 
+	event := c.Event
+	if event == "" {
+		event = EventPush
+	}
+	// None when there is no pull request, so that `if ctx.pr:` reads naturally.
+	var pr starlark.Value = starlark.None
+	if c.PR != nil {
+		pr = starlarkstruct.FromStringDict(starlark.String("pr"), starlark.StringDict{
+			"number": starlark.MakeInt(c.PR.Number),
+			"base":   starlark.String(c.PR.Base),
+			"head":   starlark.String(c.PR.Head),
+			"fork":   starlark.Bool(c.PR.Fork),
+		})
+	}
+
 	return starlarkstruct.FromStringDict(starlark.String("ctx"), starlark.StringDict{
 		"repo":          starlark.String(c.Repo),
 		"sha":           starlark.String(c.SHA),
 		"ref":           starlark.String(c.Ref),
 		"changed_files": stringList(files),
 		"changed_dirs":  stringList(dirs),
+		"event":         starlark.String(event),
+		"tag":           starlark.String(c.Tag),
+		"pr":            pr,
+		"schedule":      starlark.String(c.Schedule),
 	})
 }
 

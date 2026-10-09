@@ -15,7 +15,7 @@ def ci(ctx):
     ]
 ```
 
-There are thirty worked examples in [`examples/`](examples/), in both modes.
+There are thirty-one worked examples in [`examples/`](examples/), in both modes.
 
 ## Status
 
@@ -143,12 +143,30 @@ already passed with the same inputs skips the work, using the Actions cache as
 the record. `needs` and `worker` carry over, as job dependencies and runner
 labels.
 
+A workflow file has to say in advance what happens for every event, so for
+GitHub the script is asked once for each kind: a push to the default branch,
+a push to another branch, a tag, a pull request, a pull request from a fork,
+each declared schedule, and a manual run. A step that turns up for some and
+not others becomes a job with a condition, and the events that lead to any
+step at all become the workflow's `on:`. So
+
+```python
+if ctx.event == "tag":
+    steps.append(publish)
+```
+
+compiles to a `publish` job that runs only for tags, and a script that will
+not do something for a pull request from a fork still will not once compiled.
+
 Some things cannot be frozen into a file, and the header of the generated
 workflow says which apply:
 
-- A plan that depends on the commit (`ctx.changed_files`, `ctx.ref`) is
-  compiled for a commit about which nothing is known. Steps the script would
-  add or drop for a branch or a set of changes are not represented.
+- Anything decided by a particular value rather than by the kind of event: a
+  rule about which files changed, about a branch other than "is it the default
+  one", about what a tag is called. Those are frozen at what a stand-in gave.
+- A step that is a different command for different events cannot be one job;
+  compiling says so and asks for two names.
+- The CircleCI output does not do this yet: it is the plan for a push.
 - `prefer` and `avoid` are dropped. For CircleCI so is `worker`: it chooses
   machines by resource class, not by label.
 - Advanced scripts cannot be compiled at all: their steps are only known as
@@ -227,7 +245,12 @@ Runs for different branches, or for a bare commit, leave each other alone.
 | | |
 |---|---|
 | `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {}, tools = [], packages = [])` | Declare a container to run. Returns a handle usable in another step's `needs`. |
-| `ctx.repo`, `ctx.sha`, `ctx.ref` | What is being built. |
+| `ctx.repo`, `ctx.sha`, `ctx.ref` | What is being built. `ref` is the branch. |
+| `ctx.event` | Why the run started: `"push"`, `"tag"`, `"pull_request"`, `"schedule"` or `"manual"`. |
+| `ctx.tag` | The tag's name, for a tag. |
+| `ctx.pr` | For a pull request: `.number`, `.base`, `.head`, and `.fork`, true when it comes from another repository. `None` otherwise. |
+| `ctx.schedule` | The name of the schedule that fired. |
+| `schedule(name, cron)` | Declare a schedule, at the top of the file. |
 | `ctx.changed_files` | Files the commit changed, sorted. |
 | `ctx.changed_dirs` | Their top-level directories, sorted (`.` for files at the root). |
 

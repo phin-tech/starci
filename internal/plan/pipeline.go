@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"go.starlark.net/starlark"
@@ -58,9 +59,9 @@ const runnerKey = "starci.runner"
 
 // Mode reports which mode the script is written in.
 func Mode(filename string, src []byte) (string, error) {
-	globals, err := starlark.ExecFileOptions(&syntax.FileOptions{}, newThread("mode"), filename, src, predeclared())
+	globals, _, err := load(newThread("mode"), filename, src)
 	if err != nil {
-		return "", describe(err)
+		return "", err
 	}
 	_, basic := globals["ci"].(starlark.Callable)
 	_, advanced := globals["pipeline"].(starlark.Callable)
@@ -95,9 +96,9 @@ func RunPipeline(ctx context.Context, filename string, src []byte, c Context, r 
 		}
 	}()
 
-	globals, err := starlark.ExecFileOptions(&syntax.FileOptions{}, thread, filename, src, predeclared())
+	globals, _, err := load(thread, filename, src)
 	if err != nil {
-		return rec.results, describe(err)
+		return rec.results, err
 	}
 	fn, ok := globals["pipeline"].(starlark.Callable)
 	if !ok {
@@ -154,7 +155,70 @@ func predeclared() starlark.StringDict {
 		"tool":     starlark.NewBuiltin("tool", toolBuiltin),
 		"run":      starlark.NewBuiltin("run", runBuiltin),
 		"parallel": starlark.NewBuiltin("parallel", parallelBuiltin),
+		"schedule": starlark.NewBuiltin("schedule", scheduleBuiltin),
 	}
+}
+
+const schedulesKey = "starci.schedules"
+
+// declared collects the schedules a script declares as its top level runs.
+type declared struct {
+	schedules []Schedule
+	// closed is set once the top level has finished: a schedule declared
+	// from inside ci() or pipeline() would exist only on the runs that
+	// reached it, which is not what a schedule is.
+	closed bool
+}
+
+var cronField = regexp.MustCompile(`^[0-9*/,\-A-Za-z?]+$`)
+
+func scheduleBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var name, cron string
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "name", &name, "cron", &cron); err != nil {
+		return nil, err
+	}
+	d, _ := thread.Local(schedulesKey).(*declared)
+	if d == nil || d.closed {
+		return nil, fmt.Errorf("schedule(%q): schedules are declared at the top of the file, not inside a function", name)
+	}
+	if !cacheName.MatchString(name) {
+		return nil, fmt.Errorf("schedule %q: a name may only use letters, digits, '-' and '_'", name)
+	}
+	fields := strings.Fields(cron)
+	if len(fields) != 5 {
+		return nil, fmt.Errorf("schedule %q: cron needs five fields (minute hour day month weekday), got %q", name, cron)
+	}
+	for _, f := range fields {
+		if !cronField.MatchString(f) {
+			return nil, fmt.Errorf("schedule %q: %q is not a cron field", name, f)
+		}
+	}
+	for _, other := range d.schedules {
+		if other.Name == name {
+			return nil, fmt.Errorf("schedule %q is declared twice", name)
+		}
+	}
+	d.schedules = append(d.schedules, Schedule{Name: name, Cron: strings.Join(fields, " ")})
+	return starlark.None, nil
+}
+
+// load evaluates a script's top level, returning what it defines and the
+// schedules it declares.
+func load(thread *starlark.Thread, filename string, src []byte) (starlark.StringDict, []Schedule, error) {
+	d := &declared{}
+	thread.SetLocal(schedulesKey, d)
+	globals, err := starlark.ExecFileOptions(&syntax.FileOptions{}, thread, filename, src, predeclared())
+	d.closed = true
+	if err != nil {
+		return nil, nil, describe(err)
+	}
+	return globals, d.schedules, nil
+}
+
+// Schedules returns the schedules a script declares.
+func Schedules(filename string, src []byte) ([]Schedule, error) {
+	_, schedules, err := load(newThread("schedules"), filename, src)
+	return schedules, err
 }
 
 func runBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

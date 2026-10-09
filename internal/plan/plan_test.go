@@ -382,3 +382,78 @@ func TestEvalTrackedReportsWhatTheScriptRead(t *testing.T) {
 		t.Errorf("read = %q, want changed_dirs,sha", got)
 	}
 }
+
+func TestScriptsAreToldTheEvent(t *testing.T) {
+	src := `
+def ci(ctx):
+    names = [ctx.event]
+    if ctx.event == "tag":
+        names.append("release " + ctx.tag)
+    if ctx.pr:
+        names.append("pr {} into {} from {}{}".format(ctx.pr.number, ctx.pr.base, ctx.pr.head, " (fork)" if ctx.pr.fork else ""))
+    if ctx.schedule:
+        names.append("schedule " + ctx.schedule)
+    return [step(n, image = "i", run = "r") for n in names]
+`
+	cases := []struct {
+		c    Context
+		want string
+	}{
+		// With nothing said, a run is a push.
+		{Context{}, "push"},
+		{Context{Event: EventPush, Ref: "main"}, "push"},
+		{Context{Event: EventTag, Tag: "v1.2.0"}, "tag, release v1.2.0"},
+		{Context{Event: EventPullRequest, Ref: "fix", PR: &PullRequest{Number: 7, Base: "main", Head: "fix"}}, "pull_request, pr 7 into main from fix"},
+		{Context{Event: EventPullRequest, PR: &PullRequest{Number: 8, Base: "main", Head: "patch", Fork: true}}, "pull_request, pr 8 into main from patch (fork)"},
+		{Context{Event: EventSchedule, Schedule: "nightly"}, "schedule, schedule nightly"},
+		{Context{Event: EventManual}, "manual"},
+	}
+	for _, c := range cases {
+		p, err := Eval("ci.star", []byte(src), c.c)
+		if err != nil {
+			t.Fatalf("%+v: %v", c.c, err)
+		}
+		var names []string
+		for _, s := range p.Steps {
+			names = append(names, s.Name)
+		}
+		if got := strings.Join(names, ", "); got != c.want {
+			t.Errorf("for %s: steps = %q, want %q", c.c.Event, got, c.want)
+		}
+	}
+}
+
+func TestSchedulesAreDeclaredAtTheTop(t *testing.T) {
+	src := `
+schedule("nightly", cron = "0 3 * * *")
+schedule("weekly-audit", cron = "30  6 * * 1")
+
+def ci(ctx):
+    return []
+`
+	got, err := Schedules("ci.star", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != (Schedule{"nightly", "0 3 * * *"}) || got[1] != (Schedule{"weekly-audit", "30 6 * * 1"}) {
+		t.Errorf("schedules = %+v", got)
+	}
+	// Declaring schedules does not get in the way of anything else.
+	if _, err := Eval("ci.star", []byte(src), Context{}); err != nil {
+		t.Errorf("Eval: %v", err)
+	}
+	if mode, err := Mode("ci.star", []byte(src)); err != nil || mode != Basic {
+		t.Errorf("Mode = %q, %v", mode, err)
+	}
+
+	bad := []struct{ name, src, want string }{
+		{"inside a function", "def ci(ctx):\n    schedule(\"late\", cron = \"0 3 * * *\")\n    return []\n", "declared at the top of the file"},
+		{"too few fields", "schedule(\"x\", cron = \"0 3 * *\")\ndef ci(ctx):\n    return []\n", "cron needs five fields"},
+		{"not cron", "schedule(\"x\", cron = \"0 3 * * $(reboot)\")\ndef ci(ctx):\n    return []\n", "is not a cron field"},
+		{"twice", "schedule(\"x\", cron = \"0 3 * * *\")\nschedule(\"x\", cron = \"0 4 * * *\")\ndef ci(ctx):\n    return []\n", "declared twice"},
+		{"bad name", "schedule(\"every night\", cron = \"0 3 * * *\")\ndef ci(ctx):\n    return []\n", "may only use letters"},
+	}
+	for _, c := range bad {
+		t.Run(c.name, func(t *testing.T) { wantError(t, c.src, c.want) })
+	}
+}

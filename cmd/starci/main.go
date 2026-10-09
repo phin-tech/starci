@@ -723,28 +723,30 @@ func compileCmd(args []string) error {
 	target := fs.String("target", "github", "what to write: github (also read by Forgejo and Gitea) or circleci")
 	runsOn := fs.String("runs-on", "", "the machines to run on: a runner label for github (default ubuntu-latest), a resource class for circleci (default medium)")
 	arch := fs.String("arch", "amd64", "architecture of those machines: amd64 or arm64")
+	defaultBranch := fs.String("default-branch", "main", "the repository's default branch")
 	fs.Parse(args)
 
 	src, err := os.ReadFile(*file)
 	if err != nil {
 		return err
 	}
-	// Compiled for a commit about which nothing is known: no branch, no list
-	// of changes. That is the plan a script falls back to, and the only one
-	// that can stand for every push.
-	p, read, err := plan.EvalTracked(*file, src, plan.Context{})
-	if err != nil {
-		return err
-	}
-	if len(p.Steps) == 0 {
-		return fmt.Errorf("%s plans no steps for a commit about which nothing is known; there is nothing to compile", *file)
-	}
-	opts := compile.Options{Source: filepath.Base(*file), RunsOn: *runsOn, Arch: *arch, Read: read}
+	opts := compile.Options{Source: filepath.Base(*file), RunsOn: *runsOn, Arch: *arch, DefaultBranch: *defaultBranch}
 	var out string
 	switch *target {
 	case "github":
-		out, err = compile.GitHub(p, opts)
+		// Asked once for each kind of event, so that what the script does
+		// for a tag or a pull request or a schedule is in the workflow too.
+		out, err = compile.GitHubEvents(*file, src, opts)
 	case "circleci":
+		// Compiled for a push about which nothing else is known.
+		p, read, perr := plan.EvalTracked(*file, src, plan.Context{})
+		if perr != nil {
+			return perr
+		}
+		if len(p.Steps) == 0 {
+			return fmt.Errorf("%s plans no steps for a push about which nothing is known; there is nothing to compile", *file)
+		}
+		opts.Read = read
 		out, err = compile.CircleCI(p, opts)
 	default:
 		return fmt.Errorf("unknown target %q: github or circleci", *target)

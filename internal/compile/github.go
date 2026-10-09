@@ -27,6 +27,18 @@ type Options struct {
 	// Read lists the fields of ctx the script read. A plan that depends on
 	// the commit cannot be frozen faithfully, and the header says so.
 	Read []string
+	// DefaultBranch is the branch "is this the default branch?" is asked of.
+	DefaultBranch string
+
+	// The rest are filled in when compiling for several events.
+
+	// on is the workflow's trigger block, already written out.
+	on string
+	// conditions gives, for a step that does not run on every event, the
+	// expression that says when it does.
+	conditions map[string]string
+	// notes are extra lines for the header.
+	notes []string
 }
 
 // GitHub renders a plan as a GitHub Actions workflow. Forgejo and Gitea
@@ -53,7 +65,11 @@ func GitHub(p *plan.Plan, o Options) (string, error) {
 	ids := jobIDs(p.Steps)
 	var w strings.Builder
 	header(&w, p, o)
-	w.WriteString("name: CI\n\non:\n  push:\n  pull_request:\n\njobs:\n")
+	on := o.on
+	if on == "" {
+		on = "on:\n  push:\n  pull_request:\n"
+	}
+	w.WriteString("name: CI\n\n" + on + "\njobs:\n")
 	for i, s := range p.Steps {
 		if i > 0 {
 			w.WriteString("\n")
@@ -66,7 +82,7 @@ func GitHub(p *plan.Plan, o Options) (string, error) {
 }
 
 func header(w *strings.Builder, p *plan.Plan, o Options) {
-	notes := commitNote(o)
+	notes := append(commitNote(o), o.notes...)
 	var unplaceable []string
 	for _, s := range p.Steps {
 		if len(s.Prefer) > 0 || len(s.Avoid) > 0 {
@@ -142,12 +158,24 @@ func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) erro
 	} else {
 		fmt.Fprintf(w, "    runs-on: %s\n", o.RunsOn)
 	}
+	// A job that needs one which does not run on this event would be skipped
+	// along with it. Asking only that nothing failed lets it run.
+	waitsOnConditional := false
 	if len(s.Needs) > 0 {
 		var needs []string
 		for _, n := range s.Needs {
 			needs = append(needs, ids[n])
+			waitsOnConditional = waitsOnConditional || o.conditions[n] != ""
 		}
 		fmt.Fprintf(w, "    needs: [%s]\n", strings.Join(needs, ", "))
+	}
+	switch cond := o.conditions[s.Name]; {
+	case waitsOnConditional && cond != "":
+		fmt.Fprintf(w, "    if: ${{ !failure() && !cancelled() && (%s) }}\n", cond)
+	case waitsOnConditional:
+		w.WriteString("    if: ${{ !failure() && !cancelled() }}\n")
+	case cond != "":
+		fmt.Fprintf(w, "    if: ${{ %s }}\n", cond)
 	}
 	w.WriteString("    steps:\n")
 
