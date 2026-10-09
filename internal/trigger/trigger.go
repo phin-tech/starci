@@ -21,6 +21,21 @@ type Report struct {
 	Forge string `json:"forge"`
 	Repo  string `json:"repo"`
 	SHA   string `json:"sha"`
+	// Context is the name the status appears under on the commit.
+	Context string `json:"context,omitempty"`
+}
+
+// statusContext names the line a run's status goes on. A commit pushed to a
+// branch that also has a pull request open gets a run for each, and they
+// must not overwrite one another.
+func statusContext(event string) string {
+	switch event {
+	case plan.EventPullRequest:
+		return forge.StatusContext + "/pull-request"
+	case plan.EventTag:
+		return forge.StatusContext + "/tag"
+	}
+	return forge.StatusContext
 }
 
 // Run is everything needed to start a run for a push.
@@ -57,6 +72,11 @@ type Handler struct {
 	Hooks  map[string]Hook
 	Submit Submitter
 	Log    func(format string, args ...any)
+	// AllowForks runs pull requests that come from other repositories. Off
+	// unless asked for: such a pull request is code from someone who cannot
+	// push to the repository, and running it means running it on this
+	// installation's workers.
+	AllowForks bool
 }
 
 func (h *Handler) logf(format string, args ...any) {
@@ -90,13 +110,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if push.PR != nil && push.PR.Fork && !h.AllowForks {
+		h.logf("%s %s: pull request %d is from a fork; not run", name, push.Repo, push.PR.Number)
+		fmt.Fprintln(w, "ignored: pull requests from forks are not run")
+		return
+	}
+
 	outcome, err := h.handle(r.Context(), hook.Forge, push)
 	if err != nil {
 		h.logf("%s %s@%.8s: %v", name, push.Repo, push.SHA, err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	h.logf("%s %s@%.8s (%s): %s", name, push.Repo, push.SHA, push.Ref, outcome)
+	h.logf("%s %s@%.8s (%s): %s", name, push.Repo, push.SHA, Supersedes(contextOf(push)), outcome)
 	w.WriteHeader(http.StatusAccepted)
 	fmt.Fprintln(w, outcome)
 }
@@ -113,15 +139,16 @@ func (h *Handler) handle(ctx context.Context, f forge.Forge, push forge.Push) (s
 		return "", err
 	}
 
+	line := statusContext(push.Event)
 	status := func(state, description string) error {
-		return f.SetStatus(ctx, push.Repo, push.SHA, forge.Status{State: state, Description: description})
+		return f.SetStatus(ctx, push.Repo, push.SHA, forge.Status{State: state, Description: description, Context: line})
 	}
-	c := plan.Context{Repo: push.Repo, SHA: push.SHA, Ref: push.Ref, ChangedFiles: push.Changed}
+	c := contextOf(push)
 	run := Run{
 		Context:    c,
 		CloneURL:   push.CloneURL,
-		Supersedes: push.Repo + "@" + push.Ref,
-		Report:     Report{Forge: f.Name(), Repo: push.Repo, SHA: push.SHA},
+		Supersedes: Supersedes(c),
+		Report:     Report{Forge: f.Name(), Repo: push.Repo, SHA: push.SHA, Context: line},
 	}
 
 	run.Mode, err = plan.Mode(Script, src)
@@ -159,6 +186,14 @@ func (h *Handler) handle(ctx context.Context, f forge.Forge, push forge.Push) (s
 		return "", fmt.Errorf("submitting the run: %w", err)
 	}
 	return queued, nil
+}
+
+// contextOf is what a script is told about a delivery.
+func contextOf(push forge.Push) plan.Context {
+	return plan.Context{
+		Repo: push.Repo, SHA: push.SHA, Ref: push.Ref, ChangedFiles: push.Changed,
+		Event: push.Event, Tag: push.Tag, PR: push.PR,
+	}
 }
 
 func firstLine(s string) string {

@@ -92,12 +92,32 @@ each run as a `ci-pipeline` (basic) or `ci-script` (advanced) parent with one
 ## Running on every push
 
 `starci serve` receives webhook deliveries and starts a run for each push to
-a branch. Point a repository's webhook at it:
+a branch, each new tag, and each pull request that is opened or given new
+commits. Point a repository's webhook at it:
 
 | Forge | Deliver to | Content type |
 |---|---|---|
-| Forgejo, Gitea | `http://<host>:8080/hooks/forgejo` | `application/json`, push events, with a secret |
-| GitHub | `https://<host>/hooks/github` | `application/json`, push events, with a secret |
+| Forgejo, Gitea | `http://<host>:8080/hooks/forgejo` | `application/json`, push and pull request events, with a secret |
+| GitHub | `https://<host>/hooks/github` | `application/json`, push and pull request events, with a secret |
+
+There is nothing else to configure, and no list of triggers: every event
+reaches the script, which says in code what it wants done for it, including
+nothing. `starci plan --event tag --tag v1.0.0` shows what a script would do
+for an event without causing one.
+
+| Event | The script is told | Status appears as |
+|---|---|---|
+| A push to a branch | `ctx.event == "push"`, `ctx.ref`, `ctx.changed_files` | `starci` |
+| A new tag | `ctx.event == "tag"`, `ctx.tag` | `starci/tag` |
+| A pull request opened or updated | `ctx.event == "pull_request"`, `ctx.pr` | `starci/pull-request` |
+
+**Pull requests from forks are not run.** One is code from someone who cannot
+push to the repository, and running it means running it on your workers. The
+receiver ignores them unless `STARCI_ALLOW_FORK_PULL_REQUESTS=true`; turn that
+on only for a repository whose workers are meant for strangers' code.
+
+Schedules a script declares are honoured when starci runs inside a CI tool,
+and when compiled. The receiver does not fire them itself yet.
 
 For each delivery it checks the signature, fetches `.ci.star` as it is at the
 pushed commit, and submits the run to Hatchet. The commit shows `pending`
@@ -112,6 +132,7 @@ the message. A newer push to the same branch cancels the run before it.
 | `STARCI_FORGEJO_TOKEN_FILE` | File holding an access token: read repositories, write commit statuses. |
 | `STARCI_FORGEJO_SECRET_FILE` | File holding the webhook secret. |
 | `STARCI_GITHUB_TOKEN_FILE`, `STARCI_GITHUB_SECRET_FILE` | The same, for GitHub. |
+| `STARCI_ALLOW_FORK_PULL_REQUESTS` | `true` to run pull requests from forks. Off by default. |
 
 The receiver holds no state and runs nothing. It evaluates the script itself,
 which is safe with a script from any repository because a script can do
@@ -181,8 +202,15 @@ The GitHub output has been linted and one of its jobs run by hand; the
 CircleCI output is accepted by CircleCI's own validator and one of its jobs
 has been run by hand. Neither has been run on the service it is for.
 
-The other way to use starci from an Action is to run it there: a workflow
-whose one job calls `starci run --local`, which handles both modes.
+### Or run starci inside the CI tool
+
+The other way is a workflow whose one job calls `starci run --local`. The CI
+tool is then only the trigger. starci reads why the run started from the
+tool's own environment (GitHub, Forgejo and Gitea Actions, and CircleCI are
+recognised) and the script is told exactly what it would be told had starci
+received the event: the tag, the pull request and whether it is from a fork,
+the schedule that fired, the files a push changed. Nothing is approximated,
+and advanced scripts work.
 
 ## How it fits together
 
@@ -193,6 +221,7 @@ whose one job calls `starci run --local`, which handles both modes.
 | `internal/engine/local` | A `Runner` that calls `step` directly, concurrently. |
 | `internal/engine/hatchet` | A `Runner` that starts each step as a Hatchet task, plus the tasks themselves. |
 | `internal/compile` | Writing a basic plan out for GitHub Actions or CircleCI. |
+| `internal/ciinfo` | Reading why a run started from the CI tool starci is running inside. |
 | `internal/forge` | Talking to Forgejo and GitHub: reading a push, fetching a script, posting a status. |
 | `internal/trigger` | Turning a push delivery into a run. |
 | `internal/store/s3` | The shared result store. |

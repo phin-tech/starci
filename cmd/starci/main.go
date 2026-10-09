@@ -692,6 +692,7 @@ func reporter(forges map[string]forge.Forge) onhatchet.Reporter {
 		if !ok {
 			return fmt.Errorf("this worker has no credentials for %s", to.Forge)
 		}
+		s.Context = to.Context
 		return f.SetStatus(ctx, to.Repo, to.SHA, s)
 	}
 }
@@ -730,9 +731,15 @@ func serveCmd() error {
 		listen = ":8080"
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/hooks/", &trigger.Handler{Hooks: hooks, Submit: tasks, Log: func(format string, args ...any) {
-		fmt.Fprintf(os.Stderr, time.Now().UTC().Format(time.RFC3339)+" "+format+"\n", args...)
-	}})
+	mux.Handle("/hooks/", &trigger.Handler{
+		Hooks:  hooks,
+		Submit: tasks,
+		// Off unless switched on by name: see trigger.Handler.AllowForks.
+		AllowForks: os.Getenv("STARCI_ALLOW_FORK_PULL_REQUESTS") == "true",
+		Log: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, time.Now().UTC().Format(time.RFC3339)+" "+format+"\n", args...)
+		},
+	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "ok") })
 
 	var names []string

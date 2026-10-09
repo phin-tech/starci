@@ -18,15 +18,27 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"git.phin.tech/sam/starci/internal/plan"
 )
 
-// Push is a branch being moved to a new commit.
+// Push is something happening to a repository that a run can be started
+// for: a branch moved to a new commit, a tag created, a pull request opened
+// or given new commits.
 type Push struct {
 	Repo     string // owner/name
-	Ref      string // the branch, without refs/heads/
 	SHA      string
 	CloneURL string
+	// Event is plan.EventPush, plan.EventTag or plan.EventPullRequest.
+	Event string
+	// Ref is the branch pushed to, or the branch a pull request comes from.
+	Ref string
+	// Tag is the tag's name, for a tag.
+	Tag string
+	// PR describes the pull request, for one.
+	PR *plan.PullRequest
 	// Changed is every file the pushed commits added, modified or removed.
+	// A tag or a pull request says nothing about that.
 	Changed []string
 }
 
@@ -35,6 +47,10 @@ type Status struct {
 	State       string // pending, success, failure or error
 	Description string
 	URL         string
+	// Context is the name the status appears under; empty means
+	// StatusContext. A commit that is both pushed and in a pull request gets
+	// a run for each, and each needs its own line.
+	Context string
 }
 
 // StatusContext is the name the status appears under.
@@ -44,8 +60,9 @@ const StatusContext = "starci"
 var ErrNotFound = errors.New("not found")
 
 // ErrIgnored is returned by ParsePush for a delivery that is genuine but is
-// not a push to a branch: a tag, a deleted branch, some other event.
-var ErrIgnored = errors.New("not a push to a branch")
+// nothing to start a run for: a deleted branch, a pull request being closed
+// or labelled, some other event.
+var ErrIgnored = errors.New("nothing to run for")
 
 // ErrSignature is returned by ParsePush for a delivery that does not prove it
 // came from the forge.
@@ -78,8 +95,8 @@ type GitHub struct {
 func (f Forgejo) Name() string { return "forgejo" }
 func (g GitHub) Name() string  { return "github" }
 
-// pushPayload is the part of a push delivery both forges agree on.
-type pushPayload struct {
+// payload is the part of a delivery both forges agree on.
+type payload struct {
 	Ref        string `json:"ref"`
 	After      string `json:"after"`
 	Deleted    bool   `json:"deleted"`
@@ -92,37 +109,83 @@ type pushPayload struct {
 		Modified []string `json:"modified"`
 		Removed  []string `json:"removed"`
 	} `json:"commits"`
+
+	// For a pull request.
+	Action      string `json:"action"`
+	Number      int    `json:"number"`
+	PullRequest struct {
+		Head struct {
+			SHA  string `json:"sha"`
+			Ref  string `json:"ref"`
+			Repo struct {
+				FullName string `json:"full_name"`
+			} `json:"repo"`
+		} `json:"head"`
+		Base struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	} `json:"pull_request"`
 }
 
+// The actions of a pull request that give it code to run: being opened, and
+// being given new commits, which GitHub spells one way and Forgejo another.
+var runForAction = map[string]bool{"opened": true, "reopened": true, "synchronize": true, "synchronized": true}
+
 func parsePush(event string, body []byte) (Push, error) {
-	if event != "push" {
+	if event != "push" && event != "pull_request" {
 		return Push{}, ErrIgnored
 	}
-	var p pushPayload
+	var p payload
 	if err := json.Unmarshal(body, &p); err != nil {
-		return Push{}, fmt.Errorf("unreadable push: %w", err)
-	}
-	branch, isBranch := strings.CutPrefix(p.Ref, "refs/heads/")
-	if !isBranch || p.Deleted || p.After == "" || strings.Trim(p.After, "0") == "" {
-		return Push{}, ErrIgnored
+		return Push{}, fmt.Errorf("unreadable delivery: %w", err)
 	}
 	if p.Repository.FullName == "" || p.Repository.CloneURL == "" {
-		return Push{}, errors.New("push names no repository")
+		return Push{}, errors.New("the delivery names no repository")
 	}
+	// Fetched from the repository the event is about, whoever wrote the
+	// commit: a pull request's commits are reachable there.
+	out := Push{Repo: p.Repository.FullName, CloneURL: p.Repository.CloneURL}
+
+	if event == "pull_request" {
+		if !runForAction[p.Action] || p.PullRequest.Head.SHA == "" {
+			return Push{}, ErrIgnored
+		}
+		head := p.PullRequest.Head
+		out.Event, out.SHA, out.Ref = plan.EventPullRequest, head.SHA, head.Ref
+		out.PR = &plan.PullRequest{
+			Number: p.Number, Base: p.PullRequest.Base.Ref, Head: head.Ref,
+			// Unless it says it is this repository's, it is someone else's.
+			Fork: head.Repo.FullName != p.Repository.FullName,
+		}
+		return out, nil
+	}
+
+	if p.Deleted || p.After == "" || strings.Trim(p.After, "0") == "" {
+		return Push{}, ErrIgnored
+	}
+	out.SHA = p.After
+	if tag, ok := strings.CutPrefix(p.Ref, "refs/tags/"); ok {
+		out.Event, out.Tag = plan.EventTag, tag
+		return out, nil
+	}
+	branch, ok := strings.CutPrefix(p.Ref, "refs/heads/")
+	if !ok {
+		return Push{}, ErrIgnored
+	}
+	out.Event, out.Ref = plan.EventPush, branch
 	seen := map[string]bool{}
-	var changed []string
 	for _, c := range p.Commits {
 		for _, list := range [][]string{c.Added, c.Modified, c.Removed} {
 			for _, f := range list {
 				if !seen[f] {
 					seen[f] = true
-					changed = append(changed, f)
+					out.Changed = append(out.Changed, f)
 				}
 			}
 		}
 	}
-	sort.Strings(changed)
-	return Push{Repo: p.Repository.FullName, Ref: branch, SHA: p.After, CloneURL: p.Repository.CloneURL, Changed: changed}, nil
+	sort.Strings(out.Changed)
+	return out, nil
 }
 
 // signed reports whether signature is the hex HMAC-SHA256 of body under
@@ -244,7 +307,11 @@ func statusBody(s Status) map[string]string {
 	if len(desc) > 140 {
 		desc = desc[:137] + "..."
 	}
-	body := map[string]string{"state": s.State, "description": desc, "context": StatusContext}
+	name := s.Context
+	if name == "" {
+		name = StatusContext
+	}
+	body := map[string]string{"state": s.State, "description": desc, "context": name}
 	if s.URL != "" {
 		body["target_url"] = s.URL
 	}

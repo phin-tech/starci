@@ -142,10 +142,10 @@ func TestPushStartsARun(t *testing.T) {
 	if got, want := strings.Join(names, " "), "test-src test-ui"; got != want {
 		t.Errorf("steps = %s, want %s", got, want)
 	}
-	if run.Supersedes != "sam/app@main" || run.CloneURL != "https://git.example/sam/app.git" || run.Context.SHA != "abc123" {
+	if run.Supersedes != "sam/app@main" || run.CloneURL != "https://git.example/sam/app.git" || run.Context.SHA != "abc123" || run.Context.Event != plan.EventPush {
 		t.Errorf("run = %+v", run)
 	}
-	if run.Report != (Report{Forge: "forgejo", Repo: "sam/app", SHA: "abc123"}) {
+	if run.Report != (Report{Forge: "forgejo", Repo: "sam/app", SHA: "abc123", Context: "starci"}) {
 		t.Errorf("report = %+v", run.Report)
 	}
 	if got, want := fake.last(), "pending: queued: 2 step(s)"; got != want {
@@ -187,15 +187,17 @@ func TestUnsignedDeliveriesAreRefused(t *testing.T) {
 	}
 }
 
-func TestDeliveriesThatAreNotBranchPushesAreIgnored(t *testing.T) {
+func TestDeliveriesWithNothingToRunAreIgnored(t *testing.T) {
 	h, _, sub := setup(t, basicScript)
 	cases := map[string]struct {
 		event string
 		body  []byte
 	}{
-		"another event":    {"issues", pushBody("refs/heads/main", "abc123")},
-		"a tag":            {"push", pushBody("refs/tags/v1", "abc123")},
-		"a deleted branch": {"push", pushBody("refs/heads/gone", strings.Repeat("0", 40))},
+		"another event":         {"issues", pushBody("refs/heads/main", "abc123")},
+		"a deleted branch":      {"push", pushBody("refs/heads/gone", strings.Repeat("0", 40))},
+		"a deleted tag":         {"push", pushBody("refs/tags/v1", strings.Repeat("0", 40))},
+		"a closed pull request": {"pull_request", prBody("closed", 7, "sam/app")},
+		"a labelled one":        {"pull_request", prBody("labeled", 7, "sam/app")},
 	}
 	for name, c := range cases {
 		rec := deliver(h, c.event, c.body, sign(c.body, secret))
@@ -335,6 +337,115 @@ func TestOutcome(t *testing.T) {
 		got := Outcome(c.results, c.runErr)
 		if s := got.State + ": " + got.Description; s != c.want {
 			t.Errorf("Outcome = %q, want %q", s, c.want)
+		}
+	}
+}
+
+func prBody(action string, number int, headRepo string) []byte {
+	b, _ := json.Marshal(map[string]any{
+		"action": action, "number": number,
+		"repository": map[string]string{"full_name": "sam/app", "clone_url": "https://git.example/sam/app.git"},
+		"pull_request": map[string]any{
+			"head": map[string]any{"sha": "abc123", "ref": "fix-login", "repo": map[string]string{"full_name": headRepo}},
+			"base": map[string]string{"ref": "main"},
+		},
+	})
+	return b
+}
+
+const eventScript = `
+def ci(ctx):
+    name = ctx.event
+    if ctx.event == "tag":
+        name = "release " + ctx.tag
+    if ctx.pr:
+        name = "pr {} {} -> {}".format(ctx.pr.number, ctx.pr.head, ctx.pr.base)
+    return [step(name, image = "i", run = "r")]
+`
+
+func TestATagStartsARun(t *testing.T) {
+	h, fake, sub := setup(t, eventScript)
+	body := pushBody("refs/tags/v1.2.0", "abc123")
+	if rec := deliver(h, "push", body, sign(body, secret)); rec.Code != http.StatusAccepted {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if len(sub.runs) != 1 {
+		t.Fatalf("%d runs, want 1", len(sub.runs))
+	}
+	run := sub.runs[0]
+	if run.Plan.Steps[0].Name != "release v1.2.0" || run.Context.Tag != "v1.2.0" || run.Context.Ref != "" {
+		t.Errorf("step %q, context %+v", run.Plan.Steps[0].Name, run.Context)
+	}
+	// Each tag is its own line of runs, and its status its own line on the commit.
+	if run.Supersedes != "sam/app@tag-v1.2.0" || run.Report.Context != "starci/tag" || fake.statuses[0]["context"] != "starci/tag" {
+		t.Errorf("supersedes %q, report %+v, status context %q", run.Supersedes, run.Report, fake.statuses[0]["context"])
+	}
+}
+
+func TestAPullRequestStartsARun(t *testing.T) {
+	for _, action := range []string{"opened", "reopened", "synchronize", "synchronized"} {
+		h, fake, sub := setup(t, eventScript)
+		body := prBody(action, 7, "sam/app")
+		if rec := deliver(h, "pull_request", body, sign(body, secret)); rec.Code != http.StatusAccepted {
+			t.Fatalf("%s: status %d: %s", action, rec.Code, rec.Body)
+		}
+		if len(sub.runs) != 1 {
+			t.Fatalf("%s: %d runs, want 1", action, len(sub.runs))
+		}
+		run := sub.runs[0]
+		if run.Plan.Steps[0].Name != "pr 7 fix-login -> main" || run.Context.SHA != "abc123" || run.Context.PR.Fork {
+			t.Errorf("%s: step %q, context %+v", action, run.Plan.Steps[0].Name, run.Context)
+		}
+		// Not the branch's line: the push to that branch has a run of its own.
+		if run.Supersedes != "sam/app@pr-7" || fake.statuses[0]["context"] != "starci/pull-request" {
+			t.Errorf("%s: supersedes %q, status context %q", action, run.Supersedes, fake.statuses[0]["context"])
+		}
+	}
+}
+
+func TestPullRequestsFromForksAreNotRunUnlessAllowed(t *testing.T) {
+	h, fake, sub := setup(t, eventScript)
+	body := prBody("opened", 9, "stranger/app")
+	rec := deliver(h, "pull_request", body, sign(body, secret))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "pull requests from forks are not run") {
+		t.Errorf("status %d, body %q", rec.Code, rec.Body)
+	}
+	// Nothing at all happens: no script is fetched, no status is set.
+	if len(sub.runs) != 0 || len(fake.statuses) != 0 {
+		t.Errorf("a fork's pull request had an effect: %d runs, %d statuses", len(sub.runs), len(fake.statuses))
+	}
+
+	h.AllowForks = true
+	if rec := deliver(h, "pull_request", body, sign(body, secret)); rec.Code != http.StatusAccepted {
+		t.Fatalf("with forks allowed: status %d: %s", rec.Code, rec.Body)
+	}
+	if len(sub.runs) != 1 || !sub.runs[0].Context.PR.Fork {
+		t.Errorf("with forks allowed: runs = %+v", sub.runs)
+	}
+
+	// A pull request that does not say where it comes from is a stranger's.
+	h2, _, sub2 := setup(t, eventScript)
+	body = prBody("opened", 10, "")
+	deliver(h2, "pull_request", body, sign(body, secret))
+	if len(sub2.runs) != 0 {
+		t.Error("a pull request naming no head repository was run")
+	}
+}
+
+func TestSupersedes(t *testing.T) {
+	cases := []struct {
+		c    plan.Context
+		want string
+	}{
+		{plan.Context{Repo: "a/b", SHA: "abc", Ref: "main"}, "a/b@main"},
+		{plan.Context{Repo: "a/b", SHA: "abc"}, "a/b@abc"},
+		{plan.Context{Repo: "a/b", Event: plan.EventTag, Tag: "v1"}, "a/b@tag-v1"},
+		{plan.Context{Repo: "a/b", Event: plan.EventPullRequest, Ref: "fix", PR: &plan.PullRequest{Number: 3}}, "a/b@pr-3"},
+		{plan.Context{Repo: "a/b", Event: plan.EventSchedule, Ref: "main", Schedule: "nightly"}, "a/b@schedule-nightly"},
+	}
+	for _, c := range cases {
+		if got := Supersedes(c.c); got != c.want {
+			t.Errorf("Supersedes(%+v) = %q, want %q", c.c, got, c.want)
 		}
 	}
 }
