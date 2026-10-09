@@ -33,7 +33,7 @@ const (
 	// keyVersion is part of every result key. Raise it whenever what goes
 	// into a key changes meaning, so that results stored under the old
 	// meaning are never mistaken for results under the new one.
-	keyVersion = 3
+	keyVersion = 4
 )
 
 // Config is what Run needs to know about the machine it is on.
@@ -99,6 +99,10 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	}
 	toolMounts, toolIDs := toolArgs(tools, basePath)
 
+	// Keyed on the base image and the package list, not on the image built
+	// from them: that image differs from machine to machine and from day to
+	// day, and a key made from it could never be shared or even looked up
+	// without building first.
 	stored := filepath.Join(cfg.StateDir, "results", key(s, img.id, content, toolIDs)+".json")
 	if s.Cache {
 		if data, err := os.ReadFile(stored); err == nil {
@@ -115,6 +119,14 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 		return failed("checkout failed: %v", err)
 	}
 
+	runImage := s.Image
+	if len(s.Packages) > 0 {
+		log("preparing an image with " + strings.Join(s.Packages, ", "))
+		if runImage, err = withPackages(s.Image, img.id, s.Packages); err != nil {
+			return failed("%v", err)
+		}
+	}
+
 	// Named, so that it can be removed if the run is cancelled: stopping the
 	// docker client alone leaves the container running.
 	container := "starci-" + filepath.Base(root)
@@ -126,7 +138,7 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 		args = append(args, "-e", name+"="+s.Env[name])
 	}
 	args = append(args, toolMounts...)
-	args = append(args, s.Image, "sh", "-c", s.Run)
+	args = append(args, runImage, "sh", "-c", s.Run)
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	out, err := cmd.StdoutPipe()
@@ -286,7 +298,7 @@ func key(s plan.Step, image string, content string, tools [][]string) string {
 	for _, k := range sortedKeys(s.Env) {
 		env = append(env, [2]string{k, s.Env[k]})
 	}
-	material, _ := json.Marshal([]any{keyVersion, image, s.Run, env, content, tools})
+	material, _ := json.Marshal([]any{keyVersion, image, s.Run, env, content, tools, s.Packages})
 	sum := sha256.Sum256(material)
 	return hex.EncodeToString(sum[:])
 }

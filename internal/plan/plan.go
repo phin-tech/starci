@@ -67,6 +67,10 @@ type Step struct {
 	Avoid map[string]string `json:"avoid"`
 	// Tools are put on the step's PATH, ahead of what the image has.
 	Tools []Tool `json:"tools"`
+	// Packages are installed on top of the image with apt before the step
+	// runs, for the system libraries a tool cannot carry. The image must be
+	// Debian or Ubuntu based.
+	Packages []string `json:"packages"`
 }
 
 // Tool is a program a step wants on its PATH without it being in the image:
@@ -123,6 +127,11 @@ func (p *Plan) Validate() error {
 		for _, t := range s.Tools {
 			if err := t.validate(); err != nil {
 				return fmt.Errorf("step %q: %w", s.Name, err)
+			}
+		}
+		for _, pkg := range s.Packages {
+			if !packageName.MatchString(pkg) {
+				return fmt.Errorf("step %q: %q is not an apt package name", s.Name, pkg)
 			}
 		}
 	}
@@ -252,13 +261,14 @@ func (s *stepValue) Hash() (uint32, error) { return starlark.String(s.Name).Hash
 
 func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var name, image, run string
-	var needs, inputs, tools *starlark.List
+	var needs, inputs, tools, packages *starlark.List
 	var env, caches, worker, prefer, avoid *starlark.Dict
 	cache := true
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
 		"name", &name, "image", &image, "run", &run, "needs?", &needs, "env?", &env,
 		"inputs?", &inputs, "caches?", &caches, "cache?", &cache,
-		"worker?", &worker, "prefer?", &prefer, "avoid?", &avoid, "tools?", &tools); err != nil {
+		"worker?", &worker, "prefer?", &prefer, "avoid?", &avoid, "tools?", &tools,
+		"packages?", &packages); err != nil {
 		return nil, err
 	}
 	if name == "" || image == "" || run == "" {
@@ -269,7 +279,22 @@ func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 		Name: name, Image: image, Run: run, Cache: cache,
 		Needs: []string{}, Env: map[string]string{}, Inputs: []string{"."}, Caches: map[string]string{},
 		Worker: map[string]string{}, Prefer: map[string]string{}, Avoid: map[string]string{},
-		Tools: []Tool{},
+		Tools: []Tool{}, Packages: []string{},
+	}
+	if packages != nil {
+		seen := map[string]bool{}
+		for i := 0; i < packages.Len(); i++ {
+			v, ok := packages.Index(i).(starlark.String)
+			if !ok || !packageName.MatchString(string(v)) {
+				return nil, fmt.Errorf("step %q: packages must be apt package names, optionally name=version; got %s", name, packages.Index(i).String())
+			}
+			if !seen[string(v)] {
+				seen[string(v)] = true
+				s.Packages = append(s.Packages, string(v))
+			}
+		}
+		// Sorted, so that the same set always names the same environment.
+		sort.Strings(s.Packages)
 	}
 	if tools != nil {
 		seen := map[string]bool{}
@@ -369,8 +394,11 @@ func (t *toolValue) Truth() starlark.Bool  { return starlark.True }
 func (t *toolValue) Hash() (uint32, error) { return starlark.String(t.Name).Hash() }
 
 var (
-	sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	archs     = map[string]bool{"amd64": true, "arm64": true}
+	// What apt accepts as a package, with an optional =version. Nothing that
+	// could be read as an option or as shell.
+	packageName = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]*(:[a-z0-9]+)?(=[A-Za-z0-9.+:~-]+)?$`)
+	sha256Hex   = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	archs       = map[string]bool{"amd64": true, "arm64": true}
 )
 
 func toolBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

@@ -349,3 +349,16 @@ def ci(ctx):
     return [step("s", image = "i", run = "r", tools = ["bun"])]
 `, "tools must hold tool(...) values")
 }
+
+func TestPackages(t *testing.T) {
+	p := mustEval(t, `
+def ci(ctx):
+    return [step("s", image = "debian:12", run = "r", packages = ["libpq-dev", "git", "git", "curl=8.5.0-2"])]
+`)
+	if got, want := strings.Join(p.Steps[0].Packages, " "), "curl=8.5.0-2 git libpq-dev"; got != want {
+		t.Errorf("packages = %s, want %s (sorted, once each)", got, want)
+	}
+	for _, bad := range []string{`"-o Dpkg::Options"`, `"git; rm -rf /"`, `"Git"`, `""`, `3`} {
+		wantError(t, "def ci(ctx):\n    return [step(\"s\", image = \"i\", run = \"r\", packages = ["+bad+"])]\n", "packages must be apt package names")
+	}
+}

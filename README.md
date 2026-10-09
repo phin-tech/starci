@@ -139,7 +139,7 @@ Runs for different branches, or for a bare commit, leave each other alone.
 
 | | |
 |---|---|
-| `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {}, tools = [])` | Declare a container to run. Returns a handle usable in another step's `needs`. |
+| `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {}, tools = [], packages = [])` | Declare a container to run. Returns a handle usable in another step's `needs`. |
 | `ctx.repo`, `ctx.sha`, `ctx.ref` | What is being built. |
 | `ctx.changed_files` | Files the commit changed, sorted. |
 | `ctx.changed_dirs` | Their top-level directories, sorted (`.` for files at the root). |
@@ -227,8 +227,27 @@ result is keyed on it, so changing a tool runs the step again and fetching the
 same tool from a mirror does not. There is no way to ask for "the latest".
 
 This suits programs that stand alone. A tool built against glibc will not run
-in an Alpine image, and anything that needs system libraries or a build step
-belongs in an image.
+in an Alpine image.
+
+### Packages
+
+For what a tool cannot carry — system libraries, a compiler — a step can ask
+for apt packages on top of its image:
+
+```python
+step("test", image = "debian:12-slim", packages = ["libpq-dev", "git"], run = "...")
+```
+
+A worker builds an image from that base and those packages the first time a
+step needs it, and reuses it for every step that asks for the same
+combination. The image must be Debian or Ubuntu based.
+
+Unlike a tool, a package is not pinned: it is whatever version apt offered on
+the day that worker built the image, and it stays that version there until
+the base image or the list changes. A step's result is keyed on the base image
+and the list, so two workers that built at different times will share a result
+even though their packages may differ slightly. Write `name=version` where
+that matters.
 
 ## Inputs and skipped steps
 
@@ -249,8 +268,8 @@ becomes an input with no change to the script, and one that does not match is
 never seen. An input that matches nothing is an error.
 
 That boundary is what makes skipping safe. A step's result is stored under a
-key made of its image's content id, its command, its `env`, its tools, and the
-path and content of every file its inputs select. When a later run produces the same key, the earlier pass stands in
+key made of its image's content id, its command, its `env`, its tools and
+packages, and the path and content of every file its inputs select. When a later run produces the same key, the earlier pass stands in
 and the step is not run:
 
 ```

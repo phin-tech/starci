@@ -303,3 +303,52 @@ func TestPatternStarStaysInOneDirectory(t *testing.T) {
 		t.Errorf("src/*.py gave the step:\n%s\nwant only ./src/top.py", got.Output)
 	}
 }
+
+func TestPackagesAreInstalledOnce(t *testing.T) {
+	needDocker(t)
+	const base = "debian:12-slim"
+	r := newRepo(t)
+	sha := r.commit(map[string]string{"a.txt": "a"})
+	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	s := plan.Step{Name: "use", Image: base, Packages: []string{"jq"}, Run: `echo '{"a": 7}' | jq .a`}
+
+	first := run(t, cfg, r, sha, s)
+	if first.Status != "passed" || strings.TrimSpace(first.Output) != "7" {
+		t.Fatalf("first run = %+v, want jq to print 7", first)
+	}
+	env := func() string {
+		out, _ := exec.Command("docker", "images", "--format", "{{.ID}} {{.CreatedAt}}", "starci-env").Output()
+		return string(out)
+	}
+	built := env()
+	if built == "" {
+		t.Fatal("no environment image was built")
+	}
+	// The same packages on the same base are not installed again, even by a
+	// step that otherwise differs.
+	other := s
+	other.Run = `echo '{"b": 8}' | jq .b`
+	if got := run(t, cfg, r, sha, other); strings.TrimSpace(got.Output) != "8" {
+		t.Fatalf("second step = %+v", got)
+	}
+	if env() != built {
+		t.Error("the environment image was rebuilt for a second step with the same packages")
+	}
+	// Without the package, the same step cannot find the program.
+	bare := s
+	bare.Packages = nil
+	if got := run(t, cfg, r, sha, bare); got.Status != "failed" {
+		t.Error("jq ran without being installed; the test proves nothing")
+	}
+}
+
+func TestPackagesNeedApt(t *testing.T) {
+	needDocker(t)
+	r := newRepo(t)
+	sha := r.commit(map[string]string{"a.txt": "a"})
+	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	got := run(t, cfg, r, sha, plan.Step{Name: "use", Image: testImage, Packages: []string{"jq"}, Run: "jq --version"})
+	if got.Status != "failed" || !strings.Contains(got.Detail, "has no apt-get") {
+		t.Fatalf("result = %+v, want a clear refusal on an image without apt", got)
+	}
+}
