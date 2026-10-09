@@ -65,6 +65,31 @@ type Step struct {
 	// Avoid keeps the step off workers carrying these labels, for work that
 	// must not run in a particular place.
 	Avoid map[string]string `json:"avoid"`
+	// Tools are put on the step's PATH, ahead of what the image has.
+	Tools []Tool `json:"tools"`
+}
+
+// Tool is a program a step wants on its PATH without it being in the image:
+// an archive (or a single binary) to download, pinned by checksum.
+//
+// The checksum is the tool's identity. It is what a worker's copy is stored
+// under and what a step's result is keyed on, so two tools with the same
+// name and different contents are different tools, and "the latest version"
+// cannot be expressed.
+type Tool struct {
+	Name string `json:"name"`
+	// URL is where to download it. "{arch}" is replaced with the name of the
+	// architecture the step's image runs on.
+	URL string `json:"url"`
+	// SHA256 is the checksum of the download for each architecture, keyed by
+	// amd64 or arm64. An architecture not listed is not supported.
+	SHA256 map[string]string `json:"sha256"`
+	// ArchNames is how this tool's publisher spells an architecture, where it
+	// differs: {"amd64": "x64", "arm64": "aarch64"}.
+	ArchNames map[string]string `json:"arch_names"`
+	// Bin lists the directories inside the archive to put on PATH, "{arch}"
+	// replaced as in URL. The default is the archive's top level.
+	Bin []string `json:"bin"`
 }
 
 // Plan is the evaluated script: steps in the order the script returned them.
@@ -93,6 +118,11 @@ func (p *Plan) Validate() error {
 		for name, dir := range s.Caches {
 			if !cacheName.MatchString(name) || !path.IsAbs(dir) {
 				return fmt.Errorf("step %q: cache %q -> %q is not a valid name and absolute path", s.Name, name, dir)
+			}
+		}
+		for _, t := range s.Tools {
+			if err := t.validate(); err != nil {
+				return fmt.Errorf("step %q: %w", s.Name, err)
 			}
 		}
 	}
@@ -222,13 +252,13 @@ func (s *stepValue) Hash() (uint32, error) { return starlark.String(s.Name).Hash
 
 func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var name, image, run string
-	var needs, inputs *starlark.List
+	var needs, inputs, tools *starlark.List
 	var env, caches, worker, prefer, avoid *starlark.Dict
 	cache := true
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
 		"name", &name, "image", &image, "run", &run, "needs?", &needs, "env?", &env,
 		"inputs?", &inputs, "caches?", &caches, "cache?", &cache,
-		"worker?", &worker, "prefer?", &prefer, "avoid?", &avoid); err != nil {
+		"worker?", &worker, "prefer?", &prefer, "avoid?", &avoid, "tools?", &tools); err != nil {
 		return nil, err
 	}
 	if name == "" || image == "" || run == "" {
@@ -239,6 +269,21 @@ func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 		Name: name, Image: image, Run: run, Cache: cache,
 		Needs: []string{}, Env: map[string]string{}, Inputs: []string{"."}, Caches: map[string]string{},
 		Worker: map[string]string{}, Prefer: map[string]string{}, Avoid: map[string]string{},
+		Tools: []Tool{},
+	}
+	if tools != nil {
+		seen := map[string]bool{}
+		for i := 0; i < tools.Len(); i++ {
+			tv, ok := tools.Index(i).(*toolValue)
+			if !ok {
+				return nil, fmt.Errorf("step %q: tools must hold tool(...) values, got %s", name, tools.Index(i).Type())
+			}
+			if seen[tv.Name] {
+				return nil, fmt.Errorf("step %q: tool %q is listed twice", name, tv.Name)
+			}
+			seen[tv.Name] = true
+			s.Tools = append(s.Tools, tv.Tool)
+		}
 	}
 	// A label can be constrained one way per step: Hatchet takes a single
 	// rule per label, and "require gpu, avoid gpu" has no meaning anyway.
@@ -313,6 +358,99 @@ func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 }
 
 var cacheName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// toolValue is what tool() returns, for a step's tools.
+type toolValue struct{ Tool }
+
+func (t *toolValue) String() string        { return fmt.Sprintf("<tool %q>", t.Name) }
+func (t *toolValue) Type() string          { return "tool" }
+func (t *toolValue) Freeze()               {}
+func (t *toolValue) Truth() starlark.Bool  { return starlark.True }
+func (t *toolValue) Hash() (uint32, error) { return starlark.String(t.Name).Hash() }
+
+var (
+	sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	archs     = map[string]bool{"amd64": true, "arm64": true}
+)
+
+func toolBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var name, url string
+	var sums, archNames *starlark.Dict
+	var bin *starlark.List
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
+		"name", &name, "url", &url, "sha256", &sums, "arch_names?", &archNames, "bin?", &bin); err != nil {
+		return nil, err
+	}
+	t := Tool{Name: name, URL: url, SHA256: map[string]string{}, ArchNames: map[string]string{}, Bin: []string{"."}}
+	strs := func(d *starlark.Dict, what string, into map[string]string) error {
+		if d == nil {
+			return nil
+		}
+		for _, item := range d.Items() {
+			k, kok := item[0].(starlark.String)
+			v, vok := item[1].(starlark.String)
+			if !kok || !vok {
+				return fmt.Errorf("tool %q: %s must map strings to strings", name, what)
+			}
+			into[string(k)] = string(v)
+		}
+		return nil
+	}
+	if err := strs(sums, "sha256", t.SHA256); err != nil {
+		return nil, err
+	}
+	if err := strs(archNames, "arch_names", t.ArchNames); err != nil {
+		return nil, err
+	}
+	if bin != nil {
+		t.Bin = nil
+		for i := 0; i < bin.Len(); i++ {
+			v, ok := bin.Index(i).(starlark.String)
+			if !ok {
+				return nil, fmt.Errorf("tool %q: bin must list directories inside the archive", name)
+			}
+			t.Bin = append(t.Bin, string(v))
+		}
+	}
+	if err := t.validate(); err != nil {
+		return nil, err
+	}
+	return &toolValue{t}, nil
+}
+
+func (t Tool) validate() error {
+	if !cacheName.MatchString(t.Name) {
+		return fmt.Errorf("tool %q: a name may only use letters, digits, '-' and '_'", t.Name)
+	}
+	if !strings.HasPrefix(t.URL, "https://") && !strings.HasPrefix(t.URL, "http://") {
+		return fmt.Errorf("tool %q: url must be an http(s) address, got %q", t.Name, t.URL)
+	}
+	if len(t.SHA256) == 0 {
+		return fmt.Errorf("tool %q: sha256 must give a checksum for at least one of amd64, arm64", t.Name)
+	}
+	for arch, sum := range t.SHA256 {
+		if !archs[arch] {
+			return fmt.Errorf("tool %q: sha256 is keyed by amd64 or arm64, not %q", t.Name, arch)
+		}
+		if !sha256Hex.MatchString(sum) {
+			return fmt.Errorf("tool %q: the %s checksum must be 64 lowercase hex digits", t.Name, arch)
+		}
+	}
+	for arch := range t.ArchNames {
+		if !archs[arch] {
+			return fmt.Errorf("tool %q: arch_names is keyed by amd64 or arm64, not %q", t.Name, arch)
+		}
+	}
+	if len(t.Bin) == 0 {
+		return fmt.Errorf("tool %q: bin must not be empty (omit it for the archive's top level)", t.Name)
+	}
+	for _, b := range t.Bin {
+		if c := path.Clean(b); b == "" || path.IsAbs(c) || c == ".." || strings.HasPrefix(c, "../") {
+			return fmt.Errorf("tool %q: bin entry %q must be a directory inside the archive", t.Name, b)
+		}
+	}
+	return nil
+}
 
 // inputPaths cleans a step's inputs to sorted, unique paths inside the
 // repository. Order and spelling must not matter, because the paths feed the

@@ -151,6 +151,7 @@ func newThread(name string) *starlark.Thread {
 func predeclared() starlark.StringDict {
 	return starlark.StringDict{
 		"step":     starlark.NewBuiltin("step", stepBuiltin),
+		"tool":     starlark.NewBuiltin("tool", toolBuiltin),
 		"run":      starlark.NewBuiltin("run", runBuiltin),
 		"parallel": starlark.NewBuiltin("parallel", parallelBuiltin),
 	}

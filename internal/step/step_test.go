@@ -11,7 +11,7 @@ import (
 	"git.phin.tech/sam/starci/internal/plan"
 )
 
-const image = "alpine:3"
+const testImage = "alpine:3"
 
 // These tests run real containers against a real git repository. They are
 // skipped where that is not possible.
@@ -68,7 +68,7 @@ func (r *repo) commit(files map[string]string) string {
 func run(t *testing.T, cfg Config, r *repo, sha string, s plan.Step) plan.Result {
 	t.Helper()
 	if s.Image == "" {
-		s.Image = image
+		s.Image = testImage
 	}
 	if s.Inputs == nil {
 		s.Inputs = []string{"."}
@@ -225,7 +225,7 @@ func TestCancelStopsTheContainer(t *testing.T) {
 	started := make(chan struct{})
 	done := make(chan plan.Result)
 	go func() {
-		done <- Run(ctx, cfg, r.dir, sha, plan.Step{Name: "slow", Image: image, Inputs: []string{"."}, Run: "echo up; sleep 120"}, func(line string) {
+		done <- Run(ctx, cfg, r.dir, sha, plan.Step{Name: "slow", Image: testImage, Inputs: []string{"."}, Run: "echo up; sleep 120"}, func(line string) {
 			if line == "up" {
 				close(started)
 			}

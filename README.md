@@ -139,7 +139,7 @@ Runs for different branches, or for a bare commit, leave each other alone.
 
 | | |
 |---|---|
-| `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {})` | Declare a container to run. Returns a handle usable in another step's `needs`. |
+| `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {}, tools = [])` | Declare a container to run. Returns a handle usable in another step's `needs`. |
 | `ctx.repo`, `ctx.sha`, `ctx.ref` | What is being built. |
 | `ctx.changed_files` | Files the commit changed, sorted. |
 | `ctx.changed_dirs` | Their top-level directories, sorted (`.` for files at the root). |
@@ -196,6 +196,40 @@ is given the same answers.
 The trade is predictability. A basic script's graph depends only on the
 commit; an advanced script's depends on what its steps return.
 
+## Tools
+
+A step can have programs put on its `PATH` instead of needing an image that
+contains them, the way a `setup-*` action does, without downloading anything
+it already has:
+
+```python
+bun = tool(
+    "bun",
+    url = "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-{arch}.zip",
+    sha256 = {"amd64": "951ee2ae…", "arm64": "a27ffb63…"},
+    arch_names = {"amd64": "x64", "arm64": "aarch64"},
+    bin = ["bun-linux-{arch}"],
+)
+
+step("test", image = "debian:12-slim", tools = [bun], run = "bun test")
+```
+
+| | |
+|---|---|
+| `url` | The download: a zip, a tar archive, or the program itself. `{arch}` becomes the architecture the step's image runs on. |
+| `sha256` | The download's checksum for `amd64` and/or `arm64`. An architecture not listed is not supported. |
+| `arch_names` | How the publisher spells an architecture, where it differs. |
+| `bin` | Directories inside the archive to put on `PATH`. Default: its top level. |
+
+The checksum is the tool's identity. A worker keeps one copy per checksum,
+downloads it once, and mounts it read-only into every step that asks. A step's
+result is keyed on it, so changing a tool runs the step again and fetching the
+same tool from a mirror does not. There is no way to ask for "the latest".
+
+This suits programs that stand alone. A tool built against glibc will not run
+in an Alpine image, and anything that needs system libraries or a build step
+belongs in an image.
+
 ## Inputs and skipped steps
 
 A step sees only its `inputs`, by default the whole repository. Nothing else
@@ -215,8 +249,8 @@ becomes an input with no change to the script, and one that does not match is
 never seen. An input that matches nothing is an error.
 
 That boundary is what makes skipping safe. A step's result is stored under a
-key made of its image's content id, its command, its `env`, and the path and
-content of every file its inputs select. When a later run produces the same key, the earlier pass stands in
+key made of its image's content id, its command, its `env`, its tools, and the
+path and content of every file its inputs select. When a later run produces the same key, the earlier pass stands in
 and the step is not run:
 
 ```

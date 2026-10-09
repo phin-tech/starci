@@ -33,7 +33,7 @@ const (
 	// keyVersion is part of every result key. Raise it whenever what goes
 	// into a key changes meaning, so that results stored under the old
 	// meaning are never mistaken for results under the new one.
-	keyVersion = 2
+	keyVersion = 3
 )
 
 // Config is what Run needs to know about the machine it is on.
@@ -80,12 +80,26 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	if err != nil {
 		return failed("%v", err)
 	}
-	image, err := imageID(s.Image)
+	img, err := inspectImage(s.Image)
 	if err != nil {
 		return failed("%v", err)
 	}
+	var tools []installed
+	for _, t := range s.Tools {
+		in, err := install(cfg.StateDir, t, img.arch)
+		if err != nil {
+			return failed("%v", err)
+		}
+		tools = append(tools, in)
+	}
+	// A step that sets its own PATH means it; tools still go in front.
+	basePath := img.path
+	if p, ok := s.Env["PATH"]; ok {
+		basePath = p
+	}
+	toolMounts, toolIDs := toolArgs(tools, basePath)
 
-	stored := filepath.Join(cfg.StateDir, "results", key(s, image, content)+".json")
+	stored := filepath.Join(cfg.StateDir, "results", key(s, img.id, content, toolIDs)+".json")
 	if s.Cache {
 		if data, err := os.ReadFile(stored); err == nil {
 			var earlier plan.Result
@@ -111,6 +125,7 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	for _, name := range sortedKeys(s.Env) {
 		args = append(args, "-e", name+"="+s.Env[name])
 	}
+	args = append(args, toolMounts...)
 	args = append(args, s.Image, "sh", "-c", s.Run)
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -263,31 +278,15 @@ func (co *checkout) materialise(inputs []string) error {
 	return err
 }
 
-// imageID is the content id of the image that will actually run, pulling it if
-// needed. A tag can be re-pointed; this cannot.
-func imageID(image string) (string, error) {
-	inspect := func() (string, error) {
-		out, err := exec.Command("docker", "image", "inspect", "--format", "{{.Id}}", image).Output()
-		return strings.TrimSpace(string(out)), err
-	}
-	if id, err := inspect(); err == nil {
-		return id, nil
-	}
-	if out, err := exec.Command("docker", "pull", "-q", image).CombinedOutput(); err != nil {
-		return "", fmt.Errorf("cannot pull image %s: %s", image, strings.TrimSpace(string(out)))
-	}
-	return inspect()
-}
-
 // key covers everything that decides a step's outcome, as far as starci can
 // know. The step's name is deliberately absent: renaming a step is not a
 // reason to run it again.
-func key(s plan.Step, image string, content string) string {
+func key(s plan.Step, image string, content string, tools [][]string) string {
 	env := [][2]string{}
 	for _, k := range sortedKeys(s.Env) {
 		env = append(env, [2]string{k, s.Env[k]})
 	}
-	material, _ := json.Marshal([]any{keyVersion, image, s.Run, env, content})
+	material, _ := json.Marshal([]any{keyVersion, image, s.Run, env, content, tools})
 	sum := sha256.Sum256(material)
 	return hex.EncodeToString(sum[:])
 }

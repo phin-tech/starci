@@ -296,3 +296,56 @@ def ci(ctx):
 		t.Errorf("inputs = %s, want %s", got, want)
 	}
 }
+
+const sum = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func TestTools(t *testing.T) {
+	p := mustEval(t, `
+bun = tool(
+    "bun",
+    url = "https://example.com/bun-{arch}.zip",
+    sha256 = {"amd64": "`+sum+`"},
+    arch_names = {"amd64": "x64"},
+    bin = ["bun-linux-{arch}"],
+)
+plain = tool("jq", url = "https://example.com/jq", sha256 = {"arm64": "`+sum+`"})
+
+def ci(ctx):
+    return [step("test", image = "i", run = "bun test", tools = [bun, plain])]
+`)
+	tools := p.Steps[0].Tools
+	if len(tools) != 2 || tools[0].Name != "bun" || tools[0].ArchNames["amd64"] != "x64" || tools[0].Bin[0] != "bun-linux-{arch}" {
+		t.Errorf("tools = %+v", tools)
+	}
+	if got := tools[1].Bin; len(got) != 1 || got[0] != "." {
+		t.Errorf("default bin = %v, want [.]", got)
+	}
+	if err := p.Validate(); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+}
+
+func TestInvalidTools(t *testing.T) {
+	cases := []struct{ name, src, want string }{
+		{"no checksum", `tool("a", url = "https://x/a", sha256 = {})`, "must give a checksum"},
+		{"short checksum", `tool("a", url = "https://x/a", sha256 = {"amd64": "abc"})`, "64 lowercase hex digits"},
+		{"unknown architecture", `tool("a", url = "https://x/a", sha256 = {"x86": "` + sum + `"})`, "keyed by amd64 or arm64"},
+		{"not a url", `tool("a", url = "/tmp/a", sha256 = {"amd64": "` + sum + `"})`, "must be an http(s) address"},
+		{"bin outside the archive", `tool("a", url = "https://x/a", sha256 = {"amd64": "` + sum + `"}, bin = ["../bin"])`, "inside the archive"},
+		{"bad name", `tool("a b", url = "https://x/a", sha256 = {"amd64": "` + sum + `"})`, "may only use letters"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			wantError(t, "t = "+c.src+"\ndef ci(ctx):\n    return []\n", c.want)
+		})
+	}
+	wantError(t, `
+a = tool("a", url = "https://x/a", sha256 = {"amd64": "`+sum+`"})
+def ci(ctx):
+    return [step("s", image = "i", run = "r", tools = [a, a])]
+`, `tool "a" is listed twice`)
+	wantError(t, `
+def ci(ctx):
+    return [step("s", image = "i", run = "r", tools = ["bun"])]
+`, "tools must hold tool(...) values")
+}
