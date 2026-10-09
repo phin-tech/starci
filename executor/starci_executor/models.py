@@ -8,7 +8,7 @@ program checked it" is not a property worth depending on.
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class Step(BaseModel):
@@ -19,6 +19,33 @@ class Step(BaseModel):
     run: str = Field(min_length=1)
     needs: tuple[str, ...] = ()
     env: dict[str, str] = Field(default_factory=dict)
+    # Repository paths the step is given; nothing else is mounted. Its result
+    # is keyed on their contents.
+    inputs: tuple[str, ...] = (".",)
+    # name -> container path, kept between runs on a worker.
+    caches: dict[str, str] = Field(default_factory=dict)
+    # False for a step that must run every time.
+    cache: bool = True
+
+    @field_validator("inputs")
+    @classmethod
+    def _inside_the_repo(cls, paths: tuple[str, ...]) -> tuple[str, ...]:
+        if not paths:
+            raise ValueError("inputs must not be empty")
+        for p in paths:
+            if not p or p.startswith("/") or p == ".." or p.startswith("../") or "/../" in p:
+                raise ValueError(f"input {p!r} must be a path inside the repository")
+        return paths
+
+    @field_validator("caches")
+    @classmethod
+    def _mountable(cls, caches: dict[str, str]) -> dict[str, str]:
+        for name, path in caches.items():
+            if not name.replace("-", "").replace("_", "").isalnum():
+                raise ValueError(f"cache name {name!r} may only use letters, digits, '-' and '_'")
+            if not path.startswith("/"):
+                raise ValueError(f"cache {name!r} needs an absolute path, got {path!r}")
+        return caches
 
 
 class Plan(BaseModel):
@@ -79,6 +106,8 @@ class StepResult(BaseModel):
     status: Literal["passed", "failed", "skipped"]
     seconds: float = 0.0
     worker: str = ""
+    # True when an earlier passing run with the same key stood in for this one.
+    cached: bool = False
     detail: str = ""
 
 

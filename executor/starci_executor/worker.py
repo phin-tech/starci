@@ -10,17 +10,20 @@ Run a worker with:  uv run python -m starci_executor.worker
 """
 
 import asyncio
+import hashlib
+import json
 import os
 import socket
 import subprocess
 import tempfile
 import time
 from collections import deque
+from pathlib import Path
 
 from dotenv import load_dotenv
 from hatchet_sdk import Context, DurableContext, Hatchet
 
-from .models import PipelineInput, PipelineResult, StepInput, StepResult
+from .models import PipelineInput, PipelineResult, Step, StepInput, StepResult
 
 load_dotenv()
 hatchet = Hatchet()
@@ -29,22 +32,84 @@ WORKER_NAME = os.environ.get("STARCI_WORKER_NAME", socket.gethostname())
 # How much of a failed step's output is carried in its error, for the caller.
 # The full output is in the task's logs.
 TAIL_LINES = 40
+# Passing results, one file per key. Per worker for now: a result recorded on
+# one machine is not seen by another.
+RESULTS_DIR = Path(os.environ.get("STARCI_STATE", Path.home() / ".cache" / "starci")) / "results"
 
 
 class StepFailed(Exception):
     pass
 
 
-def _checkout(clone_url: str, sha: str, dest: str) -> None:
-    def git(*args: str) -> None:
-        subprocess.run(["git", "-C", dest, *args], check=True, capture_output=True, text=True)
+class Checkout:
+    """One commit, fetched into a git directory that is never mounted.
 
-    # Fetch exactly the commit rather than cloning a branch: the branch may
-    # have moved on by the time this step runs.
-    git("init", "-q")
-    git("remote", "add", "origin", clone_url)
-    git("fetch", "-q", "--depth", "1", "origin", sha)
-    git("checkout", "-q", "FETCH_HEAD")
+    Keeping the git directory out of the workspace is what makes `inputs` a
+    real boundary: a shallow fetch still holds every file of the commit, so a
+    workspace containing .git would let a step read what it did not declare.
+    """
+
+    def __init__(self, clone_url: str, sha: str, root: str) -> None:
+        self.git_dir = os.path.join(root, "git")
+        self.workspace = os.path.join(root, "workspace")
+        os.makedirs(self.workspace)
+        subprocess.run(["git", "init", "-q", "--bare", self.git_dir], check=True, capture_output=True, text=True)
+        # Fetch exactly the commit rather than cloning a branch: the branch may
+        # have moved on by the time this step runs.
+        self._git("fetch", "-q", "--depth", "1", clone_url, sha)
+
+    def _git(self, *args: str) -> str:
+        return subprocess.run(
+            ["git", f"--git-dir={self.git_dir}", f"--work-tree={self.workspace}", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    def content_ids(self, paths: tuple[str, ...]) -> list[tuple[str, str]]:
+        """Git's own hash of each input: a blob id for a file, a tree id for a
+        directory. Two commits with identical content under a path share it."""
+        ids = []
+        for p in paths:
+            spec = "FETCH_HEAD^{tree}" if p == "." else f"FETCH_HEAD:{p}"
+            try:
+                ids.append((p, self._git("rev-parse", "--verify", "-q", spec)))
+            except subprocess.CalledProcessError:
+                raise StepFailed(f"input {p!r} does not exist in this commit") from None
+        return ids
+
+    def materialise(self, paths: tuple[str, ...]) -> None:
+        self._git("checkout", "-q", "FETCH_HEAD", "--", *paths)
+
+
+def _image_id(image: str) -> str:
+    """The content id of the image that will actually run, pulling it if
+    needed. A tag can be re-pointed; this cannot."""
+
+    def inspect() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{.Id}}", image], capture_output=True, text=True
+        )
+
+    found = inspect()
+    if found.returncode != 0:
+        pulled = subprocess.run(["docker", "pull", "-q", image], capture_output=True, text=True)
+        if pulled.returncode != 0:
+            raise StepFailed(f"cannot pull image {image}: {pulled.stderr.strip()}")
+        found = inspect()
+    return found.stdout.strip()
+
+
+def _key(step: Step, image_id: str, content: list[tuple[str, str]]) -> str:
+    """Everything that decides a step's outcome, as far as starci can know.
+    The step's name is deliberately absent: renaming a step is not a reason to
+    run it again."""
+    material = json.dumps([image_id, step.run, sorted(step.env.items()), content], separators=(",", ":"))
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def _result_path(key: str) -> Path:
+    return RESULTS_DIR / key[:2] / f"{key}.json"
 
 
 @hatchet.task(name="ci-step", input_validator=StepInput, execution_timeout="30m")
@@ -52,15 +117,26 @@ def ci_step(input: StepInput, ctx: Context) -> StepResult:
     step = input.step
     started = time.monotonic()
 
-    with tempfile.TemporaryDirectory(prefix="starci-") as workspace:
+    with tempfile.TemporaryDirectory(prefix="starci-") as root:
         try:
-            _checkout(input.clone_url, input.sha, workspace)
+            checkout = Checkout(input.clone_url, input.sha, root)
         except subprocess.CalledProcessError as e:
-            raise StepFailed(f"checkout of {input.sha} failed: {e.stderr.strip()}") from e
+            raise StepFailed(f"fetch of {input.sha} failed: {e.stderr.strip()}") from e
 
-        cmd = ["docker", "run", "--rm", "-v", f"{workspace}:/workspace", "-w", "/workspace"]
-        for key, value in sorted(step.env.items()):
-            cmd += ["-e", f"{key}={value}"]
+        key = _key(step, _image_id(step.image), checkout.content_ids(step.inputs))
+        stored = _result_path(key)
+        if step.cache and stored.exists():
+            earlier = StepResult.model_validate_json(stored.read_text())
+            ctx.log(f"same image, command and inputs as a passing run on {earlier.worker}; not run again")
+            return earlier.model_copy(update={"name": step.name, "cached": True, "seconds": 0.0})
+
+        checkout.materialise(step.inputs)
+
+        cmd = ["docker", "run", "--rm", "-v", f"{checkout.workspace}:/workspace", "-w", "/workspace"]
+        for name, path in sorted(step.caches.items()):
+            cmd += ["-v", f"starci-cache-{name}:{path}"]
+        for name, value in sorted(step.env.items()):
+            cmd += ["-e", f"{name}={value}"]
         cmd += [step.image, "sh", "-c", step.run]
 
         tail: deque[str] = deque(maxlen=TAIL_LINES)
@@ -79,7 +155,13 @@ def ci_step(input: StepInput, ctx: Context) -> StepResult:
         # Raising is what marks the task failed in Hatchet, so a broken step is
         # red in the dashboard instead of a green task carrying a bad exit code.
         raise StepFailed(f"exit code {code} after {seconds}s\n" + "\n".join(tail))
-    return StepResult(name=step.name, status="passed", seconds=seconds, worker=WORKER_NAME)
+
+    result = StepResult(name=step.name, status="passed", seconds=seconds, worker=WORKER_NAME)
+    if step.cache:
+        # Only passes are remembered. A failure is always worth running again.
+        stored.parent.mkdir(parents=True, exist_ok=True)
+        stored.write_text(result.model_dump_json())
+    return result
 
 
 def _reason(error: BaseException) -> str:

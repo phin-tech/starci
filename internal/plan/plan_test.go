@@ -176,3 +176,43 @@ def ci(ctx):
 		t.Run(c.name, func(t *testing.T) { wantError(t, c.src, c.want) })
 	}
 }
+
+func TestInputsAndCaches(t *testing.T) {
+	p := mustEval(t, `
+def ci(ctx):
+    return [
+        step("default", image = "i", run = "r"),
+        step("narrow", image = "i", run = "r", inputs = ["src/", "bun.lock", "./src", "test"]),
+        step("everything", image = "i", run = "r", inputs = ["src", "."]),
+        step("live", image = "i", run = "r", cache = False, caches = {"bun": "/root/.bun/install/cache"}),
+    ]
+`)
+	want := map[string]string{"default": ".", "narrow": "bun.lock,src,test", "everything": ".", "live": "."}
+	for _, s := range p.Steps {
+		if got := strings.Join(s.Inputs, ","); got != want[s.Name] {
+			t.Errorf("step %q inputs = %q, want %q", s.Name, got, want[s.Name])
+		}
+	}
+	if !p.Steps[0].Cache || p.Steps[3].Cache {
+		t.Errorf("cache flags = %v, %v; want true, false", p.Steps[0].Cache, p.Steps[3].Cache)
+	}
+	if got := p.Steps[3].Caches["bun"]; got != "/root/.bun/install/cache" {
+		t.Errorf("cache mount = %q", got)
+	}
+}
+
+func TestInvalidInputsAndCaches(t *testing.T) {
+	cases := []struct{ name, args, want string }{
+		{"escapes the repository", `inputs = ["../secrets"]`, "must be a path inside the repository"},
+		{"absolute", `inputs = ["/etc"]`, "must be a path inside the repository"},
+		{"empty list", `inputs = []`, "must not be empty"},
+		{"not a path", `inputs = [3]`, "inputs must be paths"},
+		{"relative cache path", `caches = {"bun": "cache"}`, "needs an absolute path"},
+		{"cache name with a slash", `caches = {"../x": "/c"}`, "may only use letters"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			wantError(t, "def ci(ctx):\n    return [step(\"a\", image = \"i\", run = \"r\", "+c.args+")]\n", c.want)
+		})
+	}
+}

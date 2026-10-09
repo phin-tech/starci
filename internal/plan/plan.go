@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -43,6 +44,18 @@ type Step struct {
 	Run   string            `json:"run"`
 	Needs []string          `json:"needs"`
 	Env   map[string]string `json:"env"`
+	// Inputs are the repository paths the step is given, and the only ones it
+	// can see. They are also what its result is keyed on: a step whose image,
+	// command, env and input contents match an earlier passing run is not run
+	// again. Defaults to the whole repository.
+	Inputs []string `json:"inputs"`
+	// Caches are directories kept between runs on a worker (package manager
+	// caches and the like), as name -> path in the container. They speed a
+	// step up; they are not part of what its result is keyed on.
+	Caches map[string]string `json:"caches"`
+	// Cache is false for a step that must run every time, because it depends
+	// on something outside its inputs (the network, the date).
+	Cache bool `json:"cache"`
 }
 
 // Plan is the evaluated script: steps in the order the script returned them.
@@ -152,17 +165,45 @@ func (s *stepValue) Hash() (uint32, error) { return starlark.String(s.Name).Hash
 
 func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var name, image, run string
-	var needs *starlark.List
-	var env *starlark.Dict
+	var needs, inputs *starlark.List
+	var env, caches *starlark.Dict
+	cache := true
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
-		"name", &name, "image", &image, "run", &run, "needs?", &needs, "env?", &env); err != nil {
+		"name", &name, "image", &image, "run", &run, "needs?", &needs, "env?", &env,
+		"inputs?", &inputs, "caches?", &caches, "cache?", &cache); err != nil {
 		return nil, err
 	}
 	if name == "" || image == "" || run == "" {
 		return nil, fmt.Errorf("step: name, image and run must not be empty")
 	}
 
-	s := Step{Name: name, Image: image, Run: run, Needs: []string{}, Env: map[string]string{}}
+	s := Step{
+		Name: name, Image: image, Run: run, Cache: cache,
+		Needs: []string{}, Env: map[string]string{}, Inputs: []string{"."}, Caches: map[string]string{},
+	}
+	if inputs != nil {
+		paths, err := inputPaths(name, inputs)
+		if err != nil {
+			return nil, err
+		}
+		s.Inputs = paths
+	}
+	if caches != nil {
+		for _, item := range caches.Items() {
+			k, kok := item[0].(starlark.String)
+			v, vok := item[1].(starlark.String)
+			if !kok || !vok {
+				return nil, fmt.Errorf("step %q: caches must map a name to a path", name)
+			}
+			if !cacheName.MatchString(string(k)) {
+				return nil, fmt.Errorf("step %q: cache name %q may only use letters, digits, '-' and '_'", name, string(k))
+			}
+			if !path.IsAbs(string(v)) {
+				return nil, fmt.Errorf("step %q: cache %q needs an absolute path in the container, got %q", name, string(k), string(v))
+			}
+			s.Caches[string(k)] = string(v)
+		}
+	}
 	if needs != nil {
 		for i := 0; i < needs.Len(); i++ {
 			switch v := needs.Index(i).(type) {
@@ -186,6 +227,38 @@ func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 		}
 	}
 	return &stepValue{s}, nil
+}
+
+var cacheName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// inputPaths cleans a step's inputs to sorted, unique paths inside the
+// repository. Order and spelling must not matter, because the paths feed the
+// key a step's result is stored under.
+func inputPaths(step string, inputs *starlark.List) ([]string, error) {
+	seen := map[string]bool{}
+	paths := []string{}
+	for i := 0; i < inputs.Len(); i++ {
+		v, ok := inputs.Index(i).(starlark.String)
+		if !ok {
+			return nil, fmt.Errorf("step %q: inputs must be paths, got %s", step, inputs.Index(i).Type())
+		}
+		p := path.Clean(string(v))
+		if string(v) == "" || path.IsAbs(p) || p == ".." || strings.HasPrefix(p, "../") {
+			return nil, fmt.Errorf("step %q: input %q must be a path inside the repository", step, string(v))
+		}
+		if !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("step %q: inputs must not be empty (omit it to give the step the whole repository)", step)
+	}
+	if seen["."] {
+		return []string{"."}, nil
+	}
+	sort.Strings(paths)
+	return paths, nil
 }
 
 func collect(result starlark.Value) ([]Step, error) {

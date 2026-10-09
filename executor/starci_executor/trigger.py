@@ -71,7 +71,8 @@ def main() -> None:
     print()
     for r in result.steps:
         where = f" on {r.worker}" if r.worker else ""
-        print(f"  {r.status:8} {r.name}  {r.seconds}s{where}")
+        note = f"cached, first passed{where}" if r.cached else f"{r.seconds}s{where}"
+        print(f"  {r.status:8} {r.name}  {note}")
         if r.detail:
             for line in r.detail.splitlines()[-15:]:
                 print(f"           {line}")

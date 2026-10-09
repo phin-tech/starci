@@ -41,7 +41,7 @@ go run ./cmd/starci plan --file examples/pi-gamebook.ci.star \
 
 | | |
 |---|---|
-| `step(name, image, run, needs = [], env = {})` | Declare a container to run. Returns a handle usable in another step's `needs`. |
+| `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True)` | Declare a container to run. Returns a handle usable in another step's `needs`. |
 | `ctx.repo`, `ctx.sha`, `ctx.ref` | What is being built. |
 | `ctx.changed_files` | Files the commit changed, sorted. |
 | `ctx.changed_dirs` | Their top-level directories, sorted (`.` for files at the root). |
@@ -83,6 +83,35 @@ Two Hatchet tasks do the work (`executor/starci_executor/worker.py`):
 time, starting a `ci-step` child for each step whose dependencies passed and
 marking the rest skipped. The dashboard at http://localhost:18888 shows the
 run as a parent with one child per step.
+
+## Inputs and skipped steps
+
+A step sees only its `inputs` — repository paths, by default the whole
+repository. Nothing else is mounted, not even `.git`.
+
+That boundary is what makes skipping safe. A step's result is stored under a
+key made of its image's content id, its command, its `env`, and git's hash of
+each input. When a later run produces the same key, the earlier pass stands in
+and the step is not run:
+
+```
+  passed   check  cached, first passed on mac
+  passed   test  cached, first passed on mac
+
+PASSED in 1.0s
+```
+
+Because the key is content, not commit, this holds across commits: one that
+only edits the README reuses the results of the commit before it. Narrower
+`inputs` mean more reuse; a step that reads a path it did not declare fails on
+the missing file rather than passing on a stale result.
+
+What the key cannot see is anything outside the inputs: the network, the date,
+a floating version resolved at run time. Give such a step `cache = False`.
+Only passes are stored, and for now each worker keeps its own results.
+
+`caches = {"bun": "/root/.bun/install/cache"}` keeps a directory between runs
+on a worker. It makes a step that does run faster, and is not part of the key.
 
 ## Development
 
