@@ -183,6 +183,9 @@ func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
 
 	var lines []string
 	args := []string{"-v \"$PWD:/workspace\"", "-w /workspace"}
+	if s.Offline {
+		args = append(args, "--network none")
+	}
 	args = append(args, mounts...)
 	if len(pathDirs) > 0 {
 		base := "$image_path"

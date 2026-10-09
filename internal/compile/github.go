@@ -242,6 +242,9 @@ func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) erro
 	fmt.Fprintf(w, "      - name: %s\n%s        env:\n          STARCI_RUN: %s\n        run: |\n", q(s.Name), skip, block(s.Run, "            "))
 	var args []string
 	args = append(args, "-v \"$PWD:/workspace\"", "-w /workspace")
+	if s.Offline {
+		args = append(args, "--network none")
+	}
 	args = append(args, mounts...)
 	if len(pathDirs) > 0 {
 		base := "$image_path"
@@ -286,7 +289,12 @@ func stepKey(s plan.Step, arch string) string {
 	for _, k := range sortedKeys(s.Env) {
 		env = append(env, [2]string{k, s.Env[k]})
 	}
-	material, _ := json.Marshal([]any{s.Image, arch, s.Run, env, tools, s.Packages, s.Inputs})
+	parts := []any{s.Image, arch, s.Run, env, tools, s.Packages, s.Inputs}
+	// Only said when it is off, so that every other step keeps its key.
+	if s.Offline {
+		parts = append(parts, "offline")
+	}
+	material, _ := json.Marshal(parts)
 	sum := sha256.Sum256(material)
 	return hex.EncodeToString(sum[:])[:16]
 }

@@ -146,6 +146,9 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	// docker client alone leaves the container running.
 	container := "starci-" + filepath.Base(root)
 	args := []string{"run", "--rm", "--name", container, "-v", co.workspace + ":/workspace", "-w", "/workspace"}
+	if s.Offline {
+		args = append(args, "--network", "none")
+	}
 	for _, name := range sortedKeys(s.Caches) {
 		args = append(args, "-v", "starci-cache-"+name+":"+s.Caches[name])
 	}
@@ -339,7 +342,13 @@ func key(s plan.Step, img image, content string, tools [][]string) string {
 	// The architecture is named separately from the image id. For an image
 	// built for several architectures, the id can be the same on all of them,
 	// and a pass on arm64 says nothing about amd64.
-	material, _ := json.Marshal([]any{keyVersion, img.id, img.arch, s.Run, env, content, tools, s.Packages})
+	parts := []any{keyVersion, img.id, img.arch, s.Run, env, content, tools, s.Packages}
+	// A pass with the network says nothing about the same step without it.
+	// Only said when it is off, so that every other step keeps its key.
+	if s.Offline {
+		parts = append(parts, "offline")
+	}
+	material, _ := json.Marshal(parts)
 	sum := sha256.Sum256(material)
 	return hex.EncodeToString(sum[:])
 }

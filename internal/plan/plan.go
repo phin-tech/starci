@@ -114,6 +114,10 @@ type Step struct {
 	// runs, for the system libraries a tool cannot carry. The image must be
 	// Debian or Ubuntu based.
 	Packages []string `json:"packages"`
+	// Offline runs the step with no network, so that it cannot pass on
+	// something its inputs do not hold. It is the negative so that a plan
+	// written before the field existed still means "with the network".
+	Offline bool `json:"offline,omitempty"`
 }
 
 // Tool is a program a step wants on its PATH without it being in the image:
@@ -370,12 +374,12 @@ func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 	var name, image, run string
 	var needs, inputs, tools, packages *starlark.List
 	var env, caches, worker, prefer, avoid *starlark.Dict
-	cache := true
+	cache, network := true, true
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
 		"name", &name, "image", &image, "run", &run, "needs?", &needs, "env?", &env,
 		"inputs?", &inputs, "caches?", &caches, "cache?", &cache,
 		"worker?", &worker, "prefer?", &prefer, "avoid?", &avoid, "tools?", &tools,
-		"packages?", &packages); err != nil {
+		"packages?", &packages, "network?", &network); err != nil {
 		return nil, err
 	}
 	if name == "" || image == "" || run == "" {
@@ -383,7 +387,7 @@ func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 	}
 
 	s := Step{
-		Name: name, Image: image, Run: run, Cache: cache,
+		Name: name, Image: image, Run: run, Cache: cache, Offline: !network,
 		Needs: []string{}, Env: map[string]string{}, Inputs: []string{"."}, Caches: map[string]string{},
 		Worker: map[string]string{}, Prefer: map[string]string{}, Avoid: map[string]string{},
 		Tools: []Tool{}, Packages: []string{},

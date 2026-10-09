@@ -92,6 +92,15 @@ func TestAJobSkipsWhenItsInputsAreUnchanged(t *testing.T) {
 		t.Errorf("the pass key did not change with the command: %s", key(out))
 	}
 
+	// So does taking the network away, and the container is started without it.
+	sealed := compileScript(t, strings.Replace(script, `ruff check app",`, `ruff check app", network = False,`, 1), Options{})
+	if key(out) == key(sealed) {
+		t.Errorf("the pass key did not change with the network: %s", key(out))
+	}
+	if strings.Contains(out, "--network") || !strings.Contains(sealed, "            --network none \\\n") {
+		t.Errorf("network = False did not become --network none on that step alone:\n%s", sealed)
+	}
+
 	// A step that must always run keeps no record of passing.
 	live := compileScript(t, `
 def ci(ctx):

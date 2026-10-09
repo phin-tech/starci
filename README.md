@@ -170,7 +170,7 @@ step's inputs, downloads its tools and checks their checksums, builds an image
 with its packages, and runs its command in that container. A job that has
 already passed with the same inputs skips the work, using the Actions cache as
 the record. `needs` and `worker` carry over, as job dependencies and runner
-labels.
+labels, and so does `network = False`.
 
 A workflow file has to say in advance what happens for every event, so for
 GitHub the script is asked once for each kind: a push to the default branch,
@@ -297,7 +297,7 @@ Runs for different branches, or for a bare commit, leave each other alone.
 
 | | |
 |---|---|
-| `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {}, tools = [], packages = [])` | Declare a container to run. Returns a handle usable in another step's `needs`. |
+| `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {}, tools = [], packages = [], network = True)` | Declare a container to run. Returns a handle usable in another step's `needs`. |
 | `ctx.repo`, `ctx.sha`, `ctx.ref` | What is being built. `ref` is the branch. |
 | `ctx.event` | Why the run started: `"push"`, `"tag"`, `"pull_request"`, `"schedule"` or `"manual"`. |
 | `ctx.tag` | The tag's name, for a tag. |
@@ -459,7 +459,8 @@ an advanced script, is not known in advance and is not checked.
 
 That boundary is what makes skipping safe. A step's result is stored under a
 key made of its image's content id, its command, its `env`, its tools and
-packages, and the path and content of every file its inputs select. When a later run produces the same key, the earlier pass stands in
+packages, whether it has the network, and the path and content of every file
+its inputs select. When a later run produces the same key, the earlier pass stands in
 and the step is not run:
 
 ```
@@ -477,6 +478,25 @@ the missing file rather than passing on a stale result.
 What the key cannot see is anything outside the inputs: the network, the date,
 a floating version resolved at run time. Give such a step `cache = False`.
 Only passes are stored.
+
+### Steps without the network
+
+A step can give the network up, which closes the largest of those gaps:
+
+```python
+step("unit", image = "golang:1.24", run = "go test ./...", network = False)
+```
+
+Its container is started with no network at all, only loopback, so a download
+it did not declare fails the step the way a file it did not declare does. What
+it needs has to arrive as an input, a tool, a package or the image. `caches`
+still work, but a step that passes only because an earlier run filled one is
+not sealed, so this suits steps whose dependencies are vendored or in the
+image.
+
+A pass with the network is never taken as a pass without it: turning the
+network off runs the step once more. Tools and packages are fetched by the
+worker before the container starts and are not affected.
 
 ### Sharing results between machines
 

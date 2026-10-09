@@ -42,6 +42,14 @@ func TestCircleCIStepsBecomeJobs(t *testing.T) {
 	)
 }
 
+func TestCircleCIStartsASealedStepWithoutTheNetwork(t *testing.T) {
+	if out := compileCircle(t, script, Options{}); strings.Contains(out, "--network") {
+		t.Errorf("a step with the network was started without it:\n%s", out)
+	}
+	sealed := compileCircle(t, strings.Replace(script, `ruff check app",`, `ruff check app", network = False,`, 1), Options{})
+	wants(t, sealed, "  --network none \\\n")
+}
+
 func TestCircleCIKeysAPassOnTheExactInputs(t *testing.T) {
 	out := compileCircle(t, script, Options{})
 	wants(t, out,

@@ -150,6 +150,38 @@ func TestCacheFalseAlwaysRuns(t *testing.T) {
 	}
 }
 
+func TestNetworkFalseLeavesOnlyLoopback(t *testing.T) {
+	needDocker(t)
+	r := newRepo(t)
+	sha := r.commit(map[string]string{"a.txt": "a"})
+	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	// With no network a container has the loopback interface and no other.
+	s := plan.Step{Name: "sealed", Run: `test "$(ls /sys/class/net)" = lo`, Cache: true}
+	if got := run(t, cfg, r, sha, s); got.Status != "failed" {
+		t.Fatalf("a step with the network saw only loopback: %+v", got)
+	}
+	s.Offline = true
+	if got := run(t, cfg, r, sha, s); got.Status != "passed" {
+		t.Fatalf("a step with network = False saw more than loopback: %+v", got)
+	}
+}
+
+func TestAPassWithTheNetworkIsNotReusedWithout(t *testing.T) {
+	needDocker(t)
+	r := newRepo(t)
+	sha := r.commit(map[string]string{"a.txt": "a"})
+	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	s := plan.Step{Name: "read", Run: "cat a.txt", Cache: true}
+	run(t, cfg, r, sha, s)
+	s.Offline = true
+	if got := run(t, cfg, r, sha, s); got.Cached {
+		t.Error("a pass with the network stood in for the step without it")
+	}
+	if got := run(t, cfg, r, sha, s); !got.Cached {
+		t.Error("a pass without the network was not reused")
+	}
+}
+
 func TestFailuresAreReportedAndNeverReused(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)

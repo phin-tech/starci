@@ -201,6 +201,28 @@ def ci(ctx):
 	}
 }
 
+func TestNetworkIsOnUnlessAStepTurnsItOff(t *testing.T) {
+	p := mustEval(t, `
+def ci(ctx):
+    return [
+        step("default", image = "i", run = "r"),
+        step("sealed", image = "i", run = "r", network = False),
+    ]
+`)
+	if p.Steps[0].Offline || !p.Steps[1].Offline {
+		t.Errorf("offline = %v, %v; want false, true", p.Steps[0].Offline, p.Steps[1].Offline)
+	}
+	// A plan from before the field existed keeps the network.
+	out, err := json.Marshal(p.Steps[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "offline") {
+		t.Errorf("a step with the network mentions it in its plan: %s", out)
+	}
+	wantError(t, "def ci(ctx):\n    return [step(\"a\", image = \"i\", run = \"r\", network = \"none\")]\n", "network")
+}
+
 func TestInvalidInputsAndCaches(t *testing.T) {
 	cases := []struct{ name, args, want string }{
 		{"escapes the repository", `inputs = ["../secrets"]`, "must be a path inside the repository"},
