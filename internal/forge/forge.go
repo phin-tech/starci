@@ -71,9 +71,16 @@ var ErrSignature = errors.New("the delivery is not signed with the shared secret
 // Forge is one code host.
 type Forge interface {
 	Name() string
-	// ParsePush checks that a webhook delivery really came from the forge,
-	// using the secret shared with it, and reads the push out of it.
-	ParsePush(header http.Header, body []byte, secret []byte) (Push, error)
+	// Headers names the request headers a delivery's event kind and
+	// signature arrive in. A forge may send either under several names.
+	Headers() (event, signature []string)
+	// Signed reports whether signature, as it arrived in the header, proves
+	// the body came from the forge, given the secret shared with it.
+	Signed(signature string, body, secret []byte) bool
+	// Parse reads a delivery that is already known to be genuine. event is
+	// the kind the forge gave it; when that is not known, it is worked out
+	// from the body.
+	Parse(event string, body []byte) (Push, error)
 	// File returns a file as it is at a commit.
 	File(ctx context.Context, repo, sha, path string) ([]byte, error)
 	SetStatus(ctx context.Context, repo, sha string, s Status) error
@@ -132,12 +139,22 @@ type payload struct {
 var runForAction = map[string]bool{"opened": true, "reopened": true, "synchronize": true, "synchronized": true}
 
 func parsePush(event string, body []byte) (Push, error) {
-	if event != "push" && event != "pull_request" {
-		return Push{}, ErrIgnored
-	}
 	var p payload
 	if err := json.Unmarshal(body, &p); err != nil {
 		return Push{}, fmt.Errorf("unreadable delivery: %w", err)
+	}
+	// Some ways of receiving a delivery keep its body and lose its headers.
+	// A pull request's body and a push's do not look alike.
+	if event == "" {
+		switch {
+		case p.Action != "" && p.PullRequest.Head.SHA != "":
+			event = "pull_request"
+		case p.Ref != "" && p.After != "":
+			event = "push"
+		}
+	}
+	if event != "push" && event != "pull_request" {
+		return Push{}, ErrIgnored
 	}
 	if p.Repository.FullName == "" || p.Repository.CloneURL == "" {
 		return Push{}, errors.New("the delivery names no repository")
@@ -204,26 +221,48 @@ func signed(body, secret []byte, signature string) bool {
 	return hmac.Equal(mac.Sum(nil), want)
 }
 
-func (f Forgejo) ParsePush(h http.Header, body, secret []byte) (Push, error) {
-	// Forgejo signs with its own header and Gitea's, and with GitHub's form
-	// for compatibility. Any one of them matching is the same proof.
-	hub := strings.TrimPrefix(h.Get("X-Hub-Signature-256"), "sha256=")
-	if !signed(body, secret, h.Get("X-Forgejo-Signature")) && !signed(body, secret, h.Get("X-Gitea-Signature")) && !signed(body, secret, hub) {
-		return Push{}, ErrSignature
-	}
-	event := h.Get("X-Forgejo-Event")
-	if event == "" {
-		event = h.Get("X-Gitea-Event")
-	}
-	return parsePush(event, body)
+// Forgejo signs with its own header and Gitea's, and with GitHub's form for
+// compatibility. Whichever arrives is the same proof.
+func (f Forgejo) Headers() (event, signature []string) {
+	return []string{"X-Forgejo-Event", "X-Gitea-Event", "X-GitHub-Event"},
+		[]string{"X-Forgejo-Signature", "X-Gitea-Signature", "X-Hub-Signature-256"}
 }
 
-func (g GitHub) ParsePush(h http.Header, body, secret []byte) (Push, error) {
-	sig, ok := strings.CutPrefix(h.Get("X-Hub-Signature-256"), "sha256=")
-	if !ok || !signed(body, secret, sig) {
+func (f Forgejo) Signed(signature string, body, secret []byte) bool {
+	return signed(body, secret, strings.TrimPrefix(signature, "sha256="))
+}
+
+func (f Forgejo) Parse(event string, body []byte) (Push, error) { return parsePush(event, body) }
+
+func (g GitHub) Headers() (event, signature []string) {
+	return []string{"X-GitHub-Event"}, []string{"X-Hub-Signature-256"}
+}
+
+func (g GitHub) Signed(signature string, body, secret []byte) bool {
+	sig, ok := strings.CutPrefix(signature, "sha256=")
+	return ok && signed(body, secret, sig)
+}
+
+func (g GitHub) Parse(event string, body []byte) (Push, error) { return parsePush(event, body) }
+
+// First returns the first of the named headers that is present.
+func First(h http.Header, names []string) string {
+	for _, n := range names {
+		if v := h.Get(n); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// ParsePush checks that a delivery really came from the forge, using the
+// secret shared with it, and reads what happened out of it.
+func ParsePush(f Forge, h http.Header, body, secret []byte) (Push, error) {
+	event, signature := f.Headers()
+	if !f.Signed(First(h, signature), body, secret) {
 		return Push{}, ErrSignature
 	}
-	return parsePush(h.Get("X-GitHub-Event"), body)
+	return f.Parse(First(h, event), body)
 }
 
 var client = &http.Client{Timeout: 30 * time.Second}

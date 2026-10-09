@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"git.phin.tech/sam/starci/internal/forge"
 	"git.phin.tech/sam/starci/internal/plan"
@@ -61,14 +62,94 @@ type Hook struct {
 	Secret []byte
 }
 
-// Handler receives webhook deliveries at /hooks/<forge name>.
+// Receiving a delivery is two jobs, done in two places.
 //
-// It answers quickly and never waits for a run: it checks the delivery is
-// genuine, fetches the script for the pushed commit, and submits the run.
-// The script is evaluated here, in the receiver. That is safe to do with a
-// script from any repository, because a script cannot do anything but
-// describe steps.
-type Handler struct {
+// A Door is the address a forge delivers to. It does as little as a thing on
+// the internet can: it wraps what arrived as a Delivery and passes it on.
+// It holds no access to the forge, reads no script, and can start nothing.
+// That makes it small enough to be anything: this package's Door behind
+// `starci serve`, a function on a cloud provider, or an engine's own webhook
+// endpoint. doors/ has the contract and other implementations.
+//
+// A Receiver is where a Delivery is acted on, on a worker. It checks the
+// signature itself, with the secret it holds, so a door does not have to be
+// trusted; then it fetches the script, evaluates it, and starts the run.
+
+// DeliveryEvent is the name a door gives the event it raises.
+const DeliveryEvent = "starci:delivery"
+
+// Delivery is one webhook delivery, as a door passes it on: enough to check
+// it and act on it, and nothing interpreted.
+type Delivery struct {
+	// Forge is which forge it came from, as the door's address said:
+	// "forgejo" or "github".
+	Forge string `json:"forge"`
+	// Event is the kind of delivery, from the forge's event header.
+	Event string `json:"event"`
+	// Signature is the forge's signature header, as it arrived.
+	Signature string `json:"signature"`
+	// Body is the request body, byte for byte: the signature is over it.
+	Body string `json:"body"`
+}
+
+// Door receives deliveries at /hooks/<forge name> and sends each on.
+type Door struct {
+	// Forges are the forges to accept deliveries for, by name.
+	Forges map[string]forge.Forge
+	// Secrets, where one is given for a forge, lets the door turn away an
+	// unsigned delivery itself instead of passing it on to be turned away.
+	// The Receiver checks regardless.
+	Secrets map[string][]byte
+	// Send passes a delivery on.
+	Send func(ctx context.Context, d Delivery) error
+	Log  func(format string, args ...any)
+}
+
+func (d *Door) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	name, ok := strings.CutPrefix(r.URL.Path, "/hooks/")
+	f, known := d.Forges[name]
+	if !ok || !known || r.Method != http.MethodPost {
+		http.NotFound(w, r)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	if err != nil {
+		http.Error(w, "unreadable body", http.StatusBadRequest)
+		return
+	}
+	eventHeaders, signatureHeaders := f.Headers()
+	delivery := Delivery{
+		Forge:     name,
+		Event:     forge.First(r.Header, eventHeaders),
+		Signature: forge.First(r.Header, signatureHeaders),
+		Body:      string(body),
+	}
+	if secret := d.Secrets[name]; len(secret) > 0 && !f.Signed(delivery.Signature, body, secret) {
+		http.Error(w, forge.ErrSignature.Error(), http.StatusUnauthorized)
+		return
+	}
+	// Passed on even if the forge stops waiting for the answer: a delivery
+	// that has arrived should not be lost to an impatient sender.
+	ctx, stop := context.WithTimeout(context.WithoutCancel(r.Context()), 45*time.Second)
+	defer stop()
+	if err := d.Send(ctx, delivery); err != nil {
+		if errors.Is(err, forge.ErrSignature) {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+		if d.Log != nil {
+			d.Log("%s: could not pass a delivery on: %v", name, err)
+		}
+		// Worth the forge trying again.
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+	fmt.Fprintln(w, "accepted")
+}
+
+// Receiver acts on deliveries.
+type Receiver struct {
 	Hooks  map[string]Hook
 	Submit Submitter
 	Log    func(format string, args ...any)
@@ -79,58 +160,63 @@ type Handler struct {
 	AllowForks bool
 }
 
-func (h *Handler) logf(format string, args ...any) {
+func (h *Receiver) logf(format string, args ...any) {
 	if h.Log != nil {
 		h.Log(format, args...)
 	}
 }
 
-func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	name, ok := strings.CutPrefix(r.URL.Path, "/hooks/")
-	hook, known := h.Hooks[name]
-	if !ok || !known || r.Method != http.MethodPost {
-		http.NotFound(w, r)
-		return
+// Deliver checks a delivery and acts on it, saying in a sentence what it led
+// to. forge.ErrSignature means it was not genuine. Any other error means the
+// forge or the engine could not be reached, and the delivery is worth trying
+// again; a broken script is not an error here, it is a failed run.
+func (h *Receiver) Deliver(ctx context.Context, d Delivery) (string, error) {
+	hook, ok := h.Hooks[d.Forge]
+	if !ok {
+		return "", fmt.Errorf("no forge named %q is configured here", d.Forge)
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
-	if err != nil {
-		http.Error(w, "unreadable body", http.StatusBadRequest)
-		return
+	if !hook.Forge.Signed(d.Signature, []byte(d.Body), hook.Secret) {
+		return "", forge.ErrSignature
 	}
-	push, err := hook.Forge.ParsePush(r.Header, body, hook.Secret)
-	switch {
-	case errors.Is(err, forge.ErrSignature):
-		http.Error(w, err.Error(), http.StatusUnauthorized)
-		return
-	case errors.Is(err, forge.ErrIgnored):
-		fmt.Fprintln(w, "ignored:", err)
-		return
-	case err != nil:
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
+	return h.act(ctx, hook.Forge, d.Event, []byte(d.Body))
+}
 
+// DeliverVerified acts on a delivery something else has already checked the
+// signature of, such as an engine's own webhook endpoint configured with the
+// forge's secret. It has only the body to go on.
+func (h *Receiver) DeliverVerified(ctx context.Context, forgeName string, body []byte) (string, error) {
+	hook, ok := h.Hooks[forgeName]
+	if !ok {
+		return "", fmt.Errorf("no forge named %q is configured here", forgeName)
+	}
+	return h.act(ctx, hook.Forge, "", body)
+}
+
+func (h *Receiver) act(ctx context.Context, f forge.Forge, event string, body []byte) (string, error) {
+	push, err := f.Parse(event, body)
+	if errors.Is(err, forge.ErrIgnored) {
+		return "ignored: " + err.Error(), nil
+	}
+	if err != nil {
+		return "ignored: " + err.Error(), nil
+	}
 	if push.PR != nil && push.PR.Fork && !h.AllowForks {
-		h.logf("%s %s: pull request %d is from a fork; not run", name, push.Repo, push.PR.Number)
-		fmt.Fprintln(w, "ignored: pull requests from forks are not run")
-		return
+		h.logf("%s %s: pull request %d is from a fork; not run", f.Name(), push.Repo, push.PR.Number)
+		return "ignored: pull requests from forks are not run", nil
 	}
-
-	outcome, err := h.handle(r.Context(), hook.Forge, push)
+	outcome, err := h.handle(ctx, f, push)
 	if err != nil {
-		h.logf("%s %s@%.8s: %v", name, push.Repo, push.SHA, err)
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
+		h.logf("%s %s@%.8s: %v", f.Name(), push.Repo, push.SHA, err)
+		return "", err
 	}
-	h.logf("%s %s@%.8s (%s): %s", name, push.Repo, push.SHA, Supersedes(contextOf(push)), outcome)
-	w.WriteHeader(http.StatusAccepted)
-	fmt.Fprintln(w, outcome)
+	h.logf("%s %s@%.8s (%s): %s", f.Name(), push.Repo, push.SHA, Supersedes(contextOf(push)), outcome)
+	return outcome, nil
 }
 
 // handle decides what a push leads to and says so in a sentence. An error
 // means the forge or the engine could not be reached, which is worth the
 // forge retrying; a broken script is not an error here, it is a failed run.
-func (h *Handler) handle(ctx context.Context, f forge.Forge, push forge.Push) (string, error) {
+func (h *Receiver) handle(ctx context.Context, f forge.Forge, push forge.Push) (string, error) {
 	src, err := f.File(ctx, push.Repo, push.SHA, Script)
 	if errors.Is(err, forge.ErrNotFound) {
 		return "no " + Script + " at this commit; nothing to do", nil

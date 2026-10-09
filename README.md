@@ -42,7 +42,8 @@ Everything is one binary:
 | `starci run --local` | Execute a commit on this machine, with nothing but Docker. |
 | `starci run` | Execute a commit on Hatchet's workers. |
 | `starci worker` | Execute steps on this machine, for Hatchet. |
-| `starci serve` | Receive pushes from a forge and start a run for each. |
+| `starci serve` | Be the address a forge delivers webhooks to, relaying them to Hatchet. |
+| `starci hooks add` | Have Hatchet itself be that address. |
 | `starci compile` | Write a basic script out for GitHub Actions or CircleCI. |
 | `starci workers`, `shun`, `unshun` | See the workers, and take one out of rotation. |
 
@@ -91,19 +92,52 @@ each run as a `ci-pipeline` (basic) or `ci-script` (advanced) parent with one
 
 ## Running on every push
 
-`starci serve` receives webhook deliveries and starts a run for each push to
-a branch, each new tag, and each pull request that is opened or given new
-commits. Point a repository's webhook at it:
+Two things turn "something happened in a repository" into a run, and they are
+kept apart on purpose.
 
-| Forge | Deliver to | Content type |
-|---|---|---|
-| Forgejo, Gitea | `http://<host>:8080/hooks/forgejo` | `application/json`, push and pull request events, with a secret |
-| GitHub | `https://<host>/hooks/github` | `application/json`, push and pull request events, with a secret |
+```
+forge ──▶ door ──▶ Hatchet ──event──▶ worker ──▶ the run
+                                        │
+          pass / fail on the commit ◀───┘
+```
 
-There is nothing else to configure, and no list of triggers: every event
-reaches the script, which says in code what it wants done for it, including
-nothing. `starci plan --event tag --tag v1.0.0` shows what a script would do
-for an event without causing one.
+**A door** is the address the forge delivers its webhooks to. It relays the
+delivery and does nothing else: it has no access to the forge, reads no
+script, and can start nothing. So it can be almost anything, and several are
+described in [`doors/`](doors/):
+
+- nothing at all, with the forge pointed straight at Hatchet's own webhook
+  address (`starci hooks add forgejo` sets that up);
+- a function on a cloud provider: a Cloudflare Worker and an AWS Lambda are
+  provided, about forty lines each;
+- `starci serve`, the same thing as a process you run;
+- anything that can forward an HTTP request.
+
+**A worker** does the rest, as a task like any other. It checks the forge's
+signature itself, fetches `.ci.star` as it is at that commit, evaluates it,
+marks the commit `pending`, and starts the run. When the run ends it posts
+`success` or `failure`. A script that cannot be evaluated is a failure on the
+commit, with the message. A newer push to the same branch cancels the run
+before it.
+
+A worker acts on deliveries when it is given the forge's access token and
+webhook secret:
+
+| Variable | |
+|---|---|
+| `STARCI_FORGEJO_URL` | The instance, `https://git.example.com`. |
+| `STARCI_FORGEJO_TOKEN_FILE` | File holding an access token: read repositories, write commit statuses. |
+| `STARCI_FORGEJO_SECRET_FILE` | File holding the webhook secret. |
+| `STARCI_GITHUB_TOKEN_FILE`, `STARCI_GITHUB_SECRET_FILE` | The same, for GitHub. |
+| `STARCI_ALLOW_FORK_PULL_REQUESTS` | `true` to run pull requests from forks. Off by default. |
+
+With the token, a worker also fetches from private repositories; it is handed
+to git through its environment and never appears in a clone URL.
+
+There is no list of triggers to configure. Every event reaches the script,
+which says in code what it wants done for it, including nothing.
+`starci plan --event tag --tag v1.0.0` shows what a script would do for an
+event without causing one.
 
 | Event | The script is told | Status appears as |
 |---|---|---|
@@ -112,40 +146,12 @@ for an event without causing one.
 | A pull request opened or updated | `ctx.event == "pull_request"`, `ctx.pr` | `starci/pull-request` |
 
 **Pull requests from forks are not run.** One is code from someone who cannot
-push to the repository, and running it means running it on your workers. The
-receiver ignores them unless `STARCI_ALLOW_FORK_PULL_REQUESTS=true`; turn that
-on only for a repository whose workers are meant for strangers' code.
+push to the repository, and running it means running it on your workers. They
+are ignored unless `STARCI_ALLOW_FORK_PULL_REQUESTS=true`; turn that on only
+where the workers are meant for strangers' code.
 
 Schedules a script declares are honoured when starci runs inside a CI tool,
-and when compiled. The receiver does not fire them itself yet.
-
-For each delivery it checks the signature, fetches `.ci.star` as it is at the
-pushed commit, and submits the run to Hatchet. The commit shows `pending`
-straight away, and `success` or `failure` when the run ends, under the name
-`starci`. A script that cannot be evaluated is a failure on the commit, with
-the message. A newer push to the same branch cancels the run before it.
-
-| Variable | |
-|---|---|
-| `STARCI_LISTEN` | Address to listen on. Default `:8080`. |
-| `STARCI_FORGEJO_URL` | The instance, `https://git.example.com`. |
-| `STARCI_FORGEJO_TOKEN_FILE` | File holding an access token: read repositories, write commit statuses. |
-| `STARCI_FORGEJO_SECRET_FILE` | File holding the webhook secret. |
-| `STARCI_GITHUB_TOKEN_FILE`, `STARCI_GITHUB_SECRET_FILE` | The same, for GitHub. |
-| `STARCI_ALLOW_FORK_PULL_REQUESTS` | `true` to run pull requests from forks. Off by default. |
-
-The receiver holds no state and runs nothing. It evaluates the script itself,
-which is safe with a script from any repository because a script can do
-nothing but describe steps.
-
-The final status is posted by the worker that ran the run, not by the
-receiver, so it arrives even if the receiver has been restarted. That worker
-needs the same `STARCI_*_URL` and `TOKEN_FILE` variables. With them set, a
-worker also uses the token to fetch from private repositories; the token is
-handed to git through its environment and never appears in a clone URL.
-
-Without a webhook secret the receiver refuses to start: anyone who could reach
-it could otherwise start runs.
+and when compiled. Nothing fires them on Hatchet yet.
 
 ## Where starci is not running: compiling to a workflow
 
@@ -223,7 +229,8 @@ and advanced scripts work.
 | `internal/compile` | Writing a basic plan out for GitHub Actions or CircleCI. |
 | `internal/ciinfo` | Reading why a run started from the CI tool starci is running inside. |
 | `internal/forge` | Talking to Forgejo and GitHub: reading a push, fetching a script, posting a status. |
-| `internal/trigger` | Turning a push delivery into a run. |
+| `internal/trigger` | Turning a delivery into a run: the door that relays one, and the receiver that acts on it. |
+| `doors/` | The contract for a door, and ones that are not Go: a Cloudflare Worker, an AWS Lambda. |
 | `internal/store/s3` | The shared result store. |
 
 An engine is whatever implements `Runner`. To run advanced scripts durably it

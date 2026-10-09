@@ -13,6 +13,7 @@ package hatchet
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -77,10 +78,33 @@ type RunResult struct {
 // Tasks is the set of tasks a worker registers and a client triggers.
 type Tasks struct {
 	Step, Pipeline, Script *sdk.StandaloneTask
+	// receiving are the tasks that act on deliveries from a forge. A worker
+	// has them only if it was given the forge's secret, so a delivery is
+	// never handed to a worker that could not check it.
+	receiving []*sdk.StandaloneTask
 }
 
 func (t Tasks) All() []sdk.WorkflowBase {
-	return []sdk.WorkflowBase{t.Step, t.Pipeline, t.Script}
+	all := []sdk.WorkflowBase{t.Step, t.Pipeline, t.Script}
+	for _, r := range t.receiving {
+		all = append(all, r)
+	}
+	return all
+}
+
+// Reception is what a worker needs in order to act on deliveries.
+type Reception struct {
+	Hooks      map[string]trigger.Hook
+	AllowForks bool
+}
+
+// HookEvent is the event an engine-side webhook for a forge raises. It
+// carries a delivery whose signature Hatchet has already checked.
+func HookEvent(forgeName string) string { return "starci:hook:" + forgeName }
+
+// DeliveryResult is what a delivery led to, in a sentence.
+type DeliveryResult struct {
+	Said string `json:"said"`
 }
 
 var (
@@ -117,9 +141,9 @@ func report(ctx sdk.DurableContext, post Reporter, to *trigger.Report, s forge.S
 var superseded = forge.Status{State: "error", Description: "superseded by a newer run"}
 
 // NewTasks defines the tasks on the client. Register them on a worker to
-// execute runs, or use them from any process to trigger and await runs. cfg
-// and post matter only to a worker.
-func NewTasks(client *sdk.Client, cfg step.Config, post Reporter) Tasks {
+// execute runs, or use them from any process to trigger and await runs. cfg,
+// post and reception matter only to a worker; reception may be nil.
+func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Reception) Tasks {
 	// A newer run for the same branch makes the one before it pointless.
 	supersede := sdk.WithConcurrency(&sdk.Concurrency{
 		Expression:    "input.supersedes",
@@ -191,8 +215,56 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter) Tasks {
 		sdk.WithExecutionTimeout(time.Hour),
 		supersede,
 	)
-	return Tasks{Step: stepTask, Pipeline: pipeline, Script: script}
+	tasks := Tasks{Step: stepTask, Pipeline: pipeline, Script: script}
+	if reception == nil || len(reception.Hooks) == 0 {
+		return tasks
+	}
+
+	receiver := &trigger.Receiver{Hooks: reception.Hooks, AllowForks: reception.AllowForks}
+	// A delivery leads to a run by the same door any other run comes in by.
+	receiver.Submit = submitter(func() Tasks { return tasks })
+	acted := func(said string, err error) (DeliveryResult, error) {
+		if errors.Is(err, forge.ErrSignature) {
+			// It will be no more genuine the second time.
+			return DeliveryResult{}, sdk.NewNonRetryableError(err)
+		}
+		return DeliveryResult{Said: said}, err
+	}
+
+	// Raised by any door: `starci serve`, a function on a cloud provider.
+	// The signature is checked here, by the worker, with the secret it holds.
+	tasks.receiving = append(tasks.receiving, client.NewStandaloneTask("ci-delivery",
+		func(ctx sdk.Context, in trigger.Delivery) (DeliveryResult, error) {
+			receiver.Log = func(format string, args ...any) { ctx.Log(fmt.Sprintf(format, args...)) }
+			return acted(receiver.Deliver(ctx, in))
+		},
+		sdk.WithWorkflowEvents(trigger.DeliveryEvent),
+		sdk.WithRetries(3),
+	))
+	// Raised by Hatchet's own webhook endpoint, which has checked the
+	// signature and hands over the body alone.
+	for name := range reception.Hooks {
+		tasks.receiving = append(tasks.receiving, client.NewStandaloneTask("ci-hook-"+name,
+			func(ctx sdk.Context, in map[string]any) (DeliveryResult, error) {
+				body, err := json.Marshal(in)
+				if err != nil {
+					return DeliveryResult{}, sdk.NewNonRetryableError(err)
+				}
+				receiver.Log = func(format string, args ...any) { ctx.Log(fmt.Sprintf(format, args...)) }
+				return acted(receiver.DeliverVerified(ctx, name, body))
+			},
+			sdk.WithWorkflowEvents(HookEvent(name)),
+			sdk.WithRetries(3),
+		))
+	}
+	return tasks
 }
+
+// submitter adapts a function to trigger.Submitter. It takes the tasks late,
+// because the tasks that receive deliveries are among them.
+type submitter func() Tasks
+
+func (s submitter) Submit(ctx context.Context, r trigger.Run) error { return s().Submit(ctx, r) }
 
 // Submit starts a run and returns as soon as Hatchet has it. It is what a
 // webhook receiver calls: the run reports its own outcome.

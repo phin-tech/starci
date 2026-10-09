@@ -97,22 +97,43 @@ func sign(body []byte, key string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func deliver(h *Handler, event string, body []byte, signature string) *httptest.ResponseRecorder {
+// wired is a door connected straight to a receiver, which is what a forge
+// sees however the two are really joined up.
+type wired struct {
+	door *Door
+	recv *Receiver
+	// said is what the receiver made of the last delivery it was handed.
+	said string
+}
+
+func deliver(h *wired, event string, body []byte, signature string) *httptest.ResponseRecorder {
+	h.said = ""
 	req := httptest.NewRequest("POST", "/hooks/forgejo", strings.NewReader(string(body)))
 	req.Header.Set("X-Forgejo-Event", event)
 	req.Header.Set("X-Forgejo-Signature", signature)
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.door.ServeHTTP(rec, req)
 	return rec
 }
 
-func setup(t *testing.T, script string) (*Handler, *fakeForgejo, *submitted) {
+func setup(t *testing.T, script string) (*wired, *fakeForgejo, *submitted) {
 	t.Helper()
 	fake := newFakeForgejo(t, script)
 	sub := &submitted{}
-	h := &Handler{
-		Hooks:  map[string]Hook{"forgejo": {Forge: forge.Forgejo{BaseURL: fake.URL, Token: "tok"}, Secret: []byte(secret)}},
+	f := forge.Forgejo{BaseURL: fake.URL, Token: "tok"}
+	h := &wired{recv: &Receiver{
+		Hooks:  map[string]Hook{"forgejo": {Forge: f, Secret: []byte(secret)}},
 		Submit: sub,
+	}}
+	// The door is given no secret, so every check of a signature in these
+	// tests is the receiver's.
+	h.door = &Door{
+		Forges: map[string]forge.Forge{"forgejo": f},
+		Send: func(ctx context.Context, d Delivery) error {
+			said, err := h.recv.Deliver(ctx, d)
+			h.said = said
+			return err
+		},
 	}
 	return h, fake, sub
 }
@@ -201,8 +222,8 @@ func TestDeliveriesWithNothingToRunAreIgnored(t *testing.T) {
 	}
 	for name, c := range cases {
 		rec := deliver(h, c.event, c.body, sign(c.body, secret))
-		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "ignored") {
-			t.Errorf("%s: status %d, body %q; want 200 ignored", name, rec.Code, rec.Body)
+		if rec.Code != http.StatusAccepted || !strings.HasPrefix(h.said, "ignored") {
+			t.Errorf("%s: status %d, receiver said %q; want it accepted and ignored", name, rec.Code, h.said)
 		}
 	}
 	if len(sub.runs) != 0 {
@@ -265,7 +286,7 @@ func TestGitHubDeliveries(t *testing.T) {
 	h := http.Header{}
 	h.Set("X-GitHub-Event", "push")
 	h.Set("X-Hub-Signature-256", "sha256="+sign(body, secret))
-	push, err := g.ParsePush(h, body, []byte(secret))
+	push, err := forge.ParsePush(g, h, body, []byte(secret))
 	if err != nil || push.Repo != "sam/app" || push.Ref != "main" || push.SHA != "abc123" {
 		t.Fatalf("push = %+v, %v", push, err)
 	}
@@ -273,12 +294,69 @@ func TestGitHubDeliveries(t *testing.T) {
 		t.Errorf("changed = %s, want %s", got, want)
 	}
 	h.Set("X-Hub-Signature-256", sign(body, secret)) // without the sha256= prefix
-	if _, err := g.ParsePush(h, body, []byte(secret)); !errors.Is(err, forge.ErrSignature) {
+	if _, err := forge.ParsePush(g, h, body, []byte(secret)); !errors.Is(err, forge.ErrSignature) {
 		t.Errorf("a signature in the wrong form was accepted: %v", err)
 	}
-	if _, err := g.ParsePush(h, body, nil); !errors.Is(err, forge.ErrSignature) {
+	if _, err := forge.ParsePush(g, h, body, nil); !errors.Is(err, forge.ErrSignature) {
 		t.Errorf("a delivery was accepted with no secret configured: %v", err)
 	}
+}
+
+// A door that knows the secret turns an unsigned delivery away itself, and
+// one that does not passes it on to be turned away. Either way it goes no
+// further.
+func TestTheDoorNeedNotBeTrusted(t *testing.T) {
+	body := pushBody("refs/heads/main", "abc123")
+
+	h, _, sub := setup(t, basicScript)
+	passed := 0
+	inner := h.door.Send
+	h.door.Send = func(ctx context.Context, d Delivery) error { passed++; return inner(ctx, d) }
+
+	if rec := deliver(h, "push", body, sign(body, "wrong")); rec.Code != http.StatusUnauthorized || passed != 1 {
+		t.Errorf("without the secret: status %d, passed on %d times; want 401 from the receiver", rec.Code, passed)
+	}
+	h.door.Secrets = map[string][]byte{"forgejo": []byte(secret)}
+	if rec := deliver(h, "push", body, sign(body, "wrong")); rec.Code != http.StatusUnauthorized || passed != 1 {
+		t.Errorf("with the secret: status %d, passed on %d times; want 401 at the door", rec.Code, passed)
+	}
+	if len(sub.runs) != 0 {
+		t.Errorf("%d runs started by unsigned deliveries", len(sub.runs))
+	}
+
+	// What a door passes on is the delivery exactly as it arrived.
+	var got Delivery
+	h.door.Send = func(_ context.Context, d Delivery) error { got = d; return nil }
+	deliver(h, "push", body, sign(body, secret))
+	if got.Forge != "forgejo" || got.Event != "push" || got.Signature != sign(body, secret) || got.Body != string(body) {
+		t.Errorf("passed on %+v", got)
+	}
+}
+
+// An engine's own webhook endpoint checks the signature and hands over only
+// the body. What happened has to be read from that.
+func TestDeliveriesAlreadyVerified(t *testing.T) {
+	h, fake, sub := setup(t, eventScript)
+	for _, c := range []struct {
+		body []byte
+		want string
+	}{
+		{pushBody("refs/heads/main", "abc123"), "push"},
+		{pushBody("refs/tags/v2", "abc123"), "release v2"},
+		{prBody("opened", 7, "sam/app"), "pr 7 fix-login -> main"},
+	} {
+		sub.runs = nil
+		if _, err := h.recv.DeliverVerified(context.Background(), "forgejo", c.body); err != nil {
+			t.Fatal(err)
+		}
+		if len(sub.runs) != 1 || sub.runs[0].Plan.Steps[0].Name != c.want {
+			t.Errorf("runs = %+v, want one with the step %q", sub.runs, c.want)
+		}
+	}
+	if said, _ := h.recv.DeliverVerified(context.Background(), "forgejo", []byte(`{"zen":"hello"}`)); !strings.HasPrefix(said, "ignored") {
+		t.Errorf("a delivery that is neither a push nor a pull request led to %q", said)
+	}
+	_ = fake
 }
 
 func TestGitHubAPI(t *testing.T) {
@@ -407,15 +485,15 @@ func TestPullRequestsFromForksAreNotRunUnlessAllowed(t *testing.T) {
 	h, fake, sub := setup(t, eventScript)
 	body := prBody("opened", 9, "stranger/app")
 	rec := deliver(h, "pull_request", body, sign(body, secret))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "pull requests from forks are not run") {
-		t.Errorf("status %d, body %q", rec.Code, rec.Body)
+	if rec.Code != http.StatusAccepted || h.said != "ignored: pull requests from forks are not run" {
+		t.Errorf("status %d, receiver said %q", rec.Code, h.said)
 	}
 	// Nothing at all happens: no script is fetched, no status is set.
 	if len(sub.runs) != 0 || len(fake.statuses) != 0 {
 		t.Errorf("a fork's pull request had an effect: %d runs, %d statuses", len(sub.runs), len(fake.statuses))
 	}
 
-	h.AllowForks = true
+	h.recv.AllowForks = true
 	if rec := deliver(h, "pull_request", body, sign(body, secret)); rec.Code != http.StatusAccepted {
 		t.Fatalf("with forks allowed: status %d: %s", rec.Code, rec.Body)
 	}
