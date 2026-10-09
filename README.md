@@ -17,12 +17,14 @@ def ci(ctx):
 
 ## Status
 
-Experimental. Only the planner exists: it turns a script into a JSON plan and
-runs nothing.
+Experimental. A plan can be computed and executed against a local Hatchet;
+nothing is deployed and nothing triggers it automatically.
 
-- [x] **Planner** — evaluate `.ci.star` into a plan (`starci plan`).
-- [ ] **Executor** — run a plan's steps as Hatchet tasks, in dependency order,
-      on whichever worker is free.
+- [x] **Planner** (Go, `cmd/starci`) — evaluate `.ci.star` into a JSON plan.
+- [x] **Executor** (Python, `executor/`) — validate the plan with Pydantic and
+      run its steps as Hatchet tasks, in dependency order, each in a container
+      against a fresh checkout of the commit.
+- [ ] **Deploy** — workers on real machines, with their own Hatchet tenant.
 - [ ] **Trigger and report** — start a run from a Forgejo push webhook and post
       the result as a commit status.
 - [ ] **Scripts as workflows** — let a script wait on a step's result and
@@ -48,6 +50,39 @@ Nothing else. A script cannot read files, reach the network, read the clock or
 `load()` another file, and it is stopped if it runs too long. The same script
 and inputs always give the same plan, so a plan can be computed in one place
 and executed in another, and a script from any repository is safe to evaluate.
+
+## Running a plan locally
+
+Needs Docker, Go and uv.
+
+```sh
+docker compose -f dev/docker-compose.yml -p starci-dev up -d   # throwaway Hatchet
+dev/token.sh > executor/.env                                   # worker credentials
+
+cd executor
+uv run python -m starci_executor.worker &                      # a worker on this machine
+uv run python -m starci_executor.trigger ~/src/pi-gamebook \
+  --clone-url https://git.phin.tech/sam/pi-gamebook.git \
+  --file ../examples/pi-gamebook.ci.star
+```
+
+The trigger prints the plan's layers, waits, and reports each step:
+
+```
+sam/pi-gamebook @ e8da515a: 2 step(s)
+  check  |  test
+
+  passed   check  4.0s on mac
+  passed   test  2.1s on mac
+
+PASSED in 5.1s
+```
+
+Two Hatchet tasks do the work (`executor/starci_executor/worker.py`):
+`ci-step` runs one container, and `ci-pipeline` walks the plan one layer at a
+time, starting a `ci-step` child for each step whose dependencies passed and
+marking the rest skipped. The dashboard at http://localhost:18888 shows the
+run as a parent with one child per step.
 
 ## Development
 

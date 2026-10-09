@@ -1,0 +1,9 @@
+[project]
+name = "starci-executor"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "hatchet-sdk>=1.41.1",
+    "pydantic>=2.14.0",
+    "python-dotenv>=1.2.4",
+]

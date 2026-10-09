@@ -1,2 +1,5 @@
 /starci
 .env
+/executor/.starci-bin
+__pycache__/
+.venv/
