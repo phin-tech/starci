@@ -1,0 +1,4 @@
+/starci
+.git
+dev/*.env
+dev/.env
