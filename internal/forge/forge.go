@@ -40,6 +40,16 @@ type Push struct {
 	// Changed is every file the pushed commits added, modified or removed.
 	// A tag or a pull request says nothing about that.
 	Changed []string
+	// DefaultBranch is the repository's default branch, when the delivery
+	// says. A push to it is what a repository's schedules are read from.
+	DefaultBranch string
+}
+
+// Head is where a repository's default branch stands.
+type Head struct {
+	Branch   string
+	SHA      string
+	CloneURL string
 }
 
 // Status is what a forge shows beside a commit.
@@ -83,6 +93,10 @@ type Forge interface {
 	Parse(event string, body []byte) (Push, error)
 	// File returns a file as it is at a commit.
 	File(ctx context.Context, repo, sha, path string) ([]byte, error)
+	// Head returns the repository's default branch and the commit it is at.
+	// A run nothing caused, such as a scheduled one, has no other way to
+	// know what to build. ErrNotFound means the repository is gone.
+	Head(ctx context.Context, repo string) (Head, error)
 	SetStatus(ctx context.Context, repo, sha string, s Status) error
 }
 
@@ -108,8 +122,9 @@ type payload struct {
 	After      string `json:"after"`
 	Deleted    bool   `json:"deleted"`
 	Repository struct {
-		FullName string `json:"full_name"`
-		CloneURL string `json:"clone_url"`
+		FullName      string `json:"full_name"`
+		CloneURL      string `json:"clone_url"`
+		DefaultBranch string `json:"default_branch"`
 	} `json:"repository"`
 	Commits []struct {
 		Added    []string `json:"added"`
@@ -161,7 +176,7 @@ func parsePush(event string, body []byte) (Push, error) {
 	}
 	// Fetched from the repository the event is about, whoever wrote the
 	// commit: a pull request's commits are reachable there.
-	out := Push{Repo: p.Repository.FullName, CloneURL: p.Repository.CloneURL}
+	out := Push{Repo: p.Repository.FullName, CloneURL: p.Repository.CloneURL, DefaultBranch: p.Repository.DefaultBranch}
 
 	if event == "pull_request" {
 		if !runForAction[p.Action] || p.PullRequest.Head.SHA == "" {
@@ -311,6 +326,56 @@ func (f Forgejo) auth() map[string]string {
 func (f Forgejo) File(ctx context.Context, repo, sha, path string) ([]byte, error) {
 	data, code, err := call(ctx, "GET", f.api("/repos/"+segments(repo)+"/raw/"+segments(path)+"?ref="+url.QueryEscape(sha)), f.auth(), nil)
 	return fileResult(f, repo, path, data, code, err)
+}
+
+// head asks for the repository, then for its default branch. commitField is
+// where each forge keeps the commit's id in what it says about a branch.
+func head(ctx context.Context, f Forge, repo, repoURL string, branchURL func(string) string, auth map[string]string, commitField string) (Head, error) {
+	fail := func(what string, code int, data []byte, err error) (Head, error) {
+		switch {
+		case err != nil:
+			return Head{}, fmt.Errorf("%s: looking up %s: %w", f.Name(), what, err)
+		case code == http.StatusNotFound:
+			return Head{}, ErrNotFound
+		}
+		return Head{}, fmt.Errorf("%s: looking up %s: HTTP %d: %s", f.Name(), what, code, brief(data))
+	}
+	data, code, err := call(ctx, "GET", repoURL, auth, nil)
+	if err != nil || code != http.StatusOK {
+		return fail(repo, code, data, err)
+	}
+	var r struct {
+		DefaultBranch string `json:"default_branch"`
+		CloneURL      string `json:"clone_url"`
+	}
+	if err := json.Unmarshal(data, &r); err != nil || r.DefaultBranch == "" {
+		return Head{}, fmt.Errorf("%s: %s did not say what its default branch is", f.Name(), repo)
+	}
+	data, code, err = call(ctx, "GET", branchURL(r.DefaultBranch), auth, nil)
+	if err != nil || code != http.StatusOK {
+		return fail(repo+"@"+r.DefaultBranch, code, data, err)
+	}
+	var b struct {
+		Commit map[string]any `json:"commit"`
+	}
+	sha := ""
+	if err := json.Unmarshal(data, &b); err == nil {
+		sha, _ = b.Commit[commitField].(string)
+	}
+	if sha == "" {
+		return Head{}, fmt.Errorf("%s: %s@%s did not say what commit it is at", f.Name(), repo, r.DefaultBranch)
+	}
+	return Head{Branch: r.DefaultBranch, SHA: sha, CloneURL: r.CloneURL}, nil
+}
+
+func (f Forgejo) Head(ctx context.Context, repo string) (Head, error) {
+	base := f.api("/repos/" + segments(repo))
+	return head(ctx, f, repo, base, func(branch string) string { return base + "/branches/" + segments(branch) }, f.auth(), "id")
+}
+
+func (g GitHub) Head(ctx context.Context, repo string) (Head, error) {
+	base := g.api("/repos/" + segments(repo))
+	return head(ctx, g, repo, base, func(branch string) string { return base + "/branches/" + segments(branch) }, g.auth("application/vnd.github+json"), "sha")
 }
 
 func (f Forgejo) SetStatus(ctx context.Context, repo, sha string, s Status) error {

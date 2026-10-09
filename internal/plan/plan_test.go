@@ -457,9 +457,21 @@ def ci(ctx):
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0] != (Schedule{"nightly", "0 3 * * *"}) || got[1] != (Schedule{"weekly-audit", "30 6 * * 1"}) {
+	// Unless a script says otherwise: a firing is skipped while the last run
+	// is still going, and a missed one is not made up.
+	if len(got) != 2 || got[0] != (Schedule{"nightly", "0 3 * * *", OverlapSkip, false}) || got[1] != (Schedule{"weekly-audit", "30 6 * * 1", OverlapSkip, false}) {
 		t.Errorf("schedules = %+v", got)
 	}
+	set, err := Schedules("ci.star", []byte(`
+schedule("backup", cron = "0 2 * * *", overlap = "replace", catch_up = True)
+schedule("poll", cron = "*/5 * * * *", overlap = "allow")
+def ci(ctx):
+    return []
+`))
+	if err != nil || set[0] != (Schedule{"backup", "0 2 * * *", OverlapReplace, true}) || set[1].Overlap != OverlapAllow || set[1].CatchUp {
+		t.Errorf("schedules = %+v, %v", set, err)
+	}
+	wantError(t, "schedule(\"x\", cron = \"0 3 * * *\", overlap = \"queue\")\ndef ci(ctx):\n    return []\n", `overlap is "skip", "replace" or "allow"`)
 	// Declaring schedules does not get in the way of anything else.
 	if _, err := Eval("ci.star", []byte(src), Context{}); err != nil {
 		t.Errorf("Eval: %v", err)

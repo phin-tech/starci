@@ -24,6 +24,7 @@ type fakeForgejo struct {
 	script   string // "" means the repository has no script
 	statuses []map[string]string
 	down     bool
+	gone     bool // the repository no longer exists
 }
 
 func newFakeForgejo(t *testing.T, script string) *fakeForgejo {
@@ -39,6 +40,10 @@ func newFakeForgejo(t *testing.T, script string) *fakeForgejo {
 			return
 		}
 		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/v1/repos/sam/app" && !f.gone:
+			json.NewEncoder(w).Encode(map[string]string{"default_branch": "main", "clone_url": "https://git.example/sam/app.git"})
+		case r.Method == "GET" && r.URL.Path == "/api/v1/repos/sam/app/branches/main" && !f.gone:
+			json.NewEncoder(w).Encode(map[string]any{"name": "main", "commit": map[string]string{"id": "abc123"}})
 		case r.Method == "GET" && r.URL.Path == "/api/v1/repos/sam/app/raw/.ci.star":
 			if f.script == "" || r.URL.Query().Get("ref") != "abc123" {
 				http.NotFound(w, r)
@@ -82,7 +87,7 @@ func (s *submitted) Submit(_ context.Context, r Run) error {
 func pushBody(ref, after string) []byte {
 	b, _ := json.Marshal(map[string]any{
 		"ref": ref, "after": after,
-		"repository": map[string]string{"full_name": "sam/app", "clone_url": "https://git.example/sam/app.git"},
+		"repository": map[string]string{"full_name": "sam/app", "clone_url": "https://git.example/sam/app.git", "default_branch": "main"},
 		"commits": []map[string][]string{
 			{"added": {"src/new.py"}, "modified": {"README.md"}},
 			{"modified": {"src/new.py", "ui/app.ts"}, "removed": {"old.txt"}},
@@ -525,5 +530,140 @@ func TestSupersedes(t *testing.T) {
 		if got := Supersedes(c.c); got != c.want {
 			t.Errorf("Supersedes(%+v) = %q, want %q", c.c, got, c.want)
 		}
+	}
+}
+
+// synced records what a receiver asked the engine's schedules to be.
+type synced struct {
+	calls [][]plan.Schedule
+	repos []string
+}
+
+func (s *synced) Sync(_ context.Context, forgeName, repo string, schedules []plan.Schedule) error {
+	s.calls = append(s.calls, schedules)
+	s.repos = append(s.repos, forgeName+":"+repo)
+	return nil
+}
+
+const scheduledScript = `
+schedule("nightly", cron = "0 3 * * *")
+schedule("backup", cron = "0 2 * * *", overlap = "replace", catch_up = True)
+
+def ci(ctx):
+    if ctx.event == "schedule":
+        return [step("for " + ctx.schedule + " on " + ctx.ref, image = "i", run = "r")]
+    return [step("test", image = "i", run = "r")]
+`
+
+func TestSchedulesAreReadFromTheDefaultBranch(t *testing.T) {
+	h, _, _ := setup(t, scheduledScript)
+	sched := &synced{}
+	h.recv.Schedules = sched
+
+	body := pushBody("refs/heads/main", "abc123")
+	deliver(h, "push", body, sign(body, secret))
+	if len(sched.calls) != 1 || sched.repos[0] != "forgejo:sam/app" {
+		t.Fatalf("after a push to main: %d syncs (%v), want 1", len(sched.calls), sched.repos)
+	}
+	got := sched.calls[0]
+	if len(got) != 2 || got[0].Name != "nightly" || got[1] != (plan.Schedule{Name: "backup", Cron: "0 2 * * *", Overlap: plan.OverlapReplace, CatchUp: true}) {
+		t.Errorf("synced %+v", got)
+	}
+
+	// Nothing else is a place to declare a schedule.
+	for name, d := range map[string]struct {
+		event string
+		body  []byte
+	}{
+		"another branch": {"push", pushBody("refs/heads/feature", "abc123")},
+		"a tag":          {"push", pushBody("refs/tags/v1", "abc123")},
+		"a pull request": {"pull_request", prBody("opened", 7, "sam/app")},
+	} {
+		sched.calls = nil
+		deliver(h, d.event, d.body, sign(d.body, secret))
+		if len(sched.calls) != 0 {
+			t.Errorf("%s changed the schedules", name)
+		}
+	}
+}
+
+func TestSchedulesFollowTheScript(t *testing.T) {
+	body := pushBody("refs/heads/main", "abc123")
+
+	// The script goes: so do its schedules.
+	h, _, _ := setup(t, "")
+	sched := &synced{}
+	h.recv.Schedules = sched
+	deliver(h, "push", body, sign(body, secret))
+	if len(sched.calls) != 1 || len(sched.calls[0]) != 0 {
+		t.Errorf("with no script on main: synced %v, want one sync to no schedules", sched.calls)
+	}
+
+	// The script stops declaring any: the same.
+	h, _, _ = setup(t, basicScript)
+	sched = &synced{}
+	h.recv.Schedules = sched
+	deliver(h, "push", body, sign(body, secret))
+	if len(sched.calls) != 1 || len(sched.calls[0]) != 0 {
+		t.Errorf("with a script declaring none: synced %v", sched.calls)
+	}
+
+	// The script is broken: nothing is touched. A typo should not cancel
+	// tonight's backup.
+	h, _, _ = setup(t, "schedule(\"nightly\", cron = \"0 3 * * *\")\ndef ci(ctx:\n")
+	sched = &synced{}
+	h.recv.Schedules = sched
+	deliver(h, "push", body, sign(body, secret))
+	if len(sched.calls) != 0 {
+		t.Errorf("a script that cannot be read changed the schedules to %v", sched.calls)
+	}
+}
+
+func TestAScheduleThatFires(t *testing.T) {
+	h, fake, _ := setup(t, scheduledScript)
+	ctx := context.Background()
+
+	run, found, err := h.recv.Scheduled(ctx, "forgejo", "sam/app", "nightly")
+	if err != nil || !found {
+		t.Fatalf("found = %v, err = %v", found, err)
+	}
+	// Built from the default branch as it stands when the schedule fires.
+	if run.Context.SHA != "abc123" || run.Context.Ref != "main" || run.Context.Event != plan.EventSchedule || run.CloneURL != "https://git.example/sam/app.git" {
+		t.Errorf("run = %+v", run)
+	}
+	if run.Plan.Steps[0].Name != "for nightly on main" {
+		t.Errorf("step = %q", run.Plan.Steps[0].Name)
+	}
+	if run.Report.Context != "starci/schedule-nightly" || run.Supersedes != "sam/app@schedule-nightly" {
+		t.Errorf("report %+v, supersedes %q", run.Report, run.Supersedes)
+	}
+
+	// A schedule the script no longer declares has nothing left to do.
+	if _, found, err := h.recv.Scheduled(ctx, "forgejo", "sam/app", "retired"); found || err != nil {
+		t.Errorf("a retired schedule: found = %v, err = %v", found, err)
+	}
+	// Nor has one whose repository is gone, or whose script is.
+	fake.gone = true
+	if _, found, err := h.recv.Scheduled(ctx, "forgejo", "sam/app", "nightly"); found || err != nil {
+		t.Errorf("a repository that is gone: found = %v, err = %v", found, err)
+	}
+	h2, _, _ := setup(t, "")
+	if _, found, err := h2.recv.Scheduled(ctx, "forgejo", "sam/app", "nightly"); found || err != nil {
+		t.Errorf("a script that is gone: found = %v, err = %v", found, err)
+	}
+
+	// A forge that cannot be reached is not the same as nothing to do: the
+	// schedule must survive it.
+	h3, fake3, _ := setup(t, scheduledScript)
+	fake3.down = true
+	if _, found, err := h3.recv.Scheduled(ctx, "forgejo", "sam/app", "nightly"); found || err == nil {
+		t.Errorf("with the forge down: found = %v, err = %v; want an error", found, err)
+	}
+
+	// A script broken since: still a run, with that to say.
+	h4, _, _ := setup(t, "schedule(\"nightly\", cron = \"0 3 * * *\")\ndef ci(ctx):\n    return [step(\"a\", image = \"i\", run = \"r\", needs = [\"zz\"])]\n")
+	run, found, err = h4.recv.Scheduled(ctx, "forgejo", "sam/app", "nightly")
+	if !found || err != nil || !strings.Contains(run.Broken, `needs "zz"`) {
+		t.Errorf("a broken script: found = %v, err = %v, broken = %q", found, err, run.Broken)
 	}
 }

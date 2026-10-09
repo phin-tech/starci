@@ -51,6 +51,11 @@ type PipelineInput struct {
 	// for the previous push pointless; or the commit, for a one-off run that
 	// should not disturb anything.
 	Supersedes string `json:"supersedes"`
+	// Exclusive names runs of which only one may be in progress, a newer
+	// one giving way: how a schedule set to skip does not overlap itself.
+	// Always set; a run that is not exclusive with anything is given a
+	// value of its own.
+	Exclusive string `json:"exclusive"`
 	// Report, if set, is where the outcome is posted when the run ends.
 	Report *trigger.Report `json:"report,omitempty"`
 }
@@ -63,6 +68,7 @@ type ScriptInput struct {
 	Context    plan.Context    `json:"context"`
 	CloneURL   string          `json:"clone_url"`
 	Supersedes string          `json:"supersedes"`
+	Exclusive  string          `json:"exclusive"`
 	Report     *trigger.Report `json:"report,omitempty"`
 }
 
@@ -82,6 +88,8 @@ type Tasks struct {
 	// has them only if it was given the forge's secret, so a delivery is
 	// never handed to a worker that could not check it.
 	receiving []*sdk.StandaloneTask
+	// timers is set on a worker that fires schedules.
+	timers *crons
 }
 
 func (t Tasks) All() []sdk.WorkflowBase {
@@ -110,6 +118,7 @@ type DeliveryResult struct {
 var (
 	one              int32 = 1
 	cancelInProgress       = types.CancelInProgress
+	cancelNewest           = types.CancelNewest
 	notEqual               = types.WorkerLabelComparator_NOT_EQUAL
 )
 
@@ -145,11 +154,12 @@ var superseded = forge.Status{State: "error", Description: "superseded by a newe
 // post and reception matter only to a worker; reception may be nil.
 func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Reception) Tasks {
 	// A newer run for the same branch makes the one before it pointless.
-	supersede := sdk.WithConcurrency(&sdk.Concurrency{
-		Expression:    "input.supersedes",
-		MaxRuns:       &one,
-		LimitStrategy: &cancelInProgress,
-	})
+	// And of runs that are exclusive with one another, the one in progress
+	// stays and a newer one is turned away.
+	supersede := sdk.WithConcurrency(
+		&sdk.Concurrency{Expression: "input.supersedes", MaxRuns: &one, LimitStrategy: &cancelInProgress},
+		&sdk.Concurrency{Expression: "input.exclusive", MaxRuns: &one, LimitStrategy: &cancelNewest},
+	)
 
 	stepTask := client.NewStandaloneTask(StepTask,
 		func(ctx sdk.Context, in StepInput) (plan.Result, error) {
@@ -223,6 +233,12 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 	receiver := &trigger.Receiver{Hooks: reception.Hooks, AllowForks: reception.AllowForks}
 	// A delivery leads to a run by the same door any other run comes in by.
 	receiver.Submit = submitter(func() Tasks { return tasks })
+	// Schedules a script declares become Hatchet's crons, and each cron
+	// starts the task that works out what the schedule wants done now.
+	timers := &crons{client: client}
+	receiver.Schedules = timers
+	tasks.receiving = append(tasks.receiving, scheduledTask(client, receiver, timers, post, cfg.StateDir))
+	tasks.timers = timers
 	acted := func(said string, err error) (DeliveryResult, error) {
 		if errors.Is(err, forge.ErrSignature) {
 			// It will be no more genuine the second time.
@@ -273,14 +289,24 @@ func (t Tasks) Submit(ctx context.Context, r trigger.Run) error {
 	if r.Mode == plan.Advanced {
 		_, err = t.Script.RunNoWait(ctx, ScriptInput{
 			Filename: r.Filename, Source: string(r.Source), Context: r.Context,
-			CloneURL: r.CloneURL, Supersedes: r.Supersedes, Report: &r.Report,
+			CloneURL: r.CloneURL, Supersedes: r.Supersedes, Exclusive: OrUnique(r.Exclusive), Report: &r.Report,
 		})
 	} else {
 		_, err = t.Pipeline.RunNoWait(ctx, PipelineInput{
-			Plan: *r.Plan, CloneURL: r.CloneURL, Supersedes: r.Supersedes, Report: &r.Report,
+			Plan: *r.Plan, CloneURL: r.CloneURL, Supersedes: r.Supersedes, Exclusive: OrUnique(r.Exclusive), Report: &r.Report,
 		})
 	}
 	return err
+}
+
+// OrUnique returns name, or if it is empty a value nothing else has. Runs
+// are grouped by these names, and an empty one would put every run that has
+// none into one group.
+func OrUnique(name string) string {
+	if name == "" {
+		return "only-" + uuid.NewString()
+	}
+	return name
 }
 
 // childRunner runs steps as ci-step children of the task that asked for them.

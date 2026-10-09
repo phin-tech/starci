@@ -48,7 +48,14 @@ type Run struct {
 	Context    plan.Context
 	CloneURL   string
 	Supersedes string
-	Report     Report
+	// Exclusive, if set, names runs of which there is to be only one at a
+	// time, where a newer one gives way to the one in progress. It is the
+	// reverse of Supersedes, where the one in progress gives way.
+	Exclusive string
+	Report    Report
+	// Broken is why the script could not be evaluated, for a run that was
+	// asked for anyway. There is then nothing to execute, only this to say.
+	Broken string
 }
 
 // Submitter hands a run to whatever will execute it, without waiting for it.
@@ -148,11 +155,21 @@ func (d *Door) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "accepted")
 }
 
+// Scheduler keeps an engine's timers in step with what scripts declare.
+type Scheduler interface {
+	// Sync makes the schedules that fire for a repository exactly these:
+	// adding, changing and removing as needed.
+	Sync(ctx context.Context, forgeName, repo string, schedules []plan.Schedule) error
+}
+
 // Receiver acts on deliveries.
 type Receiver struct {
 	Hooks  map[string]Hook
 	Submit Submitter
 	Log    func(format string, args ...any)
+	// Schedules, if set, is told what a repository's default branch
+	// declares each time that branch is pushed to.
+	Schedules Scheduler
 	// AllowForks runs pull requests that come from other repositories. Off
 	// unless asked for: such a pull request is code from someone who cannot
 	// push to the repository, and running it means running it on this
@@ -218,11 +235,30 @@ func (h *Receiver) act(ctx context.Context, f forge.Forge, event string, body []
 // forge retrying; a broken script is not an error here, it is a failed run.
 func (h *Receiver) handle(ctx context.Context, f forge.Forge, push forge.Push) (string, error) {
 	src, err := f.File(ctx, push.Repo, push.SHA, Script)
-	if errors.Is(err, forge.ErrNotFound) {
-		return "no " + Script + " at this commit; nothing to do", nil
-	}
-	if err != nil {
+	missing := errors.Is(err, forge.ErrNotFound)
+	if err != nil && !missing {
 		return "", err
+	}
+	// The default branch is the only place schedules are read from: what it
+	// declares now is what fires, and a script that has gone declares none.
+	if h.Schedules != nil && push.Event == plan.EventPush && push.DefaultBranch != "" && push.Ref == push.DefaultBranch {
+		var declared []plan.Schedule
+		if !missing {
+			// A script that cannot be read changes nothing: better last
+			// week's schedules than none because of a typo.
+			if declared, err = plan.Schedules(Script, src); err != nil {
+				declared = nil
+				h.logf("%s %s: schedules left as they were, the script cannot be read: %s", f.Name(), push.Repo, firstLine(err.Error()))
+			}
+		}
+		if missing || err == nil {
+			if serr := h.Schedules.Sync(ctx, f.Name(), push.Repo, declared); serr != nil {
+				h.logf("%s %s: could not update schedules: %v", f.Name(), push.Repo, serr)
+			}
+		}
+	}
+	if missing {
+		return "no " + Script + " at this commit; nothing to do", nil
 	}
 
 	line := statusContext(push.Event)
@@ -272,6 +308,67 @@ func (h *Receiver) handle(ctx context.Context, f forge.Forge, push forge.Push) (
 		return "", fmt.Errorf("submitting the run: %w", err)
 	}
 	return queued, nil
+}
+
+// Scheduled works out the run for a schedule that has fired: the default
+// branch as it stands now, and what the script there wants done for this
+// schedule. found is false when there is nothing for the schedule to do any
+// more, because the repository, the script or the declaration has gone, and
+// the timer that fired should be removed.
+func (h *Receiver) Scheduled(ctx context.Context, forgeName, repo, name string) (run Run, found bool, err error) {
+	hook, ok := h.Hooks[forgeName]
+	if !ok {
+		return Run{}, false, fmt.Errorf("no forge named %q is configured here", forgeName)
+	}
+	f := hook.Forge
+	head, err := f.Head(ctx, repo)
+	if errors.Is(err, forge.ErrNotFound) {
+		return Run{}, false, nil
+	}
+	if err != nil {
+		return Run{}, false, err
+	}
+	src, err := f.File(ctx, repo, head.SHA, Script)
+	if errors.Is(err, forge.ErrNotFound) {
+		return Run{}, false, nil
+	}
+	if err != nil {
+		return Run{}, false, err
+	}
+
+	line := forge.StatusContext + "/schedule-" + name
+	c := plan.Context{Repo: repo, SHA: head.SHA, Ref: head.Branch, Event: plan.EventSchedule, Schedule: name}
+	run = Run{
+		Context:    c,
+		CloneURL:   head.CloneURL,
+		Supersedes: Supersedes(c),
+		Report:     Report{Forge: f.Name(), Repo: repo, SHA: head.SHA, Context: line},
+	}
+
+	declared, err := plan.Schedules(Script, src)
+	if err == nil {
+		still := false
+		for _, s := range declared {
+			still = still || s.Name == name
+		}
+		if !still {
+			return Run{}, false, nil
+		}
+		run.Mode, err = plan.Mode(Script, src)
+	}
+	if err == nil && run.Mode == plan.Basic {
+		run.Plan, err = plan.Eval(Script, src, c)
+	}
+	if err != nil {
+		// A script broken since the schedule was declared: say so on the
+		// commit, and leave the timer for when it is fixed.
+		run.Broken = firstLine(err.Error())
+		return run, true, nil
+	}
+	if run.Mode == plan.Advanced {
+		run.Filename, run.Source = Script, src
+	}
+	return run, true, nil
 }
 
 // contextOf is what a script is told about a delivery.

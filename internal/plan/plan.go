@@ -77,8 +77,23 @@ const (
 // so it is the one trigger that has to be written down.
 type Schedule struct {
 	Name string `json:"name"`
+	// Cron is five fields, read in UTC.
 	Cron string `json:"cron"`
+	// Overlap says what happens when the schedule fires while its last run
+	// is still going: "skip" the new one (the default), "replace" the old
+	// one, or "allow" both.
+	Overlap string `json:"overlap"`
+	// CatchUp asks for one run when a firing was missed because nothing was
+	// there to fire it, however many were missed.
+	CatchUp bool `json:"catch_up"`
 }
+
+// What Schedule.Overlap may be.
+const (
+	OverlapSkip    = "skip"
+	OverlapReplace = "replace"
+	OverlapAllow   = "allow"
+)
 
 // Step is one container to run.
 type Step struct {

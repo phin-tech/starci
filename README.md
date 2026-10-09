@@ -152,8 +152,44 @@ push to the repository, and running it means running it on your workers. They
 are ignored unless `STARCI_ALLOW_FORK_PULL_REQUESTS=true`; turn that on only
 where the workers are meant for strangers' code.
 
-Schedules a script declares are honoured when starci runs inside a CI tool,
-and when compiled. Nothing fires them on Hatchet yet.
+### Schedules
+
+A schedule is the one trigger nothing causes, so it is the one a script
+declares:
+
+```python
+schedule("nightly", cron = "0 3 * * *")
+schedule("backup", cron = "0 2 * * *", overlap = "replace", catch_up = True)
+
+def ci(ctx):
+    if ctx.event == "schedule" and ctx.schedule == "nightly":
+        return [full_suite, audit]
+    ...
+```
+
+| | |
+|---|---|
+| `cron` | Five fields, read in UTC. |
+| `overlap` | What happens when it fires while its last run is still going: `"skip"` the new firing (the default), `"replace"` the run in progress, or `"allow"` both. |
+| `catch_up` | `True` to run once if a firing was missed because nothing was running to fire it, however many were missed. Default `False`. |
+
+**Only the default branch's schedules count.** Each push to it makes the
+schedules that fire match what the script there declares: new ones are added,
+changed ones updated, and ones no longer declared removed. A script that
+cannot be read changes nothing, so a typo does not cancel tonight's run.
+
+When a schedule fires, the worker looks at the default branch as it stands at
+that moment, and asks the script there what the schedule wants done. The
+result is posted on that commit as `starci/schedule-<name>`. A schedule whose
+repository or script has gone removes itself.
+
+On Hatchet a schedule is a Hatchet cron, visible in its dashboard. When
+compiled for GitHub it becomes a `schedule:` trigger, where `overlap` and
+`catch_up` do not carry over: GitHub lets scheduled runs overlap and never
+catches up.
+
+The record `catch_up` is measured against is kept on the worker that fires
+schedules, so for now that is one worker's job.
 
 ## Where starci is not running: compiling to a workflow
 
@@ -303,7 +339,7 @@ Runs for different branches, or for a bare commit, leave each other alone.
 | `ctx.tag` | The tag's name, for a tag. |
 | `ctx.pr` | For a pull request: `.number`, `.base`, `.head`, and `.fork`, true when it comes from another repository. `None` otherwise. |
 | `ctx.schedule` | The name of the schedule that fired. |
-| `schedule(name, cron)` | Declare a schedule, at the top of the file. |
+| `schedule(name, cron, overlap = "skip", catch_up = False)` | Declare a schedule, at the top of the file. |
 | `ctx.changed_files` | Files the commit changed, sorted. |
 | `ctx.changed_dirs` | Their top-level directories, sorted (`.` for files at the root). |
 

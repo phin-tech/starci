@@ -208,6 +208,14 @@ func GitHubEvents(filename string, src []byte, o Options) (string, error) {
 			o.notes = appendOnce(o.notes, fmt.Sprintf("The script looks at the pull request. Whether it comes from a fork carries over; any other rule about it does not, and every pull request is treated as one into %s.", o.DefaultBranch))
 		}
 	}
+	for _, sch := range schedules {
+		if sch.Overlap != plan.OverlapSkip || sch.CatchUp {
+			o.notes = appendOnce(o.notes, "The script sets overlap or catch_up on a schedule. Neither carries over.")
+		}
+	}
+	if len(schedules) > 0 {
+		o.notes = appendOnce(o.notes, "A schedule's runs may overlap here, where starci would skip a firing while the last run is still going; and a missed firing is never made up.")
+	}
 	var quiet []string
 	for i, a := range active {
 		if !a {

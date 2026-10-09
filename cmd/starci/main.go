@@ -370,7 +370,8 @@ func runOnHatchet(mode string, p *plan.Plan, file string, src []byte, c plan.Con
 	var res *hatchet.TaskResult
 	if mode == plan.Advanced {
 		res, err = tasks.Script.Run(context.Background(), onhatchet.ScriptInput{
-			Filename: filepath.Base(file), Source: string(src), Context: c, CloneURL: cloneURL, Supersedes: supersedes,
+			Filename: filepath.Base(file), Source: string(src), Context: c, CloneURL: cloneURL,
+			Supersedes: supersedes, Exclusive: onhatchet.OrUnique(""),
 		})
 	} else {
 		// A step nobody can take waits in silence until Hatchet gives up on
@@ -382,7 +383,9 @@ func runOnHatchet(mode string, p *plan.Plan, file string, src []byte, c plan.Con
 				}
 			}
 		}
-		res, err = tasks.Pipeline.Run(context.Background(), onhatchet.PipelineInput{Plan: *p, CloneURL: cloneURL, Supersedes: supersedes})
+		res, err = tasks.Pipeline.Run(context.Background(), onhatchet.PipelineInput{
+			Plan: *p, CloneURL: cloneURL, Supersedes: supersedes, Exclusive: onhatchet.OrUnique(""),
+		})
 	}
 	if err != nil {
 		// A cancelled run comes back as an error with nothing in it.
@@ -461,6 +464,33 @@ func workerCmd() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// A worker that fires schedules also looks, as it starts and from time to
+	// time, for ones that asked to be caught up and missed a firing while
+	// nothing was running to fire it.
+	if len(reception.Hooks) > 0 {
+		go func() {
+			tick := time.NewTicker(10 * time.Minute)
+			defer tick.Stop()
+			// Not at once: the worker has to be known to Hatchet first.
+			wait := time.After(time.Minute)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-wait:
+				case <-tick.C:
+				}
+				started, err := tasks.CatchUp(ctx, client, cfg.StateDir, time.Now())
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "starci: catching up schedules:", err)
+				}
+				for _, s := range started {
+					fmt.Fprintln(os.Stderr, "starci: caught up a missed firing of", s)
+				}
+			}
+		}()
+	}
 	return worker.StartBlocking(ctx)
 }
 

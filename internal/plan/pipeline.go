@@ -174,8 +174,12 @@ var cronField = regexp.MustCompile(`^[0-9*/,\-A-Za-z?]+$`)
 
 func scheduleBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var name, cron string
-	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "name", &name, "cron", &cron); err != nil {
+	overlap, catchUp := OverlapSkip, false
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "name", &name, "cron", &cron, "overlap?", &overlap, "catch_up?", &catchUp); err != nil {
 		return nil, err
+	}
+	if overlap != OverlapSkip && overlap != OverlapReplace && overlap != OverlapAllow {
+		return nil, fmt.Errorf("schedule %q: overlap is \"skip\", \"replace\" or \"allow\", not %q", name, overlap)
 	}
 	d, _ := thread.Local(schedulesKey).(*declared)
 	if d == nil || d.closed {
@@ -198,7 +202,7 @@ func scheduleBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark
 			return nil, fmt.Errorf("schedule %q is declared twice", name)
 		}
 	}
-	d.schedules = append(d.schedules, Schedule{Name: name, Cron: strings.Join(fields, " ")})
+	d.schedules = append(d.schedules, Schedule{Name: name, Cron: strings.Join(fields, " "), Overlap: overlap, CatchUp: catchUp})
 	return starlark.None, nil
 }
 
