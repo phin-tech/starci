@@ -24,8 +24,10 @@ import (
 	"github.com/hatchet-dev/hatchet/pkg/client/types"
 	sdk "github.com/hatchet-dev/hatchet/sdks/go"
 
+	"git.phin.tech/sam/starci/internal/forge"
 	"git.phin.tech/sam/starci/internal/plan"
 	"git.phin.tech/sam/starci/internal/step"
+	"git.phin.tech/sam/starci/internal/trigger"
 )
 
 const (
@@ -48,16 +50,19 @@ type PipelineInput struct {
 	// for the previous push pointless; or the commit, for a one-off run that
 	// should not disturb anything.
 	Supersedes string `json:"supersedes"`
+	// Report, if set, is where the outcome is posted when the run ends.
+	Report *trigger.Report `json:"report,omitempty"`
 }
 
 // ScriptInput is an advanced script and what it is being run for. The script
 // travels as source: it is evaluated on a worker, as the run unfolds.
 type ScriptInput struct {
-	Filename   string       `json:"filename"`
-	Source     string       `json:"source"`
-	Context    plan.Context `json:"context"`
-	CloneURL   string       `json:"clone_url"`
-	Supersedes string       `json:"supersedes"`
+	Filename   string          `json:"filename"`
+	Source     string          `json:"source"`
+	Context    plan.Context    `json:"context"`
+	CloneURL   string          `json:"clone_url"`
+	Supersedes string          `json:"supersedes"`
+	Report     *trigger.Report `json:"report,omitempty"`
 }
 
 // RunResult is how a run ended, in either mode.
@@ -84,10 +89,37 @@ var (
 	notEqual               = types.WorkerLabelComparator_NOT_EQUAL
 )
 
+// Reporter posts a run's outcome to the forge it came from. A worker that
+// holds no credentials for that forge has none to give, and says so.
+type Reporter func(ctx context.Context, to trigger.Report, s forge.Status) error
+
+// report posts the outcome of a run that asked for one. It is called from
+// inside the run's own task rather than by whoever submitted it, so that the
+// outcome is posted even if the submitter is long gone, and is posted again
+// if the task is.
+func report(ctx sdk.DurableContext, post Reporter, to *trigger.Report, s forge.Status) {
+	if to == nil {
+		return
+	}
+	if post == nil {
+		ctx.Log("this worker has no forge credentials; the outcome was not posted to " + to.Repo)
+		return
+	}
+	// The run's context may already be cancelled, which is exactly when a
+	// status still needs to be posted.
+	bg, stop := context.WithTimeout(context.Background(), 30*time.Second)
+	defer stop()
+	if err := post(bg, *to, s); err != nil {
+		ctx.Log("could not post the outcome: " + err.Error())
+	}
+}
+
+var superseded = forge.Status{State: "error", Description: "superseded by a newer run"}
+
 // NewTasks defines the tasks on the client. Register them on a worker to
 // execute runs, or use them from any process to trigger and await runs. cfg
-// matters only to a worker.
-func NewTasks(client *sdk.Client, cfg step.Config) Tasks {
+// and post matter only to a worker.
+func NewTasks(client *sdk.Client, cfg step.Config, post Reporter) Tasks {
 	// A newer run for the same branch makes the one before it pointless.
 	supersede := sdk.WithConcurrency(&sdk.Concurrency{
 		Expression:    "input.supersedes",
@@ -121,11 +153,14 @@ func NewTasks(client *sdk.Client, cfg step.Config) Tasks {
 		func(ctx sdk.DurableContext, in PipelineInput) (RunResult, error) {
 			results, err := plan.RunPlan(&in.Plan, children(ctx, client, stepTask, in.CloneURL, in.Plan.SHA))
 			if ctx.Err() != nil {
+				report(ctx, post, in.Report, superseded)
 				return RunResult{}, sdk.NewNonRetryableError(errors.New("cancelled"))
 			}
 			if err != nil {
+				report(ctx, post, in.Report, forge.Status{State: "error", Description: err.Error()})
 				return RunResult{}, sdk.NewNonRetryableError(err)
 			}
+			report(ctx, post, in.Report, trigger.Outcome(results, ""))
 			return RunResult{OK: plan.Passed(results), Steps: results}, nil
 		},
 		sdk.WithExecutionTimeout(time.Hour),
@@ -143,18 +178,37 @@ func NewTasks(client *sdk.Client, cfg step.Config) Tasks {
 			runner := children(ctx, client, stepTask, in.CloneURL, in.Context.SHA)
 			results, err := plan.RunPipeline(ctx, in.Filename, []byte(in.Source), in.Context, runner)
 			if ctx.Err() != nil {
+				report(ctx, post, in.Report, superseded)
 				return RunResult{}, sdk.NewNonRetryableError(errors.New("cancelled"))
 			}
 			out := RunResult{OK: err == nil, Steps: results}
 			if err != nil {
 				out.Error = err.Error()
 			}
+			report(ctx, post, in.Report, trigger.Outcome(results, out.Error))
 			return out, nil
 		},
 		sdk.WithExecutionTimeout(time.Hour),
 		supersede,
 	)
 	return Tasks{Step: stepTask, Pipeline: pipeline, Script: script}
+}
+
+// Submit starts a run and returns as soon as Hatchet has it. It is what a
+// webhook receiver calls: the run reports its own outcome.
+func (t Tasks) Submit(ctx context.Context, r trigger.Run) error {
+	var err error
+	if r.Mode == plan.Advanced {
+		_, err = t.Script.RunNoWait(ctx, ScriptInput{
+			Filename: r.Filename, Source: string(r.Source), Context: r.Context,
+			CloneURL: r.CloneURL, Supersedes: r.Supersedes, Report: &r.Report,
+		})
+	} else {
+		_, err = t.Pipeline.RunNoWait(ctx, PipelineInput{
+			Plan: *r.Plan, CloneURL: r.CloneURL, Supersedes: r.Supersedes, Report: &r.Report,
+		})
+	}
+	return err
 }
 
 // childRunner runs steps as ci-step children of the task that asked for them.

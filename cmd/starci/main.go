@@ -4,6 +4,7 @@
 //	starci run      execute a commit of a local checkout: on Hatchet's workers,
 //	                or with --local on this machine with nothing but Docker
 //	starci worker   execute steps on this machine
+//	starci serve    receive pushes from a forge and start a run for each
 //	starci workers  list the workers Hatchet knows, and what they offer
 //	starci shun     stop giving a worker new steps; unshun reverses it
 //
@@ -14,8 +15,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -31,9 +34,11 @@ import (
 
 	onhatchet "git.phin.tech/sam/starci/internal/engine/hatchet"
 	"git.phin.tech/sam/starci/internal/engine/local"
+	"git.phin.tech/sam/starci/internal/forge"
 	"git.phin.tech/sam/starci/internal/plan"
 	"git.phin.tech/sam/starci/internal/step"
 	s3store "git.phin.tech/sam/starci/internal/store/s3"
+	"git.phin.tech/sam/starci/internal/trigger"
 )
 
 const usage = `usage:
@@ -41,6 +46,7 @@ const usage = `usage:
   starci run    CHECKOUT --clone-url URL [--sha SHA] [--ref BRANCH] [--file FILE] [--repo owner/name]
   starci run    CHECKOUT --local [-v] [--slots N] [--sha SHA] [--file FILE]
   starci worker
+  starci serve
   starci workers
   starci shun WORKER
   starci unshun WORKER`
@@ -57,6 +63,8 @@ func main() {
 		err = runCmd(os.Args[2:])
 	case "worker":
 		err = workerCmd()
+	case "serve":
+		err = serveCmd()
 	case "workers":
 		err = workersCmd()
 	case "shun", "unshun":
@@ -306,7 +314,7 @@ func runOnHatchet(mode string, p *plan.Plan, file string, src []byte, c plan.Con
 	if err != nil {
 		return out, err
 	}
-	tasks := onhatchet.NewTasks(client, step.Config{})
+	tasks := onhatchet.NewTasks(client, step.Config{}, nil)
 
 	var res *hatchet.TaskResult
 	if mode == plan.Advanced {
@@ -376,7 +384,11 @@ func workerCmd() error {
 	if err != nil {
 		return err
 	}
-	tasks := onhatchet.NewTasks(client, cfg)
+	forges, _, err := forgesFromEnv()
+	if err != nil {
+		return err
+	}
+	tasks := onhatchet.NewTasks(client, cfg, reporter(forges))
 	worker, err := client.NewWorker("starci-"+name,
 		hatchet.WithWorkflows(tasks.All()...),
 		hatchet.WithSlots(slots),
@@ -408,6 +420,15 @@ func machineConfig(name string) (step.Config, error) {
 			return cfg, err
 		}
 	}
+	forges, _, err := forgesFromEnv()
+	if err != nil {
+		return cfg, err
+	}
+	var all []forge.Forge
+	for _, f := range forges {
+		all = append(all, f)
+	}
+	cfg.GitEnv = forge.GitEnv(all...)
 	if location := os.Getenv("STARCI_STORE"); location != "" {
 		store, err := s3store.Open(location)
 		if err != nil {
@@ -568,4 +589,118 @@ func shunCmd(name string, shun bool) error {
 		fmt.Printf("%s is taking work again\n", name)
 	}
 	return nil
+}
+
+// forgesFromEnv reads the forges this process can talk to, and the secret
+// each signs its deliveries with.
+//
+//	STARCI_FORGEJO_URL          https://git.example.com
+//	STARCI_FORGEJO_TOKEN_FILE   file holding an access token for it
+//	STARCI_FORGEJO_SECRET_FILE  file holding its webhook secret (serve only)
+//	STARCI_GITHUB_TOKEN_FILE    file holding a GitHub token
+//	STARCI_GITHUB_SECRET_FILE   file holding its webhook secret (serve only)
+//
+// Secrets are named by file, not given by value, so that they are never in a
+// process listing or a compose file.
+func forgesFromEnv() (forges map[string]forge.Forge, secrets map[string][]byte, err error) {
+	forges, secrets = map[string]forge.Forge{}, map[string][]byte{}
+	read := func(variable string) (string, error) {
+		path := os.Getenv(variable)
+		if path == "" {
+			return "", nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", variable, err)
+		}
+		return strings.TrimSpace(string(data)), nil
+	}
+	if base := os.Getenv("STARCI_FORGEJO_URL"); base != "" {
+		token, err := read("STARCI_FORGEJO_TOKEN_FILE")
+		if err != nil {
+			return nil, nil, err
+		}
+		forges["forgejo"] = forge.Forgejo{BaseURL: base, Token: token}
+		secret, err := read("STARCI_FORGEJO_SECRET_FILE")
+		if err != nil {
+			return nil, nil, err
+		}
+		secrets["forgejo"] = []byte(secret)
+	}
+	token, err := read("STARCI_GITHUB_TOKEN_FILE")
+	if err != nil {
+		return nil, nil, err
+	}
+	if token != "" {
+		forges["github"] = forge.GitHub{Token: token}
+		secret, err := read("STARCI_GITHUB_SECRET_FILE")
+		if err != nil {
+			return nil, nil, err
+		}
+		secrets["github"] = []byte(secret)
+	}
+	return forges, secrets, nil
+}
+
+// reporter posts outcomes through whichever of the forges a run names.
+func reporter(forges map[string]forge.Forge) onhatchet.Reporter {
+	if len(forges) == 0 {
+		return nil
+	}
+	return func(ctx context.Context, to trigger.Report, s forge.Status) error {
+		f, ok := forges[to.Forge]
+		if !ok {
+			return fmt.Errorf("this worker has no credentials for %s", to.Forge)
+		}
+		return f.SetStatus(ctx, to.Repo, to.SHA, s)
+	}
+}
+
+// serveCmd receives webhook deliveries and submits a run for each push. It
+// holds no state and runs nothing itself: it can be restarted at any time.
+//
+//	STARCI_LISTEN  address to listen on (default :8080)
+//
+// plus the forges from forgesFromEnv, each with its secret, and Hatchet's
+// HATCHET_CLIENT_* variables. A forge delivers to /hooks/forgejo or
+// /hooks/github.
+func serveCmd() error {
+	forges, secrets, err := forgesFromEnv()
+	if err != nil {
+		return err
+	}
+	hooks := map[string]trigger.Hook{}
+	for name, f := range forges {
+		if len(secrets[name]) == 0 {
+			return fmt.Errorf("%s has no webhook secret configured; without one, anyone could start runs", name)
+		}
+		hooks[name] = trigger.Hook{Forge: f, Secret: secrets[name]}
+	}
+	if len(hooks) == 0 {
+		return errors.New("no forge is configured; set STARCI_FORGEJO_URL or STARCI_GITHUB_TOKEN_FILE")
+	}
+	client, err := hatchet.NewClient()
+	if err != nil {
+		return err
+	}
+	tasks := onhatchet.NewTasks(client, step.Config{}, nil)
+
+	listen := os.Getenv("STARCI_LISTEN")
+	if listen == "" {
+		listen = ":8080"
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/hooks/", &trigger.Handler{Hooks: hooks, Submit: tasks, Log: func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, time.Now().UTC().Format(time.RFC3339)+" "+format+"\n", args...)
+	}})
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "ok") })
+
+	var names []string
+	for name := range hooks {
+		names = append(names, "/hooks/"+name)
+	}
+	sort.Strings(names)
+	fmt.Fprintf(os.Stderr, "listening on %s for %s\n", listen, strings.Join(names, ", "))
+	server := &http.Server{Addr: listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	return server.ListenAndServe()
 }

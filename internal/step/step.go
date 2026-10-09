@@ -43,6 +43,11 @@ type Config struct {
 	// StateDir holds what this machine keeps between steps: its own copy of
 	// passing results, and installed tools.
 	StateDir string
+	// GitEnv is extra environment for git when it fetches a commit, which is
+	// how credentials for private repositories are supplied: as git
+	// configuration in the environment, never in a clone URL, where they
+	// would be stored with the run and shown in its logs.
+	GitEnv []string
 	// Shared, if set, is a result store other machines use too. A step that
 	// passed on any of them is not run again here. Without it, a machine
 	// knows only its own results.
@@ -84,7 +89,7 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	}
 	defer os.RemoveAll(root)
 
-	co, err := fetch(cloneURL, sha, root)
+	co, err := fetch(cloneURL, sha, root, cfg.GitEnv)
 	if err != nil {
 		return failed("fetch of %s failed: %v", sha, err)
 	}
@@ -211,10 +216,11 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 type checkout struct {
 	gitDir    string
 	workspace string
+	env       []string
 }
 
-func fetch(cloneURL, sha, root string) (*checkout, error) {
-	co := &checkout{gitDir: filepath.Join(root, "git"), workspace: filepath.Join(root, "workspace")}
+func fetch(cloneURL, sha, root string, env []string) (*checkout, error) {
+	co := &checkout{gitDir: filepath.Join(root, "git"), workspace: filepath.Join(root, "workspace"), env: env}
 	if err := os.Mkdir(co.workspace, 0o755); err != nil {
 		return nil, err
 	}
@@ -236,6 +242,8 @@ func fetch(cloneURL, sha, root string) (*checkout, error) {
 
 func (co *checkout) git(args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"--git-dir=" + co.gitDir, "--work-tree=" + co.workspace}, args...)...)
+	// Never wait at a prompt for a password nobody will type.
+	cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), co.env...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("%s", strings.TrimSpace(string(out)))

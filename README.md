@@ -25,9 +25,10 @@ nothing is deployed and nothing triggers a run automatically.
       each in a container that sees only the step's inputs.
 - [x] **Skipping** — reuse an earlier pass when a step's image, command and
       input contents are unchanged.
+- [x] **Trigger and report** — start a run from a push webhook (Forgejo or
+      GitHub) and post the result as a commit status. Tested against stand-in
+      forges; not yet against a real one.
 - [ ] **Deploy** — workers on real machines, with their own Hatchet tenant.
-- [ ] **Trigger and report** — start a run from a Forgejo push webhook and post
-      the result as a commit status.
 - [x] **Advanced mode** — a script that runs steps itself, sees their
       results, and branches or loops on them.
 
@@ -39,6 +40,7 @@ Everything is one binary:
 | `starci run --local` | Execute a commit on this machine, with nothing but Docker. |
 | `starci run` | Execute a commit on Hatchet's workers. |
 | `starci worker` | Execute steps on this machine, for Hatchet. |
+| `starci serve` | Receive pushes from a forge and start a run for each. |
 | `starci workers`, `shun`, `unshun` | See the workers, and take one out of rotation. |
 
 ## Trying it
@@ -84,6 +86,43 @@ The dashboard at http://localhost:18888 (admin@example.com / Admin123!!) shows
 each run as a `ci-pipeline` (basic) or `ci-script` (advanced) parent with one
 `ci-step` child per step.
 
+## Running on every push
+
+`starci serve` receives webhook deliveries and starts a run for each push to
+a branch. Point a repository's webhook at it:
+
+| Forge | Deliver to | Content type |
+|---|---|---|
+| Forgejo, Gitea | `http://<host>:8080/hooks/forgejo` | `application/json`, push events, with a secret |
+| GitHub | `https://<host>/hooks/github` | `application/json`, push events, with a secret |
+
+For each delivery it checks the signature, fetches `.ci.star` as it is at the
+pushed commit, and submits the run to Hatchet. The commit shows `pending`
+straight away, and `success` or `failure` when the run ends, under the name
+`starci`. A script that cannot be evaluated is a failure on the commit, with
+the message. A newer push to the same branch cancels the run before it.
+
+| Variable | |
+|---|---|
+| `STARCI_LISTEN` | Address to listen on. Default `:8080`. |
+| `STARCI_FORGEJO_URL` | The instance, `https://git.example.com`. |
+| `STARCI_FORGEJO_TOKEN_FILE` | File holding an access token: read repositories, write commit statuses. |
+| `STARCI_FORGEJO_SECRET_FILE` | File holding the webhook secret. |
+| `STARCI_GITHUB_TOKEN_FILE`, `STARCI_GITHUB_SECRET_FILE` | The same, for GitHub. |
+
+The receiver holds no state and runs nothing. It evaluates the script itself,
+which is safe with a script from any repository because a script can do
+nothing but describe steps.
+
+The final status is posted by the worker that ran the run, not by the
+receiver, so it arrives even if the receiver has been restarted. That worker
+needs the same `STARCI_*_URL` and `TOKEN_FILE` variables. With them set, a
+worker also uses the token to fetch from private repositories; the token is
+handed to git through its environment and never appears in a clone URL.
+
+Without a webhook secret the receiver refuses to start: anyone who could reach
+it could otherwise start runs.
+
 ## How it fits together
 
 | Package | |
@@ -92,6 +131,9 @@ each run as a `ci-pipeline` (basic) or `ci-script` (advanced) parent with one
 | `internal/step` | Running one step on one machine: fetch, sandbox, container, result cache. Knows no engine either. |
 | `internal/engine/local` | A `Runner` that calls `step` directly, concurrently. |
 | `internal/engine/hatchet` | A `Runner` that starts each step as a Hatchet task, plus the tasks themselves. |
+| `internal/forge` | Talking to Forgejo and GitHub: reading a push, fetching a script, posting a status. |
+| `internal/trigger` | Turning a push delivery into a run. |
+| `internal/store/s3` | The shared result store. |
 
 An engine is whatever implements `Runner`. To run advanced scripts durably it
 must also remember the results it handed back, so that a script evaluated
