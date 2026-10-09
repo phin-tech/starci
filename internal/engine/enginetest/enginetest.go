@@ -40,6 +40,7 @@ func Run(t *testing.T, eng engine.Engine) {
 	t.Run("a basic plan runs in order and skips what depends on a failure", func(t *testing.T) { basicPlan(t, eng, repo) })
 	t.Run("steps are given the commit and only their inputs", func(t *testing.T) { inputs(t, eng, repo) })
 	t.Run("a step that already passed is not run again", func(t *testing.T) { reuse(t, eng, repo) })
+	t.Run("a step that gave up the network has none", func(t *testing.T) { offline(t, eng, repo) })
 	t.Run("an advanced script acts on what its steps return", func(t *testing.T) { advanced(t, eng, repo) })
 	t.Run("an advanced script that fails says why", func(t *testing.T) { advancedFailure(t, eng, repo) })
 	t.Run("what the engine says it can do, it does", func(t *testing.T) { claims(t, eng, repo) })
@@ -172,6 +173,27 @@ def ci(ctx):
 	}
 	if got, want := step(result, "look").Output, "./src/a.txt\n./src/b.txt\n./tests/one.txt\n"; got != want {
 		t.Errorf("the step saw:\n%swant:\n%s", got, want)
+	}
+}
+
+// offline is here because the choice is the step's and the container is
+// started wherever the engine sends it: the choice has to make the trip.
+func offline(t *testing.T, eng engine.Engine, r repo) {
+	result := execute(t, eng, r, helpers+`
+def ci(ctx):
+    return [
+        sh("with", "ls /sys/class/net", cache = False),
+        sh("without", "ls /sys/class/net", cache = False, network = False),
+    ]
+`)
+	if !result.OK {
+		t.Fatalf("results: %s", statuses(result))
+	}
+	if got := step(result, "without").Output; got != "lo\n" {
+		t.Errorf("a step with network = False has these interfaces, and should have only lo:\n%s", got)
+	}
+	if got := step(result, "with").Output; got == "lo\n" {
+		t.Error("a step that did not give up the network has only lo")
 	}
 }
 
