@@ -15,6 +15,8 @@ def ci(ctx):
     ]
 ```
 
+There are thirty worked examples in [`examples/`](examples/), in both modes.
+
 ## Status
 
 Experimental. Runs execute on this machine or against a throwaway Hatchet;
@@ -50,7 +52,7 @@ Needs Go, Docker and git.
 ```sh
 go build -o starci ./cmd/starci
 
-./starci run ~/src/pi-gamebook --local --file examples/pi-gamebook.ci.star
+./starci run ~/src/pi-gamebook --local --file examples/basic/pi-gamebook.ci.star
 ```
 
 ```
@@ -79,7 +81,7 @@ set -a; . dev/.env; set +a
 ./starci worker &
 ./starci run ~/src/pi-gamebook \
   --clone-url https://git.phin.tech/sam/pi-gamebook.git \
-  --file examples/pi-gamebook.ci.star
+  --file examples/basic/pi-gamebook.ci.star
 ```
 
 The dashboard at http://localhost:18888 (admin@example.com / Admin123!!) shows
