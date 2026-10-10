@@ -52,6 +52,8 @@ type Config struct {
 	// passed on any of them is not run again here. Without it, a machine
 	// knows only its own results.
 	Shared Store
+	// Limits is what a step may use here.
+	Limits Limits
 }
 
 func (c Config) store() Store {
@@ -81,6 +83,13 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	started := time.Now()
 	failed := func(format string, args ...any) plan.Result {
 		return plan.Result{Name: s.Name, Status: "failed", Worker: cfg.Worker, Detail: fmt.Sprintf(format, args...)}
+	}
+
+	// Before anything is fetched: a step that asks for more than this
+	// machine allows will not be run here whatever else is true of it.
+	limits, err := cfg.Limits.For(s)
+	if err != nil {
+		return failed("%v", err)
 	}
 
 	root, err := os.MkdirTemp("", "starci-")
@@ -145,7 +154,16 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	// Named, so that it can be removed if the run is cancelled: stopping the
 	// docker client alone leaves the container running.
 	container := "starci-" + filepath.Base(root)
-	args := []string{"run", "--rm", "--name", container, "-v", co.workspace + ":/workspace", "-w", "/workspace"}
+	args := []string{"run", "--name", container, "-v", co.workspace + ":/workspace", "-w", "/workspace"}
+	if limits.Memory > 0 {
+		// Whether a container was stopped for its memory can only be asked
+		// while it still exists, so this one is removed here and not by
+		// docker as it exits.
+		defer func() { _ = exec.Command("docker", "rm", "-f", container).Run() }()
+	} else {
+		args = append(args, "--rm")
+	}
+	args = append(args, limits.args()...)
 	if s.Offline {
 		args = append(args, "--network", "none")
 	}
@@ -158,7 +176,11 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	args = append(args, toolMounts...)
 	args = append(args, runImage, "sh", "-c", s.Run)
 
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	// The time a step is allowed is for its command. Fetching the commit and
+	// getting the image ready are the machine's doing and are not counted.
+	running, stop := context.WithTimeout(ctx, limits.Timeout)
+	defer stop()
+	cmd := exec.CommandContext(running, "docker", args...)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return failed("%v", err)
@@ -189,6 +211,20 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	}
 
 	seconds := float64(time.Since(started).Round(100*time.Millisecond)) / float64(time.Second)
+	stopped := func(why string) plan.Result {
+		r := failed("%s\n%s", why, strings.Join(tail, "\n"))
+		r.Detail = strings.TrimRight(r.Detail, "\n")
+		r.Seconds, r.Output = seconds, output.String()
+		return r
+	}
+	if running.Err() != nil {
+		// Stopping the docker client leaves the container running.
+		_ = exec.Command("docker", "rm", "-f", container).Run()
+		return stopped(fmt.Sprintf("it ran out of time: it had %s", plan.FormatTimeout(int(limits.Timeout/time.Second))))
+	}
+	if runErr != nil && limits.Memory > 0 && outOfMemory(container) {
+		return stopped(fmt.Sprintf("it ran out of memory: it had %s", plan.FormatMemory(limits.Memory)))
+	}
 	if runErr != nil {
 		code := -1
 		var exit *exec.ExitError

@@ -41,6 +41,7 @@ func Run(t *testing.T, eng engine.Engine) {
 	t.Run("steps are given the commit and only their inputs", func(t *testing.T) { inputs(t, eng, repo) })
 	t.Run("a step that already passed is not run again", func(t *testing.T) { reuse(t, eng, repo) })
 	t.Run("a step that gave up the network has none", func(t *testing.T) { offline(t, eng, repo) })
+	t.Run("a step is stopped when its time is up", func(t *testing.T) { timeout(t, eng, repo) })
 	t.Run("an advanced script acts on what its steps return", func(t *testing.T) { advanced(t, eng, repo) })
 	t.Run("an advanced script that fails says why", func(t *testing.T) { advancedFailure(t, eng, repo) })
 	t.Run("what the engine says it can do, it does", func(t *testing.T) { claims(t, eng, repo) })
@@ -214,6 +215,24 @@ def ci(ctx):
 	// A reused pass hands back what the step printed when it ran.
 	if got.Output != step(first, "once").Output || got.Output == "" {
 		t.Errorf("the reused result's output is %q, the original's %q", got.Output, step(first, "once").Output)
+	}
+}
+
+func timeout(t *testing.T, eng engine.Engine, r repo) {
+	began := time.Now()
+	result := execute(t, eng, r, helpers+`
+def ci(ctx):
+    slow = sh("slow", "echo started; sleep 600", cache = False, timeout = "8s")
+    return [slow, sh("quick", "true", cache = False, timeout = "1m", cpus = 1, memory = "64m"), sh("after", "true", needs = [slow], cache = False)]
+`)
+	if got, want := statuses(result), "slow=failed quick=passed after=skipped"; got != want {
+		t.Fatalf("results:\n  %s\nwant:\n  %s\n%s", got, want, step(result, "quick").Detail)
+	}
+	if d := step(result, "slow").Detail; !strings.Contains(d, "it ran out of time: it had 8s") || !strings.Contains(d, "started") {
+		t.Errorf("the stopped step's detail is %q; want why, and what it had printed", d)
+	}
+	if took := time.Since(began); took > 2*time.Minute {
+		t.Errorf("the run took %s; the step was to be stopped after 8s", took)
 	}
 }
 

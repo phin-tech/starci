@@ -32,6 +32,11 @@ import (
 	"git.phin.tech/sam/starci/internal/trigger"
 )
 
+// runTimeout is how long a whole run may take. It only waits on its steps,
+// each of which has a limit of its own, so this is a backstop and is long:
+// an hour, as it was, is less than two steps may now ask for between them.
+const runTimeout = 24 * time.Hour
+
 const (
 	StepTask     = "ci-step"
 	PipelineTask = "ci-pipeline"
@@ -158,6 +163,15 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 
 	stepTask := client.NewStandaloneTask(StepTask,
 		func(ctx sdk.Context, in StepInput) (plan.Result, error) {
+			// The task is given half an hour to get a step ready, and on
+			// top of that however long the step's command may run, so that
+			// it is always the step's own limit that stops it. Hatchet adds
+			// what it is given to the time the task already had.
+			if limits, err := cfg.Limits.For(in.Step); err == nil {
+				if err := ctx.RefreshTimeout(fmt.Sprintf("%ds", int(limits.Timeout/time.Second))); err != nil {
+					ctx.Log("starci: the task's time could not be extended to cover the step's: " + err.Error())
+				}
+			}
 			r := step.Run(ctx, cfg, in.CloneURL, in.SHA, in.Step, func(line string) {
 				// Hatchet rejects an empty log message; a blank line still
 				// matters for reading test output, so send it as a space.
@@ -192,7 +206,7 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 			report(ctx, post, in.Report, trigger.Outcome(results, ""))
 			return RunResult{OK: plan.Passed(results), Steps: results}, nil
 		},
-		sdk.WithExecutionTimeout(time.Hour),
+		sdk.WithExecutionTimeout(runTimeout),
 		supersede,
 	)
 
@@ -217,7 +231,7 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 			report(ctx, post, in.Report, trigger.Outcome(results, out.Error))
 			return out, nil
 		},
-		sdk.WithExecutionTimeout(time.Hour),
+		sdk.WithExecutionTimeout(runTimeout),
 		supersede,
 	)
 	tasks := Tasks{Step: stepTask, Pipeline: pipeline, Script: script}

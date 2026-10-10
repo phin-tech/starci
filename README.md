@@ -247,6 +247,9 @@ workflow says which apply:
 - A step that is a different command for different events cannot be one job;
   compiling says so and asks for two names.
 - The CircleCI output does not do this yet: it is the plan for a push.
+- A step's `timeout`, `cpus` and `memory` carry over. GitHub counts time in
+  whole minutes, so part of a minute becomes one. A step that sets none has
+  the job's own limits, not a worker's.
 - `prefer` and `avoid` are dropped. For CircleCI so is `worker`: it chooses
   machines by resource class, not by label.
 - Advanced scripts cannot be compiled at all: their steps are only known as
@@ -347,6 +350,7 @@ reach the Hatchet engine and the git server; nothing connects in to it.
 | `STARCI_LABELS` | What the machine offers, as `gpu=true,arch=arm64`. |
 | `STARCI_STATE` | Where this machine keeps results and tools. Default: `~/.cache/starci`. |
 | `STARCI_STORE` | A result store shared with other machines. Optional. |
+| `STARCI_STEP_TIMEOUT`, `STARCI_STEP_CPUS`, `STARCI_STEP_MEMORY` | What a step may use here: see [Limits](#limits). Default: 30m, and no limit on the other two. |
 
 ### Placing steps
 
@@ -357,6 +361,44 @@ reach the Hatchet engine and the git server; nothing connects in to it.
 | `avoid = {"network": "home"}` | Never on a worker with that label. |
 
 `starci run` warns before submitting when no connected worker can take a step.
+
+### Limits
+
+A step can say how long it may run and how much of a machine it may have:
+
+```python
+step("build", image = "rust:1", run = "cargo build", timeout = "20m", cpus = 4, memory = "8g")
+step("lint", image = "rust:1", run = "cargo fmt --check", timeout = "2m", cpus = 1, memory = "512m")
+```
+
+| | |
+|---|---|
+| `timeout` | How long the command may run: `"90s"`, `"10m"`, `"1h30m"`. Fetching the commit and getting the image ready are not counted. |
+| `cpus` | How many processors it may use. `0.5` is half of one. |
+| `memory` | How much memory: `"512m"`, `"4g"`. It is given no swap on top. |
+
+A step that runs out of time is stopped, its container removed, and the step
+failed with `it ran out of time: it had 2m` and what it had printed. One
+stopped for its memory says `it ran out of memory: it had 512m`, not an exit
+code. That is said when it is the step's command that was stopped; a script
+that carries on after something it started was stopped, carries on.
+
+A machine sets what a step may have with `STARCI_STEP_TIMEOUT`,
+`STARCI_STEP_CPUS` and `STARCI_STEP_MEMORY`. Each is two things at once: the
+most a step may ask for, and what a step that does not ask is given. A step
+that asks for more than a machine allows is not started there, and says
+which limit and what it is; it is not quietly given less. A machine that
+sets no timeout allows 30 minutes, so a step that needs 45 needs a machine
+with `STARCI_STEP_TIMEOUT=45m` or more. One that sets no processors or memory
+lets a step ask for any amount, and gives a step that does not ask the run
+of the machine.
+
+None of this is part of a step's key. A pass under one limit is a pass under
+another.
+
+A worker still takes `STARCI_SLOTS` steps at once whatever they ask for:
+four steps that each ask for four processors are started together on a
+machine with four.
 
 ### Looking after workers
 
@@ -376,7 +418,7 @@ Runs for different branches, or for a bare commit, leave each other alone.
 
 | | |
 |---|---|
-| `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {}, tools = [], packages = [], network = True)` | Declare a container to run. Returns a handle usable in another step's `needs`. |
+| `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {}, tools = [], packages = [], network = True, timeout = "", cpus = 0, memory = "")` | Declare a container to run. Returns a handle usable in another step's `needs`. |
 | `ctx.repo`, `ctx.sha`, `ctx.ref` | What is being built. `ref` is the branch. |
 | `ctx.event` | Why the run started: `"push"`, `"tag"`, `"pull_request"`, `"schedule"` or `"manual"`. |
 | `ctx.tag` | The tag's name, for a tag. |

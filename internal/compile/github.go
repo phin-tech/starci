@@ -10,6 +10,7 @@ import (
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"git.phin.tech/sam/starci/internal/plan"
@@ -239,9 +240,16 @@ func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) erro
 
 	// The command travels in an environment variable, so that nothing in it
 	// needs escaping for the shell that starts the container.
-	fmt.Fprintf(w, "      - name: %s\n%s        env:\n          STARCI_RUN: %s\n        run: |\n", q(s.Name), skip, block(s.Run, "            "))
+	// A step's timeout is for its command, so it goes on the one step of
+	// the job that runs it. GitHub counts in minutes; part of one is a whole.
+	limit := ""
+	if s.Timeout > 0 {
+		limit = fmt.Sprintf("        timeout-minutes: %d\n", (s.Timeout+59)/60)
+	}
+	fmt.Fprintf(w, "      - name: %s\n%s%s        env:\n          STARCI_RUN: %s\n        run: |\n", q(s.Name), skip, limit, block(s.Run, "            "))
 	var args []string
 	args = append(args, "-v \"$PWD:/workspace\"", "-w /workspace")
+	args = append(args, limitArgs(s)...)
 	if s.Offline {
 		args = append(args, "--network none")
 	}
@@ -297,6 +305,20 @@ func stepKey(s plan.Step, arch string) string {
 	material, _ := json.Marshal(parts)
 	sum := sha256.Sum256(material)
 	return hex.EncodeToString(sum[:])[:16]
+}
+
+// limitArgs are the docker arguments that hold a step's container to the
+// processors and memory it asked for. A step that did not ask has the whole
+// of the machine the job is given, as it would on a worker that sets none.
+func limitArgs(s plan.Step) []string {
+	var args []string
+	if s.CPUs > 0 {
+		args = append(args, "--cpus "+strconv.FormatFloat(s.CPUs, 'f', -1, 64))
+	}
+	if s.Memory > 0 {
+		args = append(args, fmt.Sprintf("--memory %d --memory-swap %d", s.Memory, s.Memory))
+	}
+	return args
 }
 
 func isPattern(in string) bool { return strings.ContainsAny(in, "*?[") }

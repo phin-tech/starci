@@ -184,3 +184,38 @@ func TestExamplesCompile(t *testing.T) {
 		})
 	}
 }
+
+func TestLimitsAreCompiled(t *testing.T) {
+	p, err := plan.Eval("ci.star", []byte(`
+def ci(ctx):
+    return [step("test", image = "alpine:3", run = "make test", timeout = "90s", cpus = 1.5, memory = "512m")]
+`), plan.Context{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	github, err := GitHub(p, Options{Source: "ci.star"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A minute and a half is two of GitHub's minutes.
+	for _, want := range []string{"        timeout-minutes: 2\n", "--cpus 1.5 \\", "--memory 536870912 --memory-swap 536870912 \\"} {
+		if !strings.Contains(github, want) {
+			t.Errorf("the workflow lacks %q:\n%s", want, github)
+		}
+	}
+	circle, err := CircleCI(p, Options{Source: "ci.star"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"timeout -k 10 90 docker run --rm", "--cpus 1.5", "--memory 536870912"} {
+		if !strings.Contains(circle, want) {
+			t.Errorf("the CircleCI configuration lacks %q:\n%s", want, circle)
+		}
+	}
+	// A step that sets none compiles as it did.
+	plain, _ := plan.Eval("ci.star", []byte("def ci(ctx):\n    return [step(\"test\", image = \"alpine:3\", run = \"make test\")]\n"), plan.Context{})
+	out, _ := GitHub(plain, Options{Source: "ci.star"})
+	if strings.Contains(out, "timeout-minutes") || strings.Contains(out, "--cpus") || strings.Contains(out, "--memory") {
+		t.Errorf("a step with no limits compiled with some:\n%s", out)
+	}
+}

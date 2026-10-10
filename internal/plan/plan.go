@@ -133,6 +133,16 @@ type Step struct {
 	// something its inputs do not hold. It is the negative so that a plan
 	// written before the field existed still means "with the network".
 	Offline bool `json:"offline,omitempty"`
+	// Timeout is how many seconds the step's command may run before it is
+	// stopped and the step failed. CPUs is how many processors it may use,
+	// and Memory how many bytes. Zero means the step does not say, and gets
+	// what the machine that runs it gives a step that does not.
+	//
+	// None of the three is part of what a result is keyed on: a pass under
+	// one limit is a pass under another.
+	Timeout int     `json:"timeout,omitempty"`
+	CPUs    float64 `json:"cpus,omitempty"`
+	Memory  int64   `json:"memory,omitempty"`
 }
 
 // Tool is a program a step wants on its PATH without it being in the image:
@@ -195,6 +205,9 @@ func (p *Plan) Validate() error {
 			if !packageName.MatchString(pkg) {
 				return fmt.Errorf("step %q: %q is not an apt package name", s.Name, pkg)
 			}
+		}
+		if s.Timeout < 0 || s.CPUs < 0 || s.Memory < 0 || (s.Memory > 0 && s.Memory < MinMemory) {
+			return fmt.Errorf("step %q: timeout, cpus and memory must not be negative, and memory not under %s", s.Name, FormatMemory(MinMemory))
 		}
 	}
 	return validate(p.Steps)
@@ -389,12 +402,15 @@ func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 	var name, image, run string
 	var needs, inputs, tools, packages *starlark.List
 	var env, caches, worker, prefer, avoid *starlark.Dict
+	var timeout, memory string
+	var cpus starlark.Value
 	cache, network := true, true
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
 		"name", &name, "image", &image, "run", &run, "needs?", &needs, "env?", &env,
 		"inputs?", &inputs, "caches?", &caches, "cache?", &cache,
 		"worker?", &worker, "prefer?", &prefer, "avoid?", &avoid, "tools?", &tools,
-		"packages?", &packages, "network?", &network); err != nil {
+		"packages?", &packages, "network?", &network,
+		"timeout?", &timeout, "cpus?", &cpus, "memory?", &memory); err != nil {
 		return nil, err
 	}
 	if name == "" || image == "" || run == "" {
@@ -406,6 +422,27 @@ func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 		Needs: []string{}, Env: map[string]string{}, Inputs: []string{"."}, Caches: map[string]string{},
 		Worker: map[string]string{}, Prefer: map[string]string{}, Avoid: map[string]string{},
 		Tools: []Tool{}, Packages: []string{},
+	}
+	if timeout != "" {
+		seconds, err := ParseTimeout(timeout)
+		if err != nil {
+			return nil, fmt.Errorf("step %q: timeout: %v", name, err)
+		}
+		s.Timeout = seconds
+	}
+	if cpus != nil {
+		n, ok := starlark.AsFloat(cpus)
+		if !ok || n <= 0 {
+			return nil, fmt.Errorf("step %q: cpus must be a number above zero, such as 2 or 0.5; got %s", name, cpus.String())
+		}
+		s.CPUs = n
+	}
+	if memory != "" {
+		bytes, err := ParseMemory(memory)
+		if err != nil {
+			return nil, fmt.Errorf("step %q: memory: %v", name, err)
+		}
+		s.Memory = bytes
 	}
 	if packages != nil {
 		seen := map[string]bool{}

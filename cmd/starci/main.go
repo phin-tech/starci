@@ -365,6 +365,8 @@ func localEngine(slots int, verbose bool) (engine.Engine, error) {
 //	STARCI_WORKER_NAME  name recorded in results (default: hostname)
 //	STARCI_STATE        where results and tools are kept (default: ~/.cache/starci)
 //	STARCI_STORE        a result store shared with other machines (see machineConfig)
+//	STARCI_STEP_TIMEOUT, STARCI_STEP_CPUS, STARCI_STEP_MEMORY
+//	                    the most a step may have here, and what one that does not say gets
 //	STARCI_SLOTS        steps to run at once (default: 4)
 //	STARCI_LABELS       what this machine offers, as k=v,k=v (e.g. gpu=true)
 func workerCmd() error {
@@ -453,6 +455,25 @@ func machineConfig(name string) (step.Config, error) {
 			return cfg, fmt.Errorf("STARCI_STORE is set but unusable: %w", err)
 		}
 		cfg.Shared = store
+	}
+	if v := os.Getenv("STARCI_STEP_TIMEOUT"); v != "" {
+		seconds, err := plan.ParseTimeout(v)
+		if err != nil {
+			return cfg, fmt.Errorf("STARCI_STEP_TIMEOUT: %w", err)
+		}
+		cfg.Limits.Timeout = time.Duration(seconds) * time.Second
+	}
+	if v := os.Getenv("STARCI_STEP_CPUS"); v != "" {
+		n, err := strconv.ParseFloat(v, 64)
+		if err != nil || n <= 0 {
+			return cfg, fmt.Errorf("STARCI_STEP_CPUS must be a number above zero, got %q", v)
+		}
+		cfg.Limits.CPUs = n
+	}
+	if v := os.Getenv("STARCI_STEP_MEMORY"); v != "" {
+		if cfg.Limits.Memory, err = plan.ParseMemory(v); err != nil {
+			return cfg, fmt.Errorf("STARCI_STEP_MEMORY: %w", err)
+		}
 	}
 	return cfg, nil
 }

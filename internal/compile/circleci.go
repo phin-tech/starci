@@ -183,6 +183,7 @@ func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
 
 	var lines []string
 	args := []string{"-v \"$PWD:/workspace\"", "-w /workspace"}
+	args = append(args, limitArgs(s)...)
 	if s.Offline {
 		args = append(args, "--network none")
 	}
@@ -207,6 +208,13 @@ func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
 		args = append(args, "-e "+shq(k+"="+s.Env[k]))
 	}
 	run := "docker run --rm \\\n"
+	// CircleCI has no time limit for one command, only for one that prints
+	// nothing, so the command is stopped by the shell. Asked politely, it
+	// does not stop: the signal is passed to the first process in the
+	// container, which ignores it. So ten seconds later it is killed.
+	if s.Timeout > 0 {
+		run = fmt.Sprintf("timeout -k 10 %d ", s.Timeout) + run
+	}
 	for _, a := range args {
 		run += "  " + a + " \\\n"
 	}
