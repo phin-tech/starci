@@ -150,7 +150,8 @@ event without causing one.
 **Pull requests from forks are not run.** One is code from someone who cannot
 push to the repository, and running it means running it on your workers. They
 are ignored unless `STARCI_ALLOW_FORK_PULL_REQUESTS=true`; turn that on only
-where the workers are meant for strangers' code.
+where the workers are meant for strangers' code. Even then, a step that asks
+for [secrets](#secrets) is failed, not run.
 
 ### Schedules
 
@@ -347,6 +348,7 @@ reach the Hatchet engine and the git server; nothing connects in to it.
 | `STARCI_LABELS` | What the machine offers, as `gpu=true,arch=arm64`. |
 | `STARCI_STATE` | Where this machine keeps results and tools. Default: `~/.cache/starci`. |
 | `STARCI_STORE` | A result store shared with other machines. Optional. |
+| `STARCI_SECRETS` | Where this machine's [secrets](#secrets) are: a directory, or `exec:` and a program. Optional. |
 
 ### Placing steps
 
@@ -376,7 +378,7 @@ Runs for different branches, or for a bare commit, leave each other alone.
 
 | | |
 |---|---|
-| `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {}, tools = [], packages = [], network = True)` | Declare a container to run. Returns a handle usable in another step's `needs`. |
+| `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {}, tools = [], packages = [], network = True, secrets = [])` | Declare a container to run. Returns a handle usable in another step's `needs`. |
 | `ctx.repo`, `ctx.sha`, `ctx.ref` | What is being built. `ref` is the branch. |
 | `ctx.event` | Why the run started: `"push"`, `"tag"`, `"pull_request"`, `"schedule"` or `"manual"`. |
 | `ctx.tag` | The tag's name, for a tag. |
@@ -602,6 +604,86 @@ trust to run steps honestly.
 
 `caches = {"bun": "/root/.bun/install/cache"}` keeps a directory between runs
 on a worker. It makes a step that does run faster, and is not part of the key.
+
+## Secrets
+
+A script names the secrets a step needs and never holds one:
+
+```python
+step("publish", image = "node:22", run = "npm publish", secrets = ["NPM_TOKEN"], cache = False)
+```
+
+The step gets each as an environment variable of that name. The value comes
+from the machine that runs the step, which is told where its secrets are by
+`STARCI_SECRETS`:
+
+| `STARCI_SECRETS` | `NPM_TOKEN` is |
+|---|---|
+| `/run/secrets/steps` | the contents of the file `NPM_TOKEN` in that directory |
+| `exec:/usr/local/bin/secret` | what that program prints when run as `secret NPM_TOKEN` |
+
+A program is how secrets kept somewhere else are reached, a cloud provider's
+secret manager or a vault, with the machine's own identity. For AWS Secrets
+Manager and for Google Secret Manager:
+
+```sh
+#!/bin/sh
+exec aws secretsmanager get-secret-value --secret-id "ci/$1" --query SecretString --output text
+```
+
+```sh
+#!/bin/sh
+exec gcloud secrets versions access latest --secret "ci-$1"
+```
+
+The program has to be on the machine, along with whatever it calls: the
+image this repository builds for a worker holds neither of those two.
+
+When the program fails, the step fails with the first line the program wrote
+to its error stream, and never with anything it printed. A program that can
+tell "there is no such secret" from other failures says so by exiting with
+status 3, and the step then says that instead. The line a file or a
+program's output ends with is not part of the secret.
+
+A step is not started with some of what it asked for. On a machine with no
+secrets, or none by that name, or an empty one, it fails saying which, by
+name.
+
+What is done to keep a value from going further than the step:
+
+- It reaches the container through the environment of the program that
+  starts it, and is in no command line.
+- Every line the step prints has each of its secrets replaced with `***`
+  before the line is logged, kept in the result, or handed to an advanced
+  script. A secret of several lines is looked for a line at a time.
+- A step's key holds the names and not the values. Rotating a secret does not
+  run the steps that use it again; giving a step a different set does.
+- **A pull request from a fork is given none.** A step that asks for secrets
+  in such a run fails with that as its reason, without being run and without
+  being answered from an earlier pass, whatever
+  `STARCI_ALLOW_FORK_PULL_REQUESTS` says. The other steps run as usual. A
+  script that would rather leave the step out can: `if not ctx.pr.fork`.
+
+What is not done:
+
+- **Masking finds a value written as it is.** It cannot find one a step has
+  encoded, reversed, or written to a file. A step that is given a secret is
+  trusted with it.
+- **Every repository whose runs reach a machine can ask for every secret on
+  it.** There is no way yet to say that a secret belongs to one repository or
+  one branch. Give a worker only the secrets that everything it runs may
+  have.
+- **Whoever can start a run on the engine can ask for any secret.** A machine
+  gives a step what the step names. Someone holding a Hatchet token, or with
+  the dashboard, can start a step of their own making that names any of
+  them, marked as coming from no fork.
+- Nothing stops a step with secrets being skipped because of an earlier
+  pass. One that publishes or deploys wants `cache = False`, as it did before.
+
+When [compiled](#where-starci-is-not-running-compiling-to-a-workflow), a
+secret is the repository's secret of the same name on GitHub, and a variable
+of that name set for the project or in a context on CircleCI. Either way the
+job stops before starting the container if it has not been given one.
 
 ## Development
 

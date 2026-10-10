@@ -206,6 +206,12 @@ func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
 		}
 		args = append(args, "-e "+shq(k+"="+s.Env[k]))
 	}
+	// A secret is a variable of the same name that the project, or a context
+	// the job is given, sets for the job.
+	lines = append(secretChecks(s), lines...)
+	for _, name := range s.Secrets {
+		args = append(args, "-e "+name)
+	}
 	run := "docker run --rm \\\n"
 	for _, a := range args {
 		run += "  " + a + " \\\n"

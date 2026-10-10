@@ -52,6 +52,9 @@ type Config struct {
 	// passed on any of them is not run again here. Without it, a machine
 	// knows only its own results.
 	Shared Store
+	// Secrets is where this machine gets the secrets steps ask for by name.
+	// Without it there are none, and a step that asks for one fails.
+	Secrets Secrets
 }
 
 func (c Config) store() Store {
@@ -81,6 +84,13 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	started := time.Now()
 	failed := func(format string, args ...any) plan.Result {
 		return plan.Result{Name: s.Name, Status: "failed", Worker: cfg.Worker, Detail: fmt.Sprintf(format, args...)}
+	}
+
+	// Before anything else, and before an earlier pass is looked for: a run
+	// that may not have secrets is not to be answered with what a run that
+	// had them printed.
+	if s.Withheld {
+		return failed("it asks for secrets (%s), and a pull request from a fork is given none", strings.Join(s.Secrets, ", "))
 	}
 
 	root, err := os.MkdirTemp("", "starci-")
@@ -142,6 +152,14 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 		}
 	}
 
+	// Fetched as late as this, so that a step answered by an earlier pass
+	// asks for nothing.
+	secrets, err := resolve(ctx, cfg.Secrets, s.Secrets)
+	if err != nil {
+		return failed("%v", err)
+	}
+	mask := secrets.masker()
+
 	// Named, so that it can be removed if the run is cancelled: stopping the
 	// docker client alone leaves the container running.
 	container := "starci-" + filepath.Base(root)
@@ -155,10 +173,17 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	for _, name := range sortedKeys(s.Env) {
 		args = append(args, "-e", name+"="+s.Env[name])
 	}
+	// A secret is named here and its value put in the environment of the
+	// docker client, which passes it on. Written as NAME=value it would be
+	// an argument, there for anyone on the machine who lists processes.
+	for _, name := range s.Secrets {
+		args = append(args, "-e", name)
+	}
 	args = append(args, toolMounts...)
 	args = append(args, runImage, "sh", "-c", s.Run)
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Env = append(os.Environ(), secrets.environ()...)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return failed("%v", err)
@@ -172,7 +197,10 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	lines := bufio.NewScanner(out)
 	lines.Buffer(make([]byte, 64*1024), 1024*1024)
 	for lines.Scan() {
-		line := lines.Text()
+		// Masked once, here, before the line goes anywhere: the log, the
+		// detail of a failure, the result that is stored and handed to a
+		// script.
+		line := mask(lines.Text())
 		if tail = append(tail, line); len(tail) > tailLines {
 			tail = tail[1:]
 		}
@@ -347,6 +375,12 @@ func key(s plan.Step, img image, content string, tools [][]string) string {
 	// Only said when it is off, so that every other step keeps its key.
 	if s.Offline {
 		parts = append(parts, "offline")
+	}
+	// Which secrets, and never what they hold: a secret that is rotated is
+	// not a reason to run every step that uses it again, and a key is stored
+	// where a value must not be.
+	if len(s.Secrets) > 0 {
+		parts = append(parts, "secrets", s.Secrets)
 	}
 	material, _ := json.Marshal(parts)
 	sum := sha256.Sum256(material)

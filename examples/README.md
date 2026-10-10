@@ -21,7 +21,7 @@ The three `pi-gamebook` ones run as they are against that repository.
 | [diamond](basic/diamond.ci.star) | Steps that depend on each other. |
 | [docs-only](basic/docs-only.ci.star) | Do nothing for a documentation commit. |
 | [events](basic/events.ci.star) | One script for pushes, tags, pull requests, a nightly schedule and manual runs. |
-| [branches](basic/branches.ci.star) | Publish from main only; `cache = False` for steps with effects. |
+| [branches](basic/branches.ci.star) | Publish from main only, with a secret; `cache = False` for steps with effects. |
 | [matrix](basic/matrix.ci.star) | A matrix is a loop, with exclusions as an `if`. |
 | [monorepo](basic/monorepo.ci.star) | Test only the packages a commit touched. |
 | [polyglot](basic/polyglot.ci.star) | Per-language checks, chosen by which files changed. |

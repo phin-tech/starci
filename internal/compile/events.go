@@ -102,6 +102,9 @@ func GitHubEvents(filename string, src []byte, o Options) (string, error) {
 				// from event to event; nothing else about it may.
 				a, b := earlier, s
 				a.Needs, b.Needs = nil, nil
+				// Nor whether it is given its secrets: that is decided for
+				// the job each time it runs, by whether it has them.
+				a.Withheld, b.Withheld = false, false
 				if !reflect.DeepEqual(a, b) {
 					return "", fmt.Errorf("step %q is not the same for %s as for %s; give the two different names", s.Name, pr.name, all[seenIn[s.Name][0]].name)
 				}
@@ -113,6 +116,7 @@ func GitHubEvents(filename string, src []byte, o Options) (string, error) {
 				}
 				steps[s.Name] = merged
 			} else {
+				s.Withheld = false
 				steps[s.Name] = s
 				order = append(order, s.Name)
 			}

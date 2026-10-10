@@ -83,7 +83,7 @@ func Mode(filename string, src []byte) (string, error) {
 // script.
 func RunPipeline(ctx context.Context, filename string, src []byte, c Context, r Runner) ([]Result, error) {
 	thread := newThread("pipeline")
-	rec := &recorder{runner: r}
+	rec := &recorder{runner: r, run: c}
 	thread.SetLocal(runnerKey, rec)
 
 	done := make(chan struct{})
@@ -124,6 +124,9 @@ type recorder struct {
 	// running a step is refused: the top level also runs just to find out
 	// which mode a script is in.
 	started bool
+	// run is what the script is being run for, which decides whether its
+	// steps may be given secrets.
+	run Context
 }
 
 // stepsFailed is the error that ends a pipeline when a step fails and the
@@ -282,6 +285,8 @@ func execute(thread *starlark.Thread, fn string, steps []Step, allowFailure bool
 			return nil, fmt.Errorf("step %q: needs has no meaning in pipeline(ctx); run steps in the order you need them", s.Name)
 		}
 	}
+	steps = append([]Step(nil), steps...)
+	Withhold(rec.run, steps)
 	results, err := rec.runner.Run(steps)
 	if err != nil {
 		return nil, err

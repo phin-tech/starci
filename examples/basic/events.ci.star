@@ -27,12 +27,12 @@ def ci(ctx):
 
     # A tag is a release.
     if ctx.event == "tag":
-        return checks + [node("publish", "npm publish", needs = checks, cache = False)]
+        return checks + [node("publish", "npm publish", needs = checks, cache = False, secrets = ["NPM_TOKEN"])]
 
-    # A pull request gets a preview to look at. Not from a fork: that would
-    # be running a stranger's code with this repository's credentials.
+    # A pull request gets a preview to look at. Not from a fork: a step that
+    # asks for secrets there is failed, not run, so it is left out.
     if ctx.event == "pull_request" and not ctx.pr.fork:
-        return checks + [node("preview", "npm run deploy:preview", needs = checks, cache = False)]
+        return checks + [node("preview", "npm run deploy:preview", needs = checks, cache = False, secrets = ["PREVIEW_TOKEN"])]
 
     # Pushes to main deploy to staging.
     if ctx.event == "push" and ctx.ref == "main":

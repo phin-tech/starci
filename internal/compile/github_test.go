@@ -184,3 +184,47 @@ func TestExamplesCompile(t *testing.T) {
 		})
 	}
 }
+
+// A step's secrets become the repository's secrets of the same names, and a
+// job that has not been given one stops before its container starts.
+func TestSecretsAreCompiled(t *testing.T) {
+	const script = `
+def ci(ctx):
+    test = step("test", image = "alpine:3", run = "true")
+    if ctx.event == "pull_request" and ctx.pr.fork:
+        return [test]
+    return [test, step("publish", image = "alpine:3", run = "npm publish", secrets = ["NPM_TOKEN"], needs = [test], cache = False)]
+`
+	out, err := GitHubEvents("ci.star", []byte(script), Options{Source: "ci.star"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"NPM_TOKEN: ${{ secrets.NPM_TOKEN }}",
+		`[ -n "${NPM_TOKEN:-}" ] || { echo "starci: this run has not been given the secret NPM_TOKEN"; exit 1; }`,
+		"-e NPM_TOKEN \\",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the workflow lacks %q:\n%s", want, out)
+		}
+	}
+
+	// A step that asks for secrets whatever the event is one job, though for
+	// a fork it is marked as not to be given them.
+	always := strings.Replace(script, "    if ctx.event == \"pull_request\" and ctx.pr.fork:\n        return [test]\n", "", 1)
+	if _, err := GitHubEvents("ci.star", []byte(always), Options{Source: "ci.star"}); err != nil {
+		t.Errorf("a step with secrets for every event: %v", err)
+	}
+
+	p, err := plan.Eval("ci.star", []byte(script), plan.Context{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	circle, err := CircleCI(p, Options{Source: "ci.star"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(circle, "-e NPM_TOKEN") || !strings.Contains(circle, "has not been given the secret NPM_TOKEN") {
+		t.Errorf("the CircleCI configuration does not pass the secret on:\n%s", circle)
+	}
+}

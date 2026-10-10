@@ -365,6 +365,7 @@ func localEngine(slots int, verbose bool) (engine.Engine, error) {
 //	STARCI_WORKER_NAME  name recorded in results (default: hostname)
 //	STARCI_STATE        where results and tools are kept (default: ~/.cache/starci)
 //	STARCI_STORE        a result store shared with other machines (see machineConfig)
+//	STARCI_SECRETS      where this machine's secrets are (see machineConfig)
 //	STARCI_SLOTS        steps to run at once (default: 4)
 //	STARCI_LABELS       what this machine offers, as k=v,k=v (e.g. gpu=true)
 func workerCmd() error {
@@ -453,6 +454,11 @@ func machineConfig(name string) (step.Config, error) {
 			return cfg, fmt.Errorf("STARCI_STORE is set but unusable: %w", err)
 		}
 		cfg.Shared = store
+	}
+	if location := os.Getenv("STARCI_SECRETS"); location != "" {
+		if cfg.Secrets, err = step.OpenSecrets(location); err != nil {
+			return cfg, fmt.Errorf("STARCI_SECRETS: %w", err)
+		}
 	}
 	return cfg, nil
 }

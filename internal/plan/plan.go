@@ -133,6 +133,15 @@ type Step struct {
 	// something its inputs do not hold. It is the negative so that a plan
 	// written before the field existed still means "with the network".
 	Offline bool `json:"offline,omitempty"`
+	// Secrets are the names of secrets the step is given, each as an
+	// environment variable of that name. A script names them and never sees
+	// one: the machine that runs the step has the values, or has not.
+	Secrets []string `json:"secrets,omitempty"`
+	// Withheld is set, never by a script, on a step that asks for secrets in
+	// a run that is not to be given any: a pull request from a fork, which
+	// is code from someone who cannot push to the repository. Such a step is
+	// failed, not run without them.
+	Withheld bool `json:"withheld,omitempty"`
 }
 
 // Tool is a program a step wants on its PATH without it being in the image:
@@ -194,6 +203,14 @@ func (p *Plan) Validate() error {
 		for _, pkg := range s.Packages {
 			if !packageName.MatchString(pkg) {
 				return fmt.Errorf("step %q: %q is not an apt package name", s.Name, pkg)
+			}
+		}
+		for _, name := range s.Secrets {
+			if !secretName.MatchString(name) || reservedSecret(name) {
+				return fmt.Errorf("step %q: %q is not a name a secret can have", s.Name, name)
+			}
+			if _, both := s.Env[name]; both {
+				return fmt.Errorf("step %q: %s is in both env and secrets", s.Name, name)
 			}
 		}
 	}
@@ -305,6 +322,7 @@ func evalWith(filename string, src []byte, c Context, ctxValue starlark.Value) (
 	if err := validate(steps); err != nil {
 		return nil, fmt.Errorf("%s: %w", filename, err)
 	}
+	Withhold(c, steps)
 	return &Plan{Repo: c.Repo, SHA: c.SHA, Ref: c.Ref, Steps: steps}, nil
 }
 
@@ -387,14 +405,14 @@ func (s *stepValue) Hash() (uint32, error) { return starlark.String(s.Name).Hash
 
 func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var name, image, run string
-	var needs, inputs, tools, packages *starlark.List
+	var needs, inputs, tools, packages, secrets *starlark.List
 	var env, caches, worker, prefer, avoid *starlark.Dict
 	cache, network := true, true
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
 		"name", &name, "image", &image, "run", &run, "needs?", &needs, "env?", &env,
 		"inputs?", &inputs, "caches?", &caches, "cache?", &cache,
 		"worker?", &worker, "prefer?", &prefer, "avoid?", &avoid, "tools?", &tools,
-		"packages?", &packages, "network?", &network); err != nil {
+		"packages?", &packages, "network?", &network, "secrets?", &secrets); err != nil {
 		return nil, err
 	}
 	if name == "" || image == "" || run == "" {
@@ -505,10 +523,56 @@ func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 			s.Env[string(k)] = string(v)
 		}
 	}
+	if secrets != nil {
+		seen := map[string]bool{}
+		for i := 0; i < secrets.Len(); i++ {
+			v, ok := secrets.Index(i).(starlark.String)
+			if !ok || !secretName.MatchString(string(v)) {
+				return nil, fmt.Errorf("step %q: secrets must be names, written as an environment variable is; got %s", name, secrets.Index(i).String())
+			}
+			if reservedSecret(string(v)) {
+				return nil, fmt.Errorf("step %q: a secret cannot be called %s, which means something to the program that starts the step", name, string(v))
+			}
+			// It would be one variable with two values.
+			if _, both := s.Env[string(v)]; both {
+				return nil, fmt.Errorf("step %q: %s is in both env and secrets", name, string(v))
+			}
+			if !seen[string(v)] {
+				seen[string(v)] = true
+				s.Secrets = append(s.Secrets, string(v))
+			}
+		}
+		sort.Strings(s.Secrets)
+	}
 	return &stepValue{s}, nil
 }
 
 var cacheName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// A secret is given to a step as an environment variable, so it is named as
+// one. That also makes a name safe to look up as a file.
+var secretName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// reservedSecret reports whether name is a variable that the program which
+// starts a step's container acts on. A secret reaches the container by being
+// put in that program's environment, so one called DOCKER_HOST would send it
+// to whatever host the secret named, and one called PATH would be at odds
+// with the PATH a step's tools are put on.
+func reservedSecret(name string) bool {
+	return name == "PATH" || name == "HOME" || strings.HasPrefix(name, "DOCKER_") || strings.HasPrefix(name, "LD_")
+}
+
+// Withhold marks the steps that ask for secrets in a run that is to be given
+// none, and reports whether c is such a run. It is decided here, from what
+// the run is for, so that it travels with each step to whichever machine
+// runs it: that machine knows the secrets and not where the run came from.
+func Withhold(c Context, steps []Step) bool {
+	fork := c.PR != nil && c.PR.Fork
+	for i := range steps {
+		steps[i].Withheld = fork && len(steps[i].Secrets) > 0
+	}
+	return fork
+}
 
 // toolValue is what tool() returns, for a step's tools.
 type toolValue struct{ Tool }

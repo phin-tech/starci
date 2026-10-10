@@ -239,7 +239,17 @@ func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) erro
 
 	// The command travels in an environment variable, so that nothing in it
 	// needs escaping for the shell that starts the container.
-	fmt.Fprintf(w, "      - name: %s\n%s        env:\n          STARCI_RUN: %s\n        run: |\n", q(s.Name), skip, block(s.Run, "            "))
+	fmt.Fprintf(w, "      - name: %s\n%s        env:\n          STARCI_RUN: %s\n", q(s.Name), skip, block(s.Run, "            "))
+	// A secret is one the repository holds under the same name. GitHub
+	// masks it in the log and gives a pull request from a fork an empty
+	// one, which the check below turns into the failure it is under starci.
+	for _, name := range s.Secrets {
+		fmt.Fprintf(w, "          %s: ${{ secrets.%s }}\n", name, name)
+	}
+	w.WriteString("        run: |\n")
+	for _, line := range secretChecks(s) {
+		fmt.Fprintf(w, "          %s\n", line)
+	}
 	var args []string
 	args = append(args, "-v \"$PWD:/workspace\"", "-w /workspace")
 	if s.Offline {
@@ -264,6 +274,9 @@ func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) erro
 			continue
 		}
 		args = append(args, "-e "+shq(k+"="+s.Env[k]))
+	}
+	for _, name := range s.Secrets {
+		args = append(args, "-e "+name)
 	}
 	w.WriteString("          docker run --rm \\\n")
 	for _, a := range args {
@@ -294,9 +307,23 @@ func stepKey(s plan.Step, arch string) string {
 	if s.Offline {
 		parts = append(parts, "offline")
 	}
+	if len(s.Secrets) > 0 {
+		parts = append(parts, "secrets", s.Secrets)
+	}
 	material, _ := json.Marshal(parts)
 	sum := sha256.Sum256(material)
 	return hex.EncodeToString(sum[:])[:16]
+}
+
+// secretChecks are shell lines that stop a job whose step has not been given
+// a secret it asks for, before its container is started. A step is not run
+// with some of what it asked for, here or on a worker.
+func secretChecks(s plan.Step) []string {
+	var lines []string
+	for _, name := range s.Secrets {
+		lines = append(lines, fmt.Sprintf(`[ -n "${%s:-}" ] || { echo "starci: this run has not been given the secret %s"; exit 1; }`, name, name))
+	}
+	return lines
 }
 
 func isPattern(in string) bool { return strings.ContainsAny(in, "*?[") }

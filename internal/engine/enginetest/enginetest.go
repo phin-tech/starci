@@ -41,6 +41,7 @@ func Run(t *testing.T, eng engine.Engine) {
 	t.Run("steps are given the commit and only their inputs", func(t *testing.T) { inputs(t, eng, repo) })
 	t.Run("a step that already passed is not run again", func(t *testing.T) { reuse(t, eng, repo) })
 	t.Run("a step that gave up the network has none", func(t *testing.T) { offline(t, eng, repo) })
+	t.Run("a pull request from a fork is given no secrets", func(t *testing.T) { forkSecrets(t, eng, repo) })
 	t.Run("an advanced script acts on what its steps return", func(t *testing.T) { advanced(t, eng, repo) })
 	t.Run("an advanced script that fails says why", func(t *testing.T) { advancedFailure(t, eng, repo) })
 	t.Run("what the engine says it can do, it does", func(t *testing.T) { claims(t, eng, repo) })
@@ -85,7 +86,12 @@ func newRepo(t *testing.T) repo {
 // execute evaluates a script and has the engine carry out the run.
 func execute(t *testing.T, eng engine.Engine, r repo, src string) engine.Result {
 	t.Helper()
-	c := plan.Context{Repo: "test/repo", SHA: r.sha, Ref: "main", Event: plan.EventManual}
+	return executeFor(t, eng, plan.Context{Repo: "test/repo", SHA: r.sha, Ref: "main", Event: plan.EventManual}, r, src)
+}
+
+// executeFor is execute for a run started by something in particular.
+func executeFor(t *testing.T, eng engine.Engine, c plan.Context, r repo, src string) engine.Result {
+	t.Helper()
 	run := engine.Run{Context: c, CloneURL: r.dir}
 	mode, err := plan.Mode("ci.star", []byte(src))
 	if err != nil {
@@ -214,6 +220,42 @@ def ci(ctx):
 	// A reused pass hands back what the step printed when it ran.
 	if got.Output != step(first, "once").Output || got.Output == "" {
 		t.Errorf("the reused result's output is %q, the original's %q", got.Output, step(first, "once").Output)
+	}
+}
+
+// Whether a run may have secrets is decided where the run is understood, and
+// has to survive the journey to whichever machine runs the step. Nothing
+// here depends on the engine's machines having any secrets: the step is
+// stopped before it would ask for one.
+func forkSecrets(t *testing.T, eng engine.Engine, r repo) {
+	fork := plan.Context{Repo: "test/repo", SHA: r.sha, Ref: "theirs", Event: plan.EventPullRequest,
+		PR: &plan.PullRequest{Number: 7, Base: "main", Head: "theirs", Fork: true}}
+	basic := helpers + `
+def ci(ctx):
+    return [
+        sh("test", "echo tested", cache = False),
+        sh("publish", "echo published", cache = False, secrets = ["A_TOKEN"]),
+    ]
+`
+	result := executeFor(t, eng, fork, r, basic)
+	if got, want := statuses(result), "test=passed publish=failed"; got != want {
+		t.Fatalf("results:\n  %s\nwant:\n  %s", got, want)
+	}
+	publish := step(result, "publish")
+	if !strings.Contains(publish.Detail, "a pull request from a fork is given none") || publish.Output != "" {
+		t.Errorf("publish = %+v; want it not run, and to say a fork is why", publish)
+	}
+
+	result = executeFor(t, eng, fork, r, helpers+`
+def pipeline(ctx):
+    run(sh("test", "echo tested", cache = False))
+    run(sh("publish", "echo published", cache = False, secrets = ["A_TOKEN"]))
+`)
+	if got, want := statuses(result), "test=passed publish=failed"; got != want {
+		t.Fatalf("an advanced script:\n  %s\nwant:\n  %s", got, want)
+	}
+	if d := step(result, "publish").Detail; !strings.Contains(d, "a pull request from a fork is given none") {
+		t.Errorf("an advanced script's publish said %q", d)
 	}
 }
 
