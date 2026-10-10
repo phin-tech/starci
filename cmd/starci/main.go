@@ -56,6 +56,7 @@ const usage = `usage:
   starci hooks add forgejo|github
   starci compile [--target github|circleci] [--file .ci.star] [--runs-on NAME] [--arch amd64] [--offline] [--check FILE]
   starci validate [--file .ci.star] [--arch amd64,arm64]
+  starci why    STEP [--file .ci.star] [--sha SHA]
   starci workers
   starci shun WORKER
   starci unshun WORKER`
@@ -76,6 +77,8 @@ func main() {
 		err = compileCmd(os.Args[2:])
 	case "validate":
 		err = validateCmd(os.Args[2:])
+	case "why":
+		err = whyCmd(os.Args[2:])
 	case "serve":
 		err = serveCmd()
 	case "hooks":
@@ -93,6 +96,126 @@ func main() {
 	if err != nil {
 		die("starci: " + err.Error())
 	}
+}
+
+// whyCmd says whether a step would be skipped for a commit of the checkout
+// the script is in and, if not, what has changed since the step last
+// passed. It runs nothing.
+//
+// The last pass is looked for in this machine's store and, with STARCI_STORE
+// set, in the shared one, which is where a worker's passes are to be found.
+func whyCmd(args []string) error {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		die(usage)
+	}
+	name := args[0]
+	fs := flag.NewFlagSet("why", flag.ExitOnError)
+	file := fs.String("file", ".ci.star", "CI script the step is in")
+	sha := fs.String("sha", "HEAD", "commit to ask about")
+	fs.Parse(args[1:])
+
+	src, err := os.ReadFile(*file)
+	if err != nil {
+		return err
+	}
+	if mode, err := plan.Mode(*file, src); err != nil {
+		return err
+	} else if mode != plan.Basic {
+		return errors.New("an advanced script's steps are only known as it runs, so there is none to ask about in advance; when one of them is run and not skipped, its log says why")
+	}
+	dir, err := filepath.Abs(filepath.Dir(*file))
+	if err != nil {
+		return err
+	}
+	git := func(a ...string) (string, error) {
+		out, err := exec.Command("git", append([]string{"-C", dir}, a...)...).Output()
+		return strings.TrimSpace(string(out)), err
+	}
+	top, err := git("rev-parse", "--show-toplevel")
+	if err != nil {
+		return fmt.Errorf("%s is not in a git repository", *file)
+	}
+	commit, err := git("rev-parse", *sha)
+	if err != nil {
+		return fmt.Errorf("%s is not a commit here", *sha)
+	}
+	changed, _ := git("diff-tree", "--no-commit-id", "--name-only", "-r", commit)
+	ref := ""
+	if *sha == "HEAD" {
+		ref, _ = git("symbolic-ref", "-q", "--short", "HEAD")
+	}
+	p, err := plan.Eval(*file, src, plan.Context{SHA: commit, Ref: ref, ChangedFiles: strings.Fields(changed), Event: plan.EventManual})
+	if err != nil {
+		return err
+	}
+	var found *plan.Step
+	var names []string
+	for i, s := range p.Steps {
+		names = append(names, s.Name)
+		if s.Name == name {
+			found = &p.Steps[i]
+		}
+	}
+	if found == nil {
+		return fmt.Errorf("the script plans no step called %q for this commit; it plans: %s", name, strings.Join(names, ", "))
+	}
+
+	if !found.Cache {
+		fmt.Printf("%s is marked cache = False, so it runs every time.\n", name)
+		return nil
+	}
+	host, _ := os.Hostname()
+	cfg, err := machineConfig(host)
+	if err != nil {
+		return err
+	}
+	// A worker fetched the commit from one of the repository's remotes, and
+	// recorded the pass under that address; a local run, under this path.
+	var remotes []string
+	if out, err := git("remote"); err == nil {
+		for _, remote := range strings.Fields(out) {
+			if u, err := git("remote", "get-url", remote); err == nil && u != "" {
+				remotes = append(remotes, u)
+			}
+		}
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	why, err := step.Why(ctx, cfg, top, commit, *found, remotes...)
+	if err != nil {
+		return err
+	}
+
+	if !why.Known {
+		fmt.Printf("%s has not passed before, as far as this machine and its store know.\n", name)
+		return nil
+	}
+	fmt.Printf("%s last passed %s on %s, at %.8s.\n", name, ago(time.Since(why.Last.When)), why.Last.Worker, why.Last.SHA)
+	switch {
+	case len(why.Changes) > 0:
+		fmt.Printf("It would run again at %.8s. Since then:\n", commit)
+		for _, c := range why.Changes {
+			fmt.Printf("  %-13s %s\n", c.What, c.Detail)
+		}
+	case !why.Stored:
+		fmt.Println("Nothing it is keyed on has changed, but the result of that pass is no longer in the store, so it would run again.")
+	default:
+		fmt.Println("Nothing it is keyed on has changed: it would be skipped.")
+	}
+	return nil
+}
+
+// ago is a length of time in the one unit that suits it.
+func ago(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%d minute(s) ago", int(d/time.Minute))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%d hour(s) ago", int(d/time.Hour))
+	}
+	return fmt.Sprintf("%d days ago", int(d/(24*time.Hour)))
 }
 
 func die(msg string) {

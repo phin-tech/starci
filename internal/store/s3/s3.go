@@ -106,6 +106,35 @@ func (s *Store) Put(ctx context.Context, key string, r plan.Result) error {
 	return nil
 }
 
+func (s *Store) docObject(name string) string {
+	if s.prefix != "" {
+		return s.prefix + "/docs/" + name
+	}
+	return "docs/" + name
+}
+
+func (s *Store) GetDoc(ctx context.Context, name string) ([]byte, bool) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	obj, err := s.client.GetObject(ctx, s.bucket, s.docObject(name), minio.GetObjectOptions{})
+	if err != nil {
+		return nil, false
+	}
+	defer obj.Close()
+	data, err := io.ReadAll(io.LimitReader(obj, 32<<20))
+	return data, err == nil && len(data) > 0
+}
+
+func (s *Store) PutDoc(ctx context.Context, name string, data []byte) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	_, err := s.client.PutObject(ctx, s.bucket, s.docObject(name), bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{})
+	if err != nil {
+		return fmt.Errorf("shared store: %w", err)
+	}
+	return nil
+}
+
 // Check confirms the store can be read and written, so that a mistake in its
 // address or credentials is found when a worker starts and not by every step
 // quietly running again.

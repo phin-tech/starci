@@ -46,6 +46,7 @@ Everything is one binary:
 | `starci hooks add` | Have Hatchet itself be that address. |
 | `starci compile` | Write a basic script out for GitHub Actions or CircleCI. |
 | `starci validate` | Check that a script's inputs select files and that the tools it pins download as pinned. Runs nothing. |
+| `starci why` | Say whether a step would be skipped and, if not, what has changed since it last passed. Runs nothing. |
 | `starci workers`, `shun`, `unshun` | See the workers, and take one out of rotation. |
 
 ## Trying it
@@ -587,6 +588,48 @@ the missing file rather than passing on a stale result.
 What the key cannot see is anything outside the inputs: the network, the date,
 a floating version resolved at run time. Give such a step `cache = False`.
 Only passes are stored.
+
+### Why a step ran again
+
+A key is one checksum over everything above. When it does not match an
+earlier pass, that says something changed and not what. So with each pass,
+what its key was made of is kept as well, and can be compared:
+
+```
+$ starci why test
+test last passed 2 hour(s) ago on luigi, at c58be7c8.
+It would run again at d2d44251. Since then:
+  files         changed: src/a.txt
+  files         added: src/b.txt
+  env           changed: MODE
+```
+
+It names the files, the image when a tag has moved to different content,
+the command, environment variables by name, tools, packages, the network
+setting and the architecture. When nothing has changed it says the step
+would be skipped, or that the result of that pass is no longer stored.
+
+It asks about the commit checked out, or `--sha`, with the script as it is
+in the working directory. It fetches that commit and identifies the image,
+so it needs git and docker; it downloads no tools and runs nothing. The
+last pass is looked for in this machine's store and in `STARCI_STORE` when
+that is set, which is how a pass on a worker is explained from a laptop.
+
+The same is said in a step's own log whenever it has passed before and is
+run all the same:
+
+```
+not skipped: since this last passed (on luigi, at c58be7c8), files changed: src/a.txt
+```
+
+What is kept is one small record per repository and step name, replaced at
+each pass. It holds file paths and their checksums, and short checksums of
+the command and of each variable's value in place of the text. A short value
+could be guessed from its checksum, so anything worth hiding does not belong
+in `env`. A repository is known by its owner and name and a step by its
+name, so renaming a step starts its history again. An advanced script's steps are
+not known in advance and cannot be asked about, but their logs say this
+too.
 
 ### Steps without the network
 

@@ -392,6 +392,7 @@ func TestPackagesNeedApt(t *testing.T) {
 type memStore struct {
 	mu      sync.Mutex
 	results map[string]plan.Result
+	docs    map[string][]byte
 	gets    int
 	down    bool
 }
@@ -417,6 +418,26 @@ func (m *memStore) Put(_ context.Context, key string, r plan.Result) error {
 		m.results = map[string]plan.Result{}
 	}
 	m.results[key] = r
+	return nil
+}
+
+func (m *memStore) GetDoc(_ context.Context, name string) ([]byte, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	data, ok := m.docs[name]
+	return data, ok && !m.down
+}
+
+func (m *memStore) PutDoc(_ context.Context, name string, data []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.down {
+		return errors.New("the shared store is unreachable")
+	}
+	if m.docs == nil {
+		m.docs = map[string][]byte{}
+	}
+	m.docs[name] = data
 	return nil
 }
 

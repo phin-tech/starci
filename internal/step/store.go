@@ -20,6 +20,13 @@ type Store interface {
 	// step being run, never a wrong answer.
 	Get(ctx context.Context, key string) (plan.Result, bool)
 	Put(ctx context.Context, key string, r plan.Result) error
+
+	// A store also keeps small documents by name, which is how what is known
+	// about a step's last pass is kept. They are notes, not results: one
+	// that is missing or cannot be stored costs an explanation and nothing
+	// else.
+	GetDoc(ctx context.Context, name string) ([]byte, bool)
+	PutDoc(ctx context.Context, name string, data []byte) error
 }
 
 // FileStore keeps results as files under dir. It is fast and private to one
@@ -67,6 +74,36 @@ func (f FileStore) Put(_ context.Context, key string, r plan.Result) error {
 	return os.Rename(tmp.Name(), path)
 }
 
+func (f FileStore) doc(name string) string {
+	return filepath.Join(f.Dir, "docs", filepath.FromSlash(name))
+}
+
+func (f FileStore) GetDoc(_ context.Context, name string) ([]byte, bool) {
+	data, err := os.ReadFile(f.doc(name))
+	return data, err == nil
+}
+
+func (f FileStore) PutDoc(_ context.Context, name string, data []byte) error {
+	path := f.doc(name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-")
+	if err != nil {
+		return err
+	}
+	_, werr := tmp.Write(data)
+	cerr := tmp.Close()
+	if werr != nil || cerr != nil {
+		os.Remove(tmp.Name())
+		if werr != nil {
+			return werr
+		}
+		return cerr
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
 // Layered reads from Near first and falls back to Far, and writes to both.
 // Near is this machine's own store; Far is one shared between machines. A
 // result found only in Far is copied to Near, so that it is asked for once.
@@ -88,6 +125,24 @@ func (l Layered) Get(ctx context.Context, key string) (plan.Result, bool) {
 func (l Layered) Put(ctx context.Context, key string, r plan.Result) error {
 	nearErr := l.Near.Put(ctx, key, r)
 	if err := l.Far.Put(ctx, key, r); err != nil {
+		return err
+	}
+	return nearErr
+}
+
+// GetDoc asks Far first. A document is a note about the latest of
+// something, and where machines share a store it is the shared one that
+// knows what the others have done since.
+func (l Layered) GetDoc(ctx context.Context, name string) ([]byte, bool) {
+	if data, ok := l.Far.GetDoc(ctx, name); ok {
+		return data, true
+	}
+	return l.Near.GetDoc(ctx, name)
+}
+
+func (l Layered) PutDoc(ctx context.Context, name string, data []byte) error {
+	nearErr := l.Near.PutDoc(ctx, name, data)
+	if err := l.Far.PutDoc(ctx, name, data); err != nil {
 		return err
 	}
 	return nearErr

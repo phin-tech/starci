@@ -105,7 +105,7 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 		return failed("fetch of %s failed: %v", sha, err)
 	}
 	done = phase(ctx, "identify the inputs")
-	content, err := co.contentID(s.Inputs)
+	content, listing, err := co.contentID(s.Inputs)
 	done()
 	if err != nil {
 		return failed("%v", err)
@@ -147,6 +147,21 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 			log(fmt.Sprintf("same image, command and inputs as a passing run on %s; not run again", earlier.Worker))
 			earlier.Name, earlier.Cached, earlier.Seconds = s.Name, true, 0
 			return earlier
+		}
+	}
+	// What the key was made of, for comparing with the next one. And if this
+	// step has passed before and is being run all the same, the reason is
+	// worth a line: a key that does not match says only that something
+	// changed, never what.
+	made := ingredients(s, img, listing, toolIDs)
+	if s.Cache {
+		done := phase(ctx, "find what changed since it last passed")
+		last, ok := Recall(ctx, results, s.Name, cloneURL)
+		done()
+		if ok {
+			if changes := Compare(last.Ingredients, made); len(changes) > 0 {
+				log(fmt.Sprintf("not skipped: since this last passed (on %s, at %.8s), %s", last.Worker, last.SHA, Summary(changes)))
+			}
 		}
 	}
 
@@ -235,6 +250,7 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 		if err := results.Put(ctx, resultKey, result); err != nil {
 			log("warning: this result could not be stored, so the step will run again next time: " + err.Error())
 		}
+		remember(ctx, results, cloneURL, s, LastPass{Key: resultKey, SHA: sha, Worker: cfg.Worker, When: time.Now().UTC(), Ingredients: made})
 	}
 	return result
 }
@@ -303,16 +319,16 @@ func pathspec(input string) string {
 // the set a result is keyed on and the set a step is given cannot disagree.
 // A new file that matches a pattern changes the id; one that does not, does
 // not.
-func (co *checkout) contentID(inputs []string) (string, error) {
+func (co *checkout) contentID(inputs []string) (id, listing string, err error) {
 	// Each input is checked on its own first: one that selects nothing is a
 	// mistake in the script, and would otherwise vanish into the union.
 	for _, in := range inputs {
 		out, err := co.git("ls-files", "--", pathspec(in))
 		if err != nil {
-			return "", fmt.Errorf("input %q: %v", in, err)
+			return "", "", fmt.Errorf("input %q: %v", in, err)
 		}
 		if out == "" {
-			return "", fmt.Errorf("input %q matches nothing in this commit", in)
+			return "", "", fmt.Errorf("input %q matches nothing in this commit", in)
 		}
 	}
 	specs := make([]string, len(inputs))
@@ -321,12 +337,12 @@ func (co *checkout) contentID(inputs []string) (string, error) {
 	}
 	// One line per selected file, with its mode and blob id, in a stable
 	// order, each file once however many inputs select it.
-	listing, err := co.git(append([]string{"ls-files", "-s", "--"}, specs...)...)
+	listing, err = co.git(append([]string{"ls-files", "-s", "--"}, specs...)...)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	sum := sha256.Sum256([]byte(listing))
-	return hex.EncodeToString(sum[:]), nil
+	return hex.EncodeToString(sum[:]), listing, nil
 }
 
 // MissingInputs returns those of a step's inputs that select none of the
