@@ -364,15 +364,22 @@ func Supersedes(c plan.Context) string {
 // of its steps were answered from an earlier pass rather than run. A status
 // is one line on a commit; this is what makes "passed" worth a second look.
 func Timed(s forge.Status, results []plan.Result, elapsed time.Duration) forge.Status {
-	reused := 0
+	reused, flaky := 0, 0
 	for _, r := range results {
 		if r.Cached {
 			reused++
+		} else if r.Flaky {
+			flaky++
 		}
 	}
 	s.Description += " in " + spell(elapsed)
 	if reused > 0 {
 		s.Description += fmt.Sprintf(", %d reused", reused)
+	}
+	// A pass that needed a second try is still a pass, and is worth knowing
+	// about on the commit it happened on.
+	if flaky > 0 {
+		s.Description += fmt.Sprintf(", %d flaky", flaky)
 	}
 	return s
 }

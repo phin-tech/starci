@@ -42,6 +42,7 @@ func Run(t *testing.T, eng engine.Engine) {
 	t.Run("a step that already passed is not run again", func(t *testing.T) { reuse(t, eng, repo) })
 	t.Run("a step that gave up the network has none", func(t *testing.T) { offline(t, eng, repo) })
 	t.Run("a step is stopped when its time is up", func(t *testing.T) { timeout(t, eng, repo) })
+	t.Run("a step that asks is tried again, and a pass that needed it is marked", func(t *testing.T) { retries(t, eng, repo) })
 	t.Run("an advanced script acts on what its steps return", func(t *testing.T) { advanced(t, eng, repo) })
 	t.Run("an advanced script that fails says why", func(t *testing.T) { advancedFailure(t, eng, repo) })
 	t.Run("what the engine says it can do, it does", func(t *testing.T) { claims(t, eng, repo) })
@@ -233,6 +234,32 @@ def ci(ctx):
 	}
 	if took := time.Since(began); took > 2*time.Minute {
 		t.Errorf("the run took %s; the step was to be stopped after 8s", took)
+	}
+}
+
+func retries(t *testing.T, eng engine.Engine, r repo) {
+	// A place of its own for the step to count its tries in, kept between
+	// them as a cache is.
+	seen := "retries-" + strings.Fields(unique())[1]
+	t.Cleanup(func() { exec.Command("docker", "volume", "rm", "-f", "starci-cache-"+seen).Run() })
+	result := execute(t, eng, r, helpers+`
+def ci(ctx):
+    count = "echo x >> /seen/tries; tries=$(wc -l < /seen/tries); echo try $tries; test $tries -ge 2"
+    return [
+        sh("flaky", count, caches = {"`+seen+`": "/seen"}, retries = 1, cache = False),
+        sh("broken", "exit 3", cache = False),
+    ]
+`)
+	if got, want := statuses(result), "flaky=passed broken=failed"; got != want {
+		t.Fatalf("results:\n  %s\nwant:\n  %s\n%s", got, want, step(result, "flaky").Detail)
+	}
+	flaky := step(result, "flaky")
+	if flaky.Attempts != 2 || !flaky.Flaky || flaky.Output != "try 2\n" {
+		t.Errorf("flaky = %+v; want a pass on its second try, marked as one", flaky)
+	}
+	// A step that did not ask is run once, however it failed.
+	if broken := step(result, "broken"); broken.Attempts > 1 {
+		t.Errorf("a step that asked for no retries was tried %d times", broken.Attempts)
 	}
 }
 

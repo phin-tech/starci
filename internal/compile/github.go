@@ -93,12 +93,26 @@ func header(w *strings.Builder, p *plan.Plan, o Options) {
 	if len(unplaceable) > 0 {
 		notes = append(notes, fmt.Sprintf("`prefer` and `avoid` have no equivalent here and are dropped (%s). `worker` becomes runner labels.", strings.Join(unplaceable, ", ")))
 	}
+	if retried := withRetries(p); len(retried) > 0 {
+		notes = append(notes, fmt.Sprintf("`retries` has no equivalent here and is dropped (%s): each step is run once.", strings.Join(retried, ", ")))
+	}
 	notes = append(notes, "Passes are remembered in this repository's Actions cache, which GitHub scopes by branch and evicts when old. starci's own store has neither limit.")
 	writeHeader(w, "starci compile", o, notes)
 }
 
 // commitNote is the warning owed whenever a script's plan depends on the
 // commit, which no fixed file can reproduce.
+// withRetries names the steps that ask to be tried again.
+func withRetries(p *plan.Plan) []string {
+	var names []string
+	for _, s := range p.Steps {
+		if s.Retries > 0 {
+			names = append(names, s.Name)
+		}
+	}
+	return names
+}
+
 func commitNote(o Options) []string {
 	if len(o.Read) == 0 {
 		return nil

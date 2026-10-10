@@ -317,6 +317,12 @@ func runCmd(args []string) error {
 		note := fmt.Sprintf("%.1fs%s", r.Seconds, where)
 		if r.Cached {
 			note = "cached, first passed" + where
+		} else if r.Flaky {
+			note += fmt.Sprintf(", on try %d: flaky", r.Attempts)
+		} else if r.Attempts > 1 && r.Status == "passed" {
+			note += fmt.Sprintf(", on try %d after the machine failed", r.Attempts)
+		} else if r.Attempts > 1 {
+			note += fmt.Sprintf(", after %d tries", r.Attempts)
 		}
 		fmt.Printf("  %-8s %s  %s\n", r.Status, r.Name, note)
 		if r.Detail != "" {
@@ -357,6 +363,9 @@ func localEngine(slots int, verbose bool) (engine.Engine, error) {
 	if err != nil {
 		return nil, err
 	}
+	// There is no other machine to give a step to, so a failure that was
+	// this one's doing is tried again here.
+	cfg.MachineRetries = 2
 	eng := &local.Engine{Config: cfg, Slots: slots}
 	if verbose {
 		var mu sync.Mutex

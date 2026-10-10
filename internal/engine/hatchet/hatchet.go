@@ -38,6 +38,10 @@ import (
 // an hour, as it was, is less than two steps may now ask for between them.
 const runTimeout = 24 * time.Hour
 
+// machineRetries is how many more times a step is run when it failed for a
+// reason that was the machine's.
+const machineRetries = 2
+
 const (
 	StepTask     = "ci-step"
 	PipelineTask = "ci-pipeline"
@@ -159,6 +163,10 @@ func summary(r plan.Result) string {
 	switch {
 	case r.Cached:
 		return "passed, reused from " + r.Worker
+	case r.Flaky:
+		return fmt.Sprintf("passed in %.1fs on %s, on try %d: flaky", r.Seconds, r.Worker, r.Attempts)
+	case r.Status == "passed" && r.Attempts > 1:
+		return fmt.Sprintf("passed in %.1fs on %s, on try %d after the machine failed", r.Seconds, r.Worker, r.Attempts)
 	case r.Status == "passed":
 		return fmt.Sprintf("passed in %.1fs on %s", r.Seconds, r.Worker)
 	case r.Status == "skipped":
@@ -220,7 +228,9 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 			// it is always the step's own limit that stops it. Hatchet adds
 			// what it is given to the time the task already had.
 			if limits, err := cfg.Limits.For(in.Step); err == nil {
-				if err := ctx.RefreshTimeout(fmt.Sprintf("%ds", int(limits.Timeout/time.Second))); err != nil {
+				// As many times over as the step may be tried in this task.
+				most := limits.Timeout * time.Duration(1+in.Step.Retries+machineRetries)
+				if err := ctx.RefreshTimeout(fmt.Sprintf("%ds", int(most/time.Second))); err != nil {
 					ctx.Log("starci: the task's time could not be extended to cover the step's: " + err.Error())
 				}
 			}
@@ -230,7 +240,29 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 				in.Trace.Asked = at
 			}
 			traced, end := in.Trace.Step(ctx, in.Step.Name)
-			r := step.Run(traced, cfg, in.CloneURL, in.SHA, in.Step, out.Line)
+			// A failure that was this machine's is not tried again here:
+			// Hatchet is asked to, and may give the step to another worker.
+			here := cfg
+			here.MachineRetries = 0
+			// Hatchet also runs a task again when its worker is lost, and
+			// from in here that cannot be told from any other retry, nor
+			// how far the lost attempt got. A step that is not reused
+			// (cache = False) is one with an effect, so it is never handed
+			// back to Hatchet: what is safe to retry is retried here, and a
+			// second run by Hatchet's doing is refused.
+			if !in.Step.Cache {
+				here.MachineRetries = machineRetries
+				if ctx.RetryCount() > 0 {
+					msg := "the machine running it was lost partway, and it is not run again because it is marked cache = False: it may already have done its work"
+					out.Line("starci: " + msg)
+					return plan.Result{}, sdk.NewNonRetryableError(errors.New(stepFailed + msg))
+				}
+			}
+			r := step.Run(traced, here, in.CloneURL, in.SHA, in.Step, out.Line)
+			// Every time Hatchet has run this task counts as a try.
+			if earlier := ctx.RetryCount(); earlier > 0 {
+				r.Attempts = max(r.Attempts, 1) + earlier
+			}
 			end(r)
 			// A step that was not run printed nothing just now. Whoever opens
 			// it should still find what it printed when it passed, and be
@@ -249,11 +281,19 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 				// broken step is red in the dashboard instead of a green task
 				// carrying a bad result. It would fail the same way again on
 				// the same inputs, so it is never retried.
+				if r.Machine && in.Step.Cache && ctx.RetryCount() < machineRetries && ctx.Err() == nil {
+					out.Line("starci: that was the machine's failure and not the step's; asking for it to be run again")
+					return plan.Result{}, errors.New(stepFailed + r.Detail)
+				}
 				return plan.Result{}, sdk.NewNonRetryableError(errors.New(stepFailed + r.Detail))
 			}
 			return r, nil
 		},
 		sdk.WithExecutionTimeout(30*time.Minute),
+		// For the machine's failures only, which include the machine itself
+		// going away partway. A step's own failure is returned as one that
+		// is not to be retried.
+		sdk.WithRetries(machineRetries),
 	)
 
 	pipeline := client.NewStandaloneDurableTask(PipelineTask,

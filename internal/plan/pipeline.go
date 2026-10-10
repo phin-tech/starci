@@ -44,6 +44,18 @@ type Result struct {
 	Worker  string  `json:"worker"`
 	Cached  bool    `json:"cached"`
 	Detail  string  `json:"detail"`
+	// Attempts is how many times the step was run to get this result, when
+	// it was more than once.
+	Attempts int `json:"attempts,omitempty"`
+	// Flaky is true of a pass that came after the step had failed on its
+	// own account and been tried again: the same code, the same inputs, two
+	// answers. It is said wherever results are shown. A pass that came
+	// after the machine failed is not one.
+	Flaky bool `json:"flaky,omitempty"`
+	// Machine is true of a failure that was not the step's own: the commit
+	// could not be fetched, the container could not be started or was
+	// killed from outside. It is the kind worth trying again unasked.
+	Machine bool `json:"machine,omitempty"`
 }
 
 func (r Result) ok() bool { return r.Status == "passed" }
@@ -307,13 +319,15 @@ func execute(thread *starlark.Thread, fn string, steps []Step, allowFailure bool
 
 func resultValue(r Result) starlark.Value {
 	return starlarkstruct.FromStringDict(starlark.String("result"), starlark.StringDict{
-		"name":    starlark.String(r.Name),
-		"ok":      starlark.Bool(r.ok()),
-		"status":  starlark.String(r.Status),
-		"output":  starlark.String(r.Output),
-		"seconds": starlark.Float(r.Seconds),
-		"cached":  starlark.Bool(r.Cached),
-		"worker":  starlark.String(r.Worker),
-		"detail":  starlark.String(r.Detail),
+		"name":     starlark.String(r.Name),
+		"ok":       starlark.Bool(r.ok()),
+		"status":   starlark.String(r.Status),
+		"output":   starlark.String(r.Output),
+		"seconds":  starlark.Float(r.Seconds),
+		"cached":   starlark.Bool(r.Cached),
+		"worker":   starlark.String(r.Worker),
+		"detail":   starlark.String(r.Detail),
+		"attempts": starlark.MakeInt(max(r.Attempts, 1)),
+		"flaky":    starlark.Bool(r.Flaky),
 	})
 }

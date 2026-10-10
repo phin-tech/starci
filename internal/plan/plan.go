@@ -143,7 +143,16 @@ type Step struct {
 	Timeout int     `json:"timeout,omitempty"`
 	CPUs    float64 `json:"cpus,omitempty"`
 	Memory  int64   `json:"memory,omitempty"`
+	// Retries is how many more times the step is run when it fails on its
+	// own account: its command exited with an error, or ran out of time or
+	// memory. It is for a step known to fail now and then for no reason of
+	// the code's. A failure that was the machine's doing is retried without
+	// being asked.
+	Retries int `json:"retries,omitempty"`
 }
+
+// MaxRetries is the most a step may ask to be retried.
+const MaxRetries = 5
 
 // Tool is a program a step wants on its PATH without it being in the image:
 // an archive (or a single binary) to download, pinned by checksum.
@@ -205,6 +214,9 @@ func (p *Plan) Validate() error {
 			if !packageName.MatchString(pkg) {
 				return fmt.Errorf("step %q: %q is not an apt package name", s.Name, pkg)
 			}
+		}
+		if s.Retries < 0 || s.Retries > MaxRetries {
+			return fmt.Errorf("step %q: retries must be between 0 and %d", s.Name, MaxRetries)
 		}
 		if s.Timeout < 0 || s.CPUs < 0 || s.Memory < 0 || (s.Memory > 0 && s.Memory < MinMemory) {
 			return fmt.Errorf("step %q: timeout, cpus and memory must not be negative, and memory not under %s", s.Name, FormatMemory(MinMemory))
@@ -404,13 +416,14 @@ func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 	var env, caches, worker, prefer, avoid *starlark.Dict
 	var timeout, memory string
 	var cpus starlark.Value
+	retries := 0
 	cache, network := true, true
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
 		"name", &name, "image", &image, "run", &run, "needs?", &needs, "env?", &env,
 		"inputs?", &inputs, "caches?", &caches, "cache?", &cache,
 		"worker?", &worker, "prefer?", &prefer, "avoid?", &avoid, "tools?", &tools,
 		"packages?", &packages, "network?", &network,
-		"timeout?", &timeout, "cpus?", &cpus, "memory?", &memory); err != nil {
+		"timeout?", &timeout, "cpus?", &cpus, "memory?", &memory, "retries?", &retries); err != nil {
 		return nil, err
 	}
 	if name == "" || image == "" || run == "" {
@@ -423,6 +436,10 @@ func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 		Worker: map[string]string{}, Prefer: map[string]string{}, Avoid: map[string]string{},
 		Tools: []Tool{}, Packages: []string{},
 	}
+	if retries < 0 || retries > MaxRetries {
+		return nil, fmt.Errorf("step %q: retries must be between 0 and %d, got %d", name, MaxRetries, retries)
+	}
+	s.Retries = retries
 	if timeout != "" {
 		seconds, err := ParseTimeout(timeout)
 		if err != nil {

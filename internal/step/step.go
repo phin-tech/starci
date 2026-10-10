@@ -55,6 +55,11 @@ type Config struct {
 	Shared Store
 	// Limits is what a step may use here.
 	Limits Limits
+	// MachineRetries is how many more times a step is run here when it
+	// failed for a reason that was the machine's and not its own. An engine
+	// that can move a step to another machine does that instead and leaves
+	// this at zero.
+	MachineRetries int
 }
 
 func (c Config) store() Store {
@@ -89,9 +94,56 @@ func phase(ctx context.Context, name string) (done func()) {
 // cannot be fetched, the image cannot be pulled, an input is missing) is a
 // failed step like any other, with the reason in Detail.
 func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log func(string)) plan.Result {
+	own, machine := 0, 0
+	for n := 1; ; n++ {
+		r := attempt(ctx, cfg, cloneURL, sha, s, n, own > 0, log)
+		// Nothing is tried again for a run that has been cancelled: what
+		// replaced it does not want this step's result.
+		if r.Status == "passed" || ctx.Err() != nil {
+			return r
+		}
+		switch {
+		case r.Machine && machine < cfg.MachineRetries:
+			machine++
+			log("")
+			log(fmt.Sprintf("starci: that was the machine's failure and not the step's (%s); trying again", firstLine(r.Detail)))
+		case !r.Machine && own < s.Retries:
+			own++
+			log("")
+			log(fmt.Sprintf("starci: failed (%s); the step asks to be tried %d more time(s), this is number %d", firstLine(r.Detail), s.Retries, own))
+		default:
+			return r
+		}
+	}
+}
+
+func firstLine(s string) string {
+	line, _, _ := strings.Cut(s, "\n")
+	return line
+}
+
+// attempt runs the step once. try is which time this is, and failedBefore
+// whether an earlier try failed on the step's own account. A result carries
+// both, into the store with it: a pass after such a failure is a flaky one.
+func attempt(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, try int, failedBefore bool, log func(string)) plan.Result {
 	started := time.Now()
+	// Only said when it is not the first.
+	tries := 0
+	if try > 1 {
+		tries = try
+	}
 	failed := func(format string, args ...any) plan.Result {
-		return plan.Result{Name: s.Name, Status: "failed", Worker: cfg.Worker, Detail: fmt.Sprintf(format, args...)}
+		return plan.Result{Name: s.Name, Status: "failed", Worker: cfg.Worker, Attempts: tries, Detail: fmt.Sprintf(format, args...)}
+	}
+	// unready is a failure to get as far as running the command: the commit,
+	// the image, a tool, the packages. It is counted as the machine's, and
+	// is always safe to try again, since nothing of the step's has run. Some
+	// are really the script's (an image that does not exist), and trying
+	// those twice more costs a moment and changes nothing.
+	unready := func(format string, args ...any) plan.Result {
+		r := failed(format, args...)
+		r.Machine = true
+		return r
 	}
 
 	// Before anything is fetched: a step that asks for more than this
@@ -111,7 +163,7 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	co, err := fetch(cloneURL, sha, root, cfg.GitEnv)
 	done()
 	if err != nil {
-		return failed("fetch of %s failed: %v", sha, err)
+		return unready("fetch of %s failed: %v", sha, err)
 	}
 	done = phase(ctx, "identify the inputs")
 	content, err := co.contentID(s.Inputs)
@@ -123,7 +175,7 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	img, err := inspectImage(s.Image)
 	done()
 	if err != nil {
-		return failed("%v", err)
+		return unready("%v", err)
 	}
 	var tools []installed
 	for _, t := range s.Tools {
@@ -131,7 +183,7 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 		in, err := install(cfg.StateDir, t, img.arch)
 		done()
 		if err != nil {
-			return failed("%v", err)
+			return unready("%v", err)
 		}
 		tools = append(tools, in)
 	}
@@ -155,6 +207,10 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 		if ok {
 			log(fmt.Sprintf("same image, command and inputs as a passing run on %s; not run again", earlier.Worker))
 			earlier.Name, earlier.Cached, earlier.Seconds = s.Name, true, 0
+			// How many tries the earlier pass took is its story, not this
+			// run's: a script that acts on a flaky result should not act
+			// on the same one every time it is reused.
+			earlier.Attempts, earlier.Flaky = tries, false
 			return earlier
 		}
 	}
@@ -173,7 +229,7 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 		runImage, err = withPackages(s.Image, img.id, s.Packages)
 		done()
 		if err != nil {
-			return failed("%v", err)
+			return unready("%v", err)
 		}
 	}
 
@@ -215,7 +271,7 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	}
 	cmd.Stderr = cmd.Stdout
 	if err := cmd.Start(); err != nil {
-		return failed("cannot start docker: %v", err)
+		return unready("cannot start docker: %v", err)
 	}
 	var tail []string
 	var output strings.Builder
@@ -261,10 +317,28 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 		}
 		r := failed("exit code %d after %.1fs\n%s", code, seconds, strings.Join(tail, "\n"))
 		r.Seconds, r.Output = seconds, output.String()
+		// 125 is docker saying it could not run the container at all, and
+		// 137 a container that was killed. Killed for its own memory or its
+		// own time has been dealt with above, so what is left was killed
+		// from outside: the machine going down, or someone clearing it.
+		//
+		// A killed command had started, and may have done what it does. So
+		// it is run again unasked only if the step is one whose pass would
+		// be reused anyway. One marked cache = False has an effect outside
+		// its inputs, publishing or deploying, and doing that twice is not
+		// something to decide for it.
+		switch {
+		case code == 125:
+			r.Machine = true
+		case code == 137 && s.Cache:
+			r.Machine = true
+		case code == 137:
+			r.Detail = "it was killed from outside, and is not run again unasked because it is marked cache = False: it may already have done its work\n" + r.Detail
+		}
 		return r
 	}
 
-	result := plan.Result{Name: s.Name, Status: "passed", Seconds: seconds, Worker: cfg.Worker, Output: output.String()}
+	result := plan.Result{Name: s.Name, Status: "passed", Seconds: seconds, Worker: cfg.Worker, Attempts: tries, Flaky: failedBefore, Output: output.String()}
 	if s.Cache {
 		// Only passes are remembered. A failure is always worth running again.
 		// Not being able to remember one is worth saying, but the step passed.

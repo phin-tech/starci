@@ -47,6 +47,9 @@ func CircleCI(p *plan.Plan, o Options) (string, error) {
 	if len(placed) > 0 {
 		notes = append(notes, fmt.Sprintf("`worker`, `prefer` and `avoid` have no equivalent here and are dropped (%s): CircleCI chooses machines by resource class, not by label. Every job uses %s.", strings.Join(placed, ", "), o.RunsOn))
 	}
+	if retried := withRetries(p); len(retried) > 0 {
+		notes = append(notes, fmt.Sprintf("`retries` has no equivalent here and is dropped (%s): each step is run once.", strings.Join(retried, ", ")))
+	}
 	notes = append(notes, "Passes are remembered in this project's CircleCI cache, which expires. starci's own store does not.")
 	writeHeader(&w, "starci compile --target circleci", o, notes)
 

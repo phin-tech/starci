@@ -252,6 +252,8 @@ workflow says which apply:
 - A step's `timeout`, `cpus` and `memory` carry over. GitHub counts time in
   whole minutes, so part of a minute becomes one. A step that sets none has
   the job's own limits, not a worker's.
+- `retries` is dropped, and the header says for which steps: a compiled step
+  is run once.
 - `prefer` and `avoid` are dropped. For CircleCI so is `worker`: it chooses
   machines by resource class, not by label.
 - Advanced scripts cannot be compiled at all: their steps are only known as
@@ -430,6 +432,53 @@ A worker still takes `STARCI_SLOTS` steps at once whatever they ask for:
 four steps that each ask for four processors are started together on a
 machine with four.
 
+### Trying again
+
+A step can fail for two kinds of reason, and they are not treated alike.
+
+**The machine's.** The commit could not be fetched, the image, a tool or the
+packages could not be got ready, docker could not start the container, the
+container was killed from outside, or the worker running it went away. None
+of that says anything about the code, so the step is run again without being
+asked, up to twice more: on Hatchet possibly by another worker, on one
+machine by that machine.
+
+There is one exception. A step that was killed, or whose worker went away,
+had started and may have done what it does. For a step marked `cache =
+False`, which is how a step with an effect is marked, that could mean
+publishing or deploying twice, so such a step is not run again unasked: it
+fails, and says that it may already have done its work.
+
+**The step's own.** Its command exited with an error, or ran out of the time
+or memory it was allowed. That is final, unless the step says otherwise:
+
+```python
+step("browser tests", image = "node:22", run = "npm run test:browser", retries = 2)
+```
+
+`retries` is how many more times to run it, five at most. It is for a step
+known to fail now and then for no reason of the code's, and it costs the
+time of every extra run when the failure is real.
+
+A pass that came after the step failed on its own account is marked
+**flaky** wherever results are shown, in the terminal, in the run's log and
+on the commit:
+
+```
+  passed   browser tests  41.2s on luigi, on try 2: flaky
+```
+
+```
+3 step(s) passed in 2m 10s, 1 flaky
+```
+
+It is stored as a pass like any other, and reused; reused, it is not called
+flaky again. A pass that came after
+the machine failed says which try it was and is not called flaky. In an
+advanced script a result has `.attempts` and `.flaky`.
+
+Nothing is tried again for a run that has been cancelled or replaced.
+
 ### Looking after workers
 
 ```sh
@@ -448,7 +497,7 @@ Runs for different branches, or for a bare commit, leave each other alone.
 
 | | |
 |---|---|
-| `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {}, tools = [], packages = [], network = True, timeout = "", cpus = 0, memory = "")` | Declare a container to run. Returns a handle usable in another step's `needs`. |
+| `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {}, tools = [], packages = [], network = True, timeout = "", cpus = 0, memory = "", retries = 0)` | Declare a container to run. Returns a handle usable in another step's `needs`. |
 | `ctx.repo`, `ctx.sha`, `ctx.ref` | What is being built. `ref` is the branch. |
 | `ctx.event` | Why the run started: `"push"`, `"tag"`, `"pull_request"`, `"schedule"` or `"manual"`. |
 | `ctx.tag` | The tag's name, for a tag. |
@@ -492,7 +541,7 @@ def pipeline(ctx):
 |---|---|
 | `run(step, allow_failure = False)` | Run one step and return its result. |
 | `parallel(steps, allow_failure = False)` | Run several together; results come back in the same order. |
-| `result.ok`, `.status`, `.output`, `.name`, `.seconds`, `.cached`, `.worker`, `.detail` | What a result carries. `output` is what the step printed, up to 64 KB. |
+| `result.ok`, `.status`, `.output`, `.name`, `.seconds`, `.cached`, `.worker`, `.detail`, `.attempts`, `.flaky` | What a result carries. `output` is what the step printed, up to 64 KB. |
 | `fail(message)` | End the run as failed. |
 
 A step that fails ends the run, unless `allow_failure` hands the script the
