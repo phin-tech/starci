@@ -251,6 +251,11 @@ workflow says which apply:
 - The CircleCI output does not do this yet: it is the plan for a push.
 - `prefer` and `avoid` are dropped. For CircleCI so is `worker`: it chooses
   machines by resource class, not by label.
+- A step's services are started by the job itself, the way a worker starts
+  them, and stopped at its end. They are not the CI tool's own `services:`,
+  which could not be reached by name from the step's container. A pass is
+  keyed on a service's image by name: a tag that moves does not run the job
+  again, as it would on a worker.
 - Advanced scripts cannot be compiled at all: their steps are only known as
   they run.
 
@@ -406,7 +411,8 @@ Runs for different branches, or for a bare commit, leave each other alone.
 
 | | |
 |---|---|
-| `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {}, tools = [], packages = [], network = True)` | Declare a container to run. Returns a handle usable in another step's `needs`. |
+| `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {}, tools = [], packages = [], network = True, services = [])` | Declare a container to run. Returns a handle usable in another step's `needs`. |
+| `service(name, image, env = {}, args = [], ready = "")` | Declare a container to run beside a step, for its `services`. |
 | `ctx.repo`, `ctx.sha`, `ctx.ref` | What is being built. `ref` is the branch. |
 | `ctx.event` | Why the run started: `"push"`, `"tag"`, `"pull_request"`, `"schedule"` or `"manual"`. |
 | `ctx.tag` | The tag's name, for a tag. |
@@ -606,6 +612,56 @@ image.
 A pass with the network is never taken as a pass without it: turning the
 network off runs the step once more. Tools and packages are fetched by the
 worker before the container starts and are not affected.
+
+### Services
+
+A step that needs a database, or a stand-in for some API, asks for it to be
+running beside it:
+
+```python
+postgres = service(
+    "postgres",
+    image = "postgres:17",
+    env = {"POSTGRES_PASSWORD": "pw"},
+    ready = "pg_isready -h localhost",
+)
+
+step("test", image = "python:3.13-slim", run = "pytest -q",
+     env = {"DATABASE_URL": "postgresql://postgres:pw@postgres:5432/postgres"},
+     services = [postgres])
+```
+
+The service is started before the step and removed after it, however the step
+ended. The step reaches it by its name, on any port it listens on. It is the
+step's own: steps that name the same service each get one, on a network no
+other step is on, so tests running side by side cannot see each other's data,
+and nothing is left from the run before.
+
+`ready` is a command run inside the service's container, every half second
+until it succeeds, and the step starts only then. Without one the step starts
+as soon as the container has, which is before most servers are listening. A
+service that is not ready within two minutes, or that stops, fails the step,
+with the last of what the service printed. The command is run by `sh`, so an
+image without a shell cannot have one. For Postgres ask over TCP, as above:
+while the image is setting a database up it runs a server that answers only
+on its socket, and `pg_isready` alone would be satisfied by that one.
+
+`args` replaces the image's command, for a server that has to be told what to
+serve: `service("store", image = "minio/minio", args = ["server", "/data"])`.
+
+A service is part of what a pass means. A step's result is keyed on each
+service's name, image, `env`, `args` and `ready`, and the image is identified
+by its content like the step's own, so a new `postgres:17` runs the step
+again. A step with `network = False` still reaches its services, and they
+reach nothing else either: the step's container has a network interface, but
+no route out.
+
+Each step with services takes one of the machine's Docker networks for as
+long as it runs. Docker has about thirty to give unless its
+`default-address-pools` are widened, which bounds how many such steps a
+worker can run at once. A worker that is killed cannot stop the services of
+the steps it was running; it removes them when it next starts, which is why
+two workers on one machine need different names.
 
 ### Sharing results between machines
 

@@ -133,6 +133,29 @@ type Step struct {
 	// something its inputs do not hold. It is the negative so that a plan
 	// written before the field existed still means "with the network".
 	Offline bool `json:"offline,omitempty"`
+	// Services are containers started beside the step and stopped with it: a
+	// database, a stand-in for an API. The step reaches each by its name.
+	// Absent from a plan that has none, so that a plan written before the
+	// field existed is unchanged.
+	Services []Service `json:"services,omitempty"`
+}
+
+// Service is a container a step wants running beside it for as long as it
+// runs, and no longer. It is the step's own: two steps that name the same
+// service each get one, and neither sees the other's.
+type Service struct {
+	// Name is the host name the step reaches it by.
+	Name  string            `json:"name"`
+	Image string            `json:"image"`
+	Env   map[string]string `json:"env"`
+	// Args replace the image's own command, for a server that has to be told
+	// what to serve.
+	Args []string `json:"args,omitempty"`
+	// Ready is a command run inside the service's container, again and again
+	// until it succeeds; the step starts only then. Without one, the step
+	// starts as soon as the container has, which is before most servers are
+	// listening.
+	Ready string `json:"ready,omitempty"`
 }
 
 // Tool is a program a step wants on its PATH without it being in the image:
@@ -195,6 +218,16 @@ func (p *Plan) Validate() error {
 			if !packageName.MatchString(pkg) {
 				return fmt.Errorf("step %q: %q is not an apt package name", s.Name, pkg)
 			}
+		}
+		seen := map[string]bool{}
+		for _, sv := range s.Services {
+			if err := sv.validate(); err != nil {
+				return fmt.Errorf("step %q: %w", s.Name, err)
+			}
+			if seen[sv.Name] {
+				return fmt.Errorf("step %q: service %q is listed twice", s.Name, sv.Name)
+			}
+			seen[sv.Name] = true
 		}
 	}
 	return validate(p.Steps)
@@ -387,14 +420,14 @@ func (s *stepValue) Hash() (uint32, error) { return starlark.String(s.Name).Hash
 
 func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var name, image, run string
-	var needs, inputs, tools, packages *starlark.List
+	var needs, inputs, tools, packages, services *starlark.List
 	var env, caches, worker, prefer, avoid *starlark.Dict
 	cache, network := true, true
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
 		"name", &name, "image", &image, "run", &run, "needs?", &needs, "env?", &env,
 		"inputs?", &inputs, "caches?", &caches, "cache?", &cache,
 		"worker?", &worker, "prefer?", &prefer, "avoid?", &avoid, "tools?", &tools,
-		"packages?", &packages, "network?", &network); err != nil {
+		"packages?", &packages, "network?", &network, "services?", &services); err != nil {
 		return nil, err
 	}
 	if name == "" || image == "" || run == "" {
@@ -434,6 +467,20 @@ func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 			}
 			seen[tv.Name] = true
 			s.Tools = append(s.Tools, tv.Tool)
+		}
+	}
+	if services != nil {
+		seen := map[string]bool{}
+		for i := 0; i < services.Len(); i++ {
+			sv, ok := services.Index(i).(*serviceValue)
+			if !ok {
+				return nil, fmt.Errorf("step %q: services must hold service(...) values, got %s", name, services.Index(i).Type())
+			}
+			if seen[sv.Name] {
+				return nil, fmt.Errorf("step %q: service %q is listed twice", name, sv.Name)
+			}
+			seen[sv.Name] = true
+			s.Services = append(s.Services, sv.Service)
 		}
 	}
 	// A label can be constrained one way per step: Hatchet takes a single
@@ -518,6 +565,65 @@ func (t *toolValue) Type() string          { return "tool" }
 func (t *toolValue) Freeze()               {}
 func (t *toolValue) Truth() starlark.Bool  { return starlark.True }
 func (t *toolValue) Hash() (uint32, error) { return starlark.String(t.Name).Hash() }
+
+// serviceValue is what service() returns, for a step's services.
+type serviceValue struct{ Service }
+
+func (s *serviceValue) String() string        { return fmt.Sprintf("<service %q>", s.Name) }
+func (s *serviceValue) Type() string          { return "service" }
+func (s *serviceValue) Freeze()               {}
+func (s *serviceValue) Truth() starlark.Bool  { return starlark.True }
+func (s *serviceValue) Hash() (uint32, error) { return starlark.String(s.Name).Hash() }
+
+// A service's name is a host name, so it is held to what one may be.
+var serviceName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+func serviceBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var name, image, ready string
+	var env *starlark.Dict
+	var command *starlark.List
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
+		"name", &name, "image", &image, "env?", &env, "args?", &command, "ready?", &ready); err != nil {
+		return nil, err
+	}
+	sv := Service{Name: name, Image: image, Env: map[string]string{}, Ready: ready}
+	if command != nil {
+		for i := 0; i < command.Len(); i++ {
+			v, ok := command.Index(i).(starlark.String)
+			if !ok {
+				return nil, fmt.Errorf("service %q: args must be strings, got %s", name, command.Index(i).Type())
+			}
+			sv.Args = append(sv.Args, string(v))
+		}
+	}
+	if env != nil {
+		for _, item := range env.Items() {
+			k, kok := item[0].(starlark.String)
+			v, vok := item[1].(starlark.String)
+			if !kok || !vok {
+				return nil, fmt.Errorf("service %q: env keys and values must be strings", name)
+			}
+			sv.Env[string(k)] = string(v)
+		}
+	}
+	if err := sv.validate(); err != nil {
+		return nil, err
+	}
+	return &serviceValue{sv}, nil
+}
+
+func (s Service) validate() error {
+	if !serviceName.MatchString(s.Name) {
+		return fmt.Errorf("service %q: a name is the host name a step reaches it by, so lowercase letters, digits and '-' only", s.Name)
+	}
+	if s.Image == "" || strings.ContainsAny(s.Image, " \t\n") {
+		return fmt.Errorf("service %q: image must name an image, got %q", s.Name, s.Image)
+	}
+	if strings.ContainsAny(s.Ready, "\r\n") {
+		return fmt.Errorf("service %q: ready must be one line", s.Name)
+	}
+	return nil
+}
 
 var (
 	// What apt accepts as a package, with an optional =version. Nothing that

@@ -181,9 +181,18 @@ func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
 		mounts = append(mounts, fmt.Sprintf("-v \"$HOME/starci-cache/%s:%s\"", name, s.Caches[name]))
 	}
 
+	// CIRCLE_BUILD_NUM is this job's own number.
+	network := "starci-$CIRCLE_BUILD_NUM-" + id
+	if len(s.Services) > 0 {
+		circleRun(w, "Services: "+strings.Join(serviceNames(s), ", "), nil, startServices(s, network)...)
+	}
+
 	var lines []string
 	args := []string{"-v \"$PWD:/workspace\"", "-w /workspace"}
-	if s.Offline {
+	switch {
+	case len(s.Services) > 0:
+		args = append(args, fmt.Sprintf("--network \"%s\"", network))
+	case s.Offline:
 		args = append(args, "--network none")
 	}
 	args = append(args, mounts...)
@@ -215,6 +224,14 @@ func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
 	// The command travels in an environment variable, so that nothing in it
 	// needs escaping for the shell that starts the container.
 	circleRun(w, s.Name, map[string]string{"STARCI_RUN": s.Run}, lines...)
+	if len(s.Services) > 0 {
+		// Whatever became of the step. The machine is thrown away after the
+		// job, so this is tidiness, and the same as the other targets.
+		w.WriteString("      - run:\n          name: Stop the services\n          when: always\n          command: |\n")
+		for _, l := range stopServices(s, network) {
+			fmt.Fprintf(w, "            %s\n", circleEscape(l))
+		}
+	}
 
 	for _, name := range sortedKeys(s.Caches) {
 		fmt.Fprintf(w, "      - save_cache:\n          name: %s\n          key: starci-cache-%s-{{ .Revision }}\n          paths:\n            - ~/starci-cache/%s\n", q("Save cache: "+name), name, name)

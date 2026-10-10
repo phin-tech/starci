@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"git.phin.tech/sam/starci/internal/plan"
 )
@@ -507,5 +508,179 @@ func TestMissingInputsNamesWhatSelectsNothing(t *testing.T) {
 
 	if _, err := MissingInputs(t.TempDir(), []string{"."}); err == nil {
 		t.Error("a directory that is not in a repository was accepted")
+	}
+}
+
+// web is a service that, once it has been up for delay, answers on port 8080
+// with its host name, which is the name it was given.
+func web(name, delay string) plan.Service {
+	return plan.Service{
+		Name: name, Image: testImage, Env: map[string]string{},
+		Args:  []string{"sh", "-c", "sleep " + delay + "; exec nc -lk -p 8080 -e hostname"},
+		Ready: "nc -w 2 127.0.0.1 8080 </dev/null | grep -q .",
+	}
+}
+
+// leftovers lists what steps with services have left on this machine for the
+// worker called name.
+func leftovers(t *testing.T, name string) string {
+	t.Helper()
+	owned := "label=" + ownerLabel + "=" + name
+	containers, _ := exec.Command("docker", "ps", "-aq", "--filter", owned).Output()
+	networks, _ := exec.Command("docker", "network", "ls", "-q", "--filter", owned).Output()
+	return strings.TrimSpace(string(containers) + string(networks))
+}
+
+func TestAStepReachesItsServicesByName(t *testing.T) {
+	needDocker(t)
+	r := newRepo(t)
+	sha := r.commit(map[string]string{"a.txt": "a"})
+	cfg := Config{Worker: "test-" + t.Name(), StateDir: t.TempDir()}
+	s := plan.Step{
+		Name: "ask", Run: "nc -w 2 one 8080 </dev/null && nc -w 2 two 8080 </dev/null",
+		// One of them is slow to start: the step waits for it.
+		Services: []plan.Service{web("one", "0"), web("two", "2")},
+	}
+	got := run(t, cfg, r, sha, s)
+	if got.Status != "passed" || got.Output != "one\ntwo\n" {
+		t.Fatalf("result = %+v, want a pass that printed each service's name", got)
+	}
+	if left := leftovers(t, cfg.Worker); left != "" {
+		t.Errorf("services or their network outlived the step: %s", left)
+	}
+}
+
+func TestAStepWithoutTheNetworkStillReachesItsServices(t *testing.T) {
+	needDocker(t)
+	r := newRepo(t)
+	sha := r.commit(map[string]string{"a.txt": "a"})
+	cfg := Config{Worker: "test-" + t.Name(), StateDir: t.TempDir()}
+	s := plan.Step{
+		Name: "sealed", Offline: true, Services: []plan.Service{web("one", "0")},
+		// The service answers, and there is no way out: no default route.
+		Run: "nc -w 2 one 8080 </dev/null && ! ip route | grep -q default",
+	}
+	if got := run(t, cfg, r, sha, s); got.Status != "passed" {
+		t.Fatalf("result = %+v", got)
+	}
+	s.Offline = false
+	if got := run(t, cfg, r, sha, s); got.Status != "failed" {
+		t.Fatalf("a step with the network and services has no way out: %+v", got)
+	}
+}
+
+func TestAServiceIsPartOfWhatAPassMeans(t *testing.T) {
+	needDocker(t)
+	r := newRepo(t)
+	sha := r.commit(map[string]string{"a.txt": "a"})
+	cfg := Config{Worker: "test-" + t.Name(), StateDir: t.TempDir()}
+	s := plan.Step{Name: "read", Run: "cat a.txt", Cache: true}
+	run(t, cfg, r, sha, s)
+	s.Services = []plan.Service{web("one", "0")}
+	if got := run(t, cfg, r, sha, s); got.Cached {
+		t.Error("a pass without the service stood in for the step with it")
+	}
+	if got := run(t, cfg, r, sha, s); !got.Cached {
+		t.Error("a pass with the service was not reused")
+	}
+	s.Services[0].Env = map[string]string{"MODE": "other"}
+	if got := run(t, cfg, r, sha, s); got.Cached {
+		t.Error("a pass stood in for the step after its service's environment changed")
+	}
+}
+
+func TestAServiceThatFailsFailsTheStepAndSaysWhy(t *testing.T) {
+	needDocker(t)
+	r := newRepo(t)
+	sha := r.commit(map[string]string{"a.txt": "a"})
+	cfg := Config{Worker: "test-" + t.Name(), StateDir: t.TempDir()}
+
+	dead := plan.Service{Name: "dead", Image: testImage, Args: []string{"sh", "-c", "echo no licence; exit 1"}, Ready: "true"}
+	got := run(t, cfg, r, sha, plan.Step{Name: "a", Run: "true", Services: []plan.Service{dead}})
+	if got.Status != "failed" || !strings.Contains(got.Detail, `"dead" stopped`) || !strings.Contains(got.Detail, "no licence") {
+		t.Errorf("a service that exited: %+v", got)
+	}
+
+	old := readyWithin
+	readyWithin = 2 * time.Second
+	defer func() { readyWithin = old }()
+	never := plan.Service{Name: "never", Image: testImage, Args: []string{"sh", "-c", "echo starting; sleep 600"}, Ready: "false"}
+	got = run(t, cfg, r, sha, plan.Step{Name: "b", Run: "true", Services: []plan.Service{never}})
+	if got.Status != "failed" || !strings.Contains(got.Detail, `"never" was not ready`) || !strings.Contains(got.Detail, "starting") {
+		t.Errorf("a service that was never ready: %+v", got)
+	}
+
+	// Nor is one whose readiness command never comes back.
+	never.Ready = "sleep 600"
+	began := time.Now()
+	got = run(t, cfg, r, sha, plan.Step{Name: "hung", Run: "true", Services: []plan.Service{never}})
+	if got.Status != "failed" || !strings.Contains(got.Detail, `"never" was not ready`) || time.Since(began) > time.Minute {
+		t.Errorf("a service whose readiness command hangs, after %s: %+v", time.Since(began).Round(time.Second), got)
+	}
+
+	got = run(t, cfg, r, sha, plan.Step{Name: "c", Run: "true", Services: []plan.Service{{Name: "gone", Image: "starci.invalid/no-such-image:1"}}})
+	if got.Status != "failed" || !strings.Contains(got.Detail, `service "gone"`) {
+		t.Errorf("a service whose image does not exist: %+v", got)
+	}
+	if left := leftovers(t, cfg.Worker); left != "" {
+		t.Errorf("failed services were left behind: %s", left)
+	}
+}
+
+func TestCancelStopsTheServices(t *testing.T) {
+	needDocker(t)
+	r := newRepo(t)
+	sha := r.commit(map[string]string{"a.txt": "a"})
+	cfg := Config{Worker: "test-" + t.Name(), StateDir: t.TempDir()}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	up := make(chan struct{})
+	done := make(chan plan.Result)
+	go func() {
+		s := plan.Step{Name: "slow", Image: testImage, Inputs: []string{"."}, Run: "echo up; sleep 120", Services: []plan.Service{web("one", "0")}}
+		done <- Run(ctx, cfg, r.dir, sha, s, func(line string) {
+			if line == "up" {
+				close(up)
+			}
+		})
+	}()
+	<-up
+	if leftovers(t, cfg.Worker) == "" {
+		t.Fatal("nothing carries this worker's label while its step runs")
+	}
+	cancel()
+	if got := <-done; got.Status != "failed" || got.Detail != "cancelled" {
+		t.Errorf("result = %+v, want a cancelled failure", got)
+	}
+	if left := leftovers(t, cfg.Worker); left != "" {
+		t.Errorf("services or their network are still there after cancel: %s", left)
+	}
+}
+
+func TestSweepRemovesWhatAKilledWorkerLeft(t *testing.T) {
+	needDocker(t)
+	// What a worker killed partway through a step leaves: nothing ran stop.
+	mine, other := "test-"+t.Name(), "test-"+t.Name()+"-other"
+	var stops []func()
+	for _, worker := range []string{mine, other} {
+		s := plan.Step{Services: []plan.Service{web("one", "0")}}
+		_, stop, err := startServices(context.Background(), "starci-sweep-"+worker, worker, s)
+		stops = append(stops, stop)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer func() {
+		for _, stop := range stops {
+			stop()
+		}
+	}()
+
+	Sweep(mine)
+	if left := leftovers(t, mine); left != "" {
+		t.Errorf("after a sweep this worker still has: %s", left)
+	}
+	if leftovers(t, other) == "" {
+		t.Error("a sweep for one worker removed another's services")
 	}
 }

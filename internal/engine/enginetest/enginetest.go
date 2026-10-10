@@ -41,6 +41,7 @@ func Run(t *testing.T, eng engine.Engine) {
 	t.Run("steps are given the commit and only their inputs", func(t *testing.T) { inputs(t, eng, repo) })
 	t.Run("a step that already passed is not run again", func(t *testing.T) { reuse(t, eng, repo) })
 	t.Run("a step that gave up the network has none", func(t *testing.T) { offline(t, eng, repo) })
+	t.Run("a step reaches the services it asked for, and they end with it", func(t *testing.T) { services(t, eng, repo) })
 	t.Run("an advanced script acts on what its steps return", func(t *testing.T) { advanced(t, eng, repo) })
 	t.Run("an advanced script that fails says why", func(t *testing.T) { advancedFailure(t, eng, repo) })
 	t.Run("what the engine says it can do, it does", func(t *testing.T) { claims(t, eng, repo) })
@@ -194,6 +195,39 @@ def ci(ctx):
 	}
 	if got := step(result, "with").Output; got == "lo\n" {
 		t.Error("a step that did not give up the network has only lo")
+	}
+}
+
+// services is here for the same reason: a step's services are started on
+// whatever machine the engine sends the step to, so the engine has to carry
+// them there, and an engine that does not run steps through internal/step
+// has to provide them itself. What is asked of it is that each answers to its
+// name, that the step does not start before a service is ready, and that
+// nothing of them is left afterwards.
+func services(t *testing.T, eng engine.Engine, r repo) {
+	// Names no other run on this machine is using, so that what is left of
+	// them afterwards can be told from anyone else's.
+	id := strings.ReplaceAll(time.Now().Format("150405.000000000"), ".", "")
+	quick, slow := "quick"+id, "slow"+id
+	result := execute(t, eng, r, helpers+`
+def web(name, delay):
+    return service(name, image = "`+image+`",
+                   args = ["sh", "-c", "sleep " + delay + "; exec nc -lk -p 8080 -e hostname"],
+                   ready = "nc -w 2 127.0.0.1 8080 </dev/null | grep -q .")
+
+def ci(ctx):
+    return [sh("ask", "nc -w 2 `+quick+` 8080 </dev/null && nc -w 2 `+slow+` 8080 </dev/null",
+               cache = False, services = [web("`+quick+`", "0"), web("`+slow+`", "2")])]
+`)
+	if !result.OK {
+		t.Fatalf("results: %s (%s)", statuses(result), step(result, "ask").Detail)
+	}
+	if got, want := step(result, "ask").Output, quick+"\n"+slow+"\n"; got != want {
+		t.Errorf("the step heard %q from its services, want %q", got, want)
+	}
+	// Where an engine's workers are during these tests is this machine.
+	if out, _ := exec.Command("docker", "ps", "-a", "--format", "{{.Names}}", "--filter", "name="+id).Output(); len(out) > 0 {
+		t.Errorf("services outlived their step:\n%s", out)
 	}
 }
 

@@ -184,3 +184,51 @@ func TestExamplesCompile(t *testing.T) {
 		})
 	}
 }
+
+const withServices = `
+def ci(ctx):
+    return [step("api tests", image = "python:3.13-slim", run = "pytest -q", inputs = ["api"], services = [
+        service("postgres", image = "postgres:17", env = {"POSTGRES_PASSWORD": "it's"}, ready = "pg_isready -h localhost"),
+        service("store", image = "minio/minio", args = ["server", "/data"]),
+    ])]
+`
+
+func TestAJobStartsItsServicesAndStopsThem(t *testing.T) {
+	out := compileScript(t, withServices, Options{})
+	wants(t, out,
+		// A network for this job alone, and each service on it under its name.
+		"      - name: \"Services: postgres, store\"\n        if: steps.passed.outputs.cache-hit != 'true'\n",
+		`          docker network create "starci-$GITHUB_RUN_ID-${GITHUB_RUN_ATTEMPT:-1}-api-tests"`+"\n",
+		`--network-alias postgres --hostname postgres -e 'POSTGRES_PASSWORD=it'\''s' postgres:17`+"\n",
+		`--network-alias store --hostname store minio/minio 'server' '/data'`+"\n",
+		// The step waits for the one that says how to tell it is ready.
+		`          until timeout 10 docker exec "starci-$GITHUB_RUN_ID-${GITHUB_RUN_ATTEMPT:-1}-api-tests-postgres" sh -c 'pg_isready -h localhost'; do`+"\n",
+		// It joins them.
+		`            --network "starci-$GITHUB_RUN_ID-${GITHUB_RUN_ATTEMPT:-1}-api-tests" \`+"\n",
+		// And they are stopped whatever became of it, unless they never started.
+		"      - name: Stop the services\n        if: always() && steps.passed.outputs.cache-hit != 'true'\n",
+		`          docker network rm "starci-$GITHUB_RUN_ID-${GITHUB_RUN_ATTEMPT:-1}-api-tests" || true`+"\n",
+	)
+	if strings.Count(out, "until timeout 10 docker exec") != 1 {
+		t.Errorf("a service with no readiness command is waited for:\n%s", out)
+	}
+
+	// Without the network the step still reaches them, and nothing else.
+	sealed := compileScript(t, strings.Replace(withServices, `inputs = ["api"],`, `inputs = ["api"], network = False,`, 1), Options{})
+	wants(t, sealed, "          docker network create --internal \"starci-")
+	if strings.Contains(sealed, "--network none") {
+		t.Errorf("a sealed step with services was cut off from them:\n%s", sealed)
+	}
+
+	// A service is part of what a pass means.
+	key := func(s string) string {
+		i := strings.Index(s, "key: starci-passed-api-tests-")
+		return s[i : i+55]
+	}
+	if other := compileScript(t, strings.Replace(withServices, "postgres:17", "postgres:18", 1), Options{}); key(out) == key(other) {
+		t.Errorf("the pass key did not change with a service's image: %s", key(out))
+	}
+	if strings.Contains(compileScript(t, script, Options{}), "ervices") {
+		t.Error("a workflow with no services mentions them")
+	}
+}

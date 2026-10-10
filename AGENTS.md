@@ -52,9 +52,9 @@ else is a small optional interface, asked for with a type assertion: `Starter`,
 1. Implement `engine.Engine` in `internal/engine/<name>`.
 2. Put it through the shared tests: `enginetest.Run(t, eng)`. They use real
    containers and cover plan order, skipping after a failure, input
-   sandboxing, result reuse, steps without the network, advanced scripts, and
-   whether the engine does what `Can()` claims. An engine is not done until it
-   passes all that apply.
+   sandboxing, result reuse, steps without the network, services, advanced
+   scripts, and whether the engine does what `Can()` claims. An engine is not
+   done until it passes all that apply.
 3. If the engine needs a service to test against, gate its test behind an
    environment variable the way Hatchet's is (`STARCI_TEST_HATCHET`), and say
    how to run it in the README's Development section.
@@ -79,6 +79,30 @@ The engine side has to hold up its end:
 - Test it by killing a worker partway through a step of an advanced script and
   checking that the run resumes, finished steps are not repeated, and the run
   passes. A passing test suite does not show this.
+
+### Services
+
+A step's services (`plan.Step.Services`) are started and stopped by
+`step.Run`, on the machine the step runs on, so an engine that runs steps
+through `internal/step` has them for nothing. That is why there is no
+capability for them: like `network = False`, every engine is held to them.
+
+- An engine that starts a step's container some other way owes the same four
+  things: each service answers to its name from the step, the step does not
+  start until `ready` succeeds in the service's container, a step with
+  `network = False` reaches its services and nothing else, and nothing of them
+  is left when the step ends or is cancelled.
+- A worker that is killed leaves its steps' services running, and they do not
+  end by themselves. `step.Sweep` removes what an earlier life of a worker
+  left; a durable engine's worker calls it as it starts, as Hatchet's does in
+  `Engine.Work`. It goes by the worker's name, so call it only where that name
+  belongs to one worker.
+- The compile targets start services with the same Docker commands, written
+  out as shell (`startServices` in `internal/compile`). A change to how a
+  worker starts them needs making there too.
+- For Kubernetes Jobs, unbuilt: services would be sidecar containers in the
+  step's pod, `ready` a startup probe, and the names `hostAliases` for
+  127.0.0.1. Two services on one port could not share a pod.
 
 ### Tracing
 

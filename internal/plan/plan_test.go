@@ -544,3 +544,56 @@ def pipeline(ctx):
 		t.Errorf("err = %v, want a script with neither function refused", err)
 	}
 }
+
+func TestServices(t *testing.T) {
+	p := mustEval(t, `
+db = service("postgres", image = "postgres:17", env = {"POSTGRES_PASSWORD": "pw"},
+             ready = "pg_isready -h localhost")
+
+def ci(ctx):
+    return [
+        step("plain", image = "i", run = "r"),
+        step("tests", image = "i", run = "r", services = [
+            db,
+            service("store", image = "minio/minio", args = ["server", "/data"]),
+        ]),
+    ]
+`)
+	// A plan from before the field existed is unchanged.
+	out, err := json.Marshal(p.Steps[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "services") {
+		t.Errorf("a step with no services mentions them in its plan: %s", out)
+	}
+	got := p.Steps[1].Services
+	if len(got) != 2 {
+		t.Fatalf("services = %+v, want two", got)
+	}
+	if got[0].Name != "postgres" || got[0].Image != "postgres:17" || got[0].Env["POSTGRES_PASSWORD"] != "pw" || got[0].Ready != "pg_isready -h localhost" {
+		t.Errorf("first service = %+v", got[0])
+	}
+	if strings.Join(got[1].Args, " ") != "server /data" {
+		t.Errorf("args = %q", got[1].Args)
+	}
+	if err := p.Validate(); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+
+	one := func(services string) string {
+		return "def ci(ctx):\n    return [step(\"a\", image = \"i\", run = \"r\", services = [" + services + "])]\n"
+	}
+	// The name is a host name.
+	wantError(t, one(`service("Post_gres", image = "i")`), "host name")
+	wantError(t, one(`service("db", image = "")`), "image")
+	wantError(t, one(`service("db", image = "i", ready = "a\nb")`), "one line")
+	wantError(t, one(`service("db", image = "i"), service("db", image = "j")`), "listed twice")
+	wantError(t, one(`"postgres:17"`), "service(...)")
+
+	// And a plan that arrives as JSON is held to the same.
+	p.Steps[1].Services[1].Name = "postgres"
+	if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "listed twice") {
+		t.Errorf("Validate of a plan with one service name twice = %v", err)
+	}
+}

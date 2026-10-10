@@ -113,6 +113,10 @@ func (e *Engine) Work(ctx context.Context) error {
 	for k, v := range e.opts.Labels {
 		labels[k] = v
 	}
+	// Before any work is taken: the services of steps this worker was
+	// running when it was last killed are still there, and their steps have
+	// been or will be given to someone else.
+	step.Sweep(e.opts.Machine.Worker)
 	worker, err := e.client.NewWorker("starci-"+e.opts.Machine.Worker,
 		sdk.WithWorkflows(e.tasks.All()...),
 		sdk.WithSlots(slots),

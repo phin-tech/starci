@@ -153,6 +153,7 @@ func predeclared() starlark.StringDict {
 	return starlark.StringDict{
 		"step":     starlark.NewBuiltin("step", stepBuiltin),
 		"tool":     starlark.NewBuiltin("tool", toolBuiltin),
+		"service":  starlark.NewBuiltin("service", serviceBuiltin),
 		"run":      starlark.NewBuiltin("run", runBuiltin),
 		"parallel": starlark.NewBuiltin("parallel", parallelBuiltin),
 		"schedule": starlark.NewBuiltin("schedule", scheduleBuiltin),

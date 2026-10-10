@@ -138,3 +138,16 @@ func TestExamplesCompileForCircleCI(t *testing.T) {
 		})
 	}
 }
+
+func TestCircleCIStartsAJobsServicesAndStopsThem(t *testing.T) {
+	out := compileCircle(t, withServices, Options{})
+	wants(t, out,
+		"      - run:\n          name: \"Services: postgres, store\"\n",
+		`            docker network create "starci-$CIRCLE_BUILD_NUM-api-tests"`+"\n",
+		`--network-alias postgres --hostname postgres -e 'POSTGRES_PASSWORD=it'\''s' postgres:17`+"\n",
+		`            until timeout 10 docker exec "starci-$CIRCLE_BUILD_NUM-api-tests-postgres" sh -c 'pg_isready -h localhost'; do`+"\n",
+		`  --network "starci-$CIRCLE_BUILD_NUM-api-tests" \`+"\n",
+		"      - run:\n          name: Stop the services\n          when: always\n",
+		`            docker network rm "starci-$CIRCLE_BUILD_NUM-api-tests" || true`+"\n",
+	)
+}

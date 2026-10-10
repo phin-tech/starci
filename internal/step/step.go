@@ -116,6 +116,22 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	if err != nil {
 		return failed("%v", err)
 	}
+	// A service's image is part of what the step ran against, so it is
+	// identified by content like the step's own: a tag can move.
+	var serviceIDs [][]any
+	for _, sv := range s.Services {
+		done := phase(ctx, "find the image of "+sv.Name)
+		svImg, err := inspectImage(sv.Image)
+		done()
+		if err != nil {
+			return failed("service %q: %v", sv.Name, err)
+		}
+		env := [][2]string{}
+		for _, k := range sortedKeys(sv.Env) {
+			env = append(env, [2]string{k, sv.Env[k]})
+		}
+		serviceIDs = append(serviceIDs, []any{sv.Name, svImg.id, env, sv.Args, sv.Ready})
+	}
 	var tools []installed
 	for _, t := range s.Tools {
 		done := phase(ctx, "install "+t.Name)
@@ -137,7 +153,7 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	// from them: that image differs from machine to machine and from day to
 	// day, and a key made from it could never be shared or even looked up
 	// without building first.
-	resultKey := key(s, img, content, toolIDs)
+	resultKey := key(s, img, content, toolIDs, serviceIDs)
 	results := cfg.store()
 	if s.Cache {
 		done := phase(ctx, "look for an earlier pass")
@@ -172,7 +188,27 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	// docker client alone leaves the container running.
 	container := "starci-" + filepath.Base(root)
 	args := []string{"run", "--rm", "--name", container, "-v", co.workspace + ":/workspace", "-w", "/workspace"}
-	if s.Offline {
+	var services sidecars
+	switch {
+	case len(s.Services) > 0:
+		log("starting " + strings.Join(serviceNames(s), ", "))
+		done := phase(ctx, "start the services")
+		up, stop, err := startServices(ctx, container, cfg.Worker, s)
+		done()
+		// Deferred before the error is looked at: some may have started.
+		defer stop()
+		if ctx.Err() != nil {
+			return failed("cancelled")
+		}
+		if err != nil {
+			return failed("%v", err)
+		}
+		services = up
+		// The network is internal when the step gave up the network, so it
+		// reaches its services and nothing else.
+		// Labelled like them, so that Sweep clears the network's last user too.
+		args = append(args, "--network", up.network, "--label", ownerLabel+"="+cfg.Worker)
+	case s.Offline:
 		args = append(args, "--network", "none")
 	}
 	for _, name := range sortedKeys(s.Caches) {
@@ -222,6 +258,12 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 		var exit *exec.ExitError
 		if errors.As(runErr, &exit) {
 			code = exit.ExitCode()
+		}
+		// A step that fails against a service often fails because of it.
+		for _, name := range serviceNames(s) {
+			if said := services.tail(name); said != "" {
+				log("the last of what " + name + " said:\n" + said)
+			}
 		}
 		r := failed("exit code %d after %.1fs\n%s", code, seconds, strings.Join(tail, "\n"))
 		r.Seconds, r.Output = seconds, output.String()
@@ -362,7 +404,7 @@ func (co *checkout) materialise(inputs []string) error {
 // key covers everything that decides a step's outcome, as far as starci can
 // know. The step's name is deliberately absent: renaming a step is not a
 // reason to run it again.
-func key(s plan.Step, img image, content string, tools [][]string) string {
+func key(s plan.Step, img image, content string, tools [][]string, services [][]any) string {
 	env := [][2]string{}
 	for _, k := range sortedKeys(s.Env) {
 		env = append(env, [2]string{k, s.Env[k]})
@@ -376,9 +418,21 @@ func key(s plan.Step, img image, content string, tools [][]string) string {
 	if s.Offline {
 		parts = append(parts, "offline")
 	}
+	// Likewise only said when there are some.
+	if len(services) > 0 {
+		parts = append(parts, "services", services)
+	}
 	material, _ := json.Marshal(parts)
 	sum := sha256.Sum256(material)
 	return hex.EncodeToString(sum[:])
+}
+
+func serviceNames(s plan.Step) []string {
+	names := make([]string, len(s.Services))
+	for i, sv := range s.Services {
+		names[i] = sv.Name
+	}
+	return names
 }
 
 func sortedKeys(m map[string]string) []string {

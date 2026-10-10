@@ -237,12 +237,25 @@ func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) erro
 		mounts = append(mounts, fmt.Sprintf("-v \"$RUNNER_TEMP/starci-cache/%s:%s\"", name, s.Caches[name]))
 	}
 
+	// A run can be tried again on a runner that is kept, so the attempt is
+	// part of what the services and their network are called.
+	network := "starci-$GITHUB_RUN_ID-${GITHUB_RUN_ATTEMPT:-1}-" + id
+	if len(s.Services) > 0 {
+		fmt.Fprintf(w, "      - name: %s\n%s        run: |\n", q("Services: "+strings.Join(serviceNames(s), ", ")), skip)
+		for _, l := range startServices(s, network) {
+			fmt.Fprintf(w, "          %s\n", l)
+		}
+	}
+
 	// The command travels in an environment variable, so that nothing in it
 	// needs escaping for the shell that starts the container.
 	fmt.Fprintf(w, "      - name: %s\n%s        env:\n          STARCI_RUN: %s\n        run: |\n", q(s.Name), skip, block(s.Run, "            "))
 	var args []string
 	args = append(args, "-v \"$PWD:/workspace\"", "-w /workspace")
-	if s.Offline {
+	switch {
+	case len(s.Services) > 0:
+		args = append(args, fmt.Sprintf("--network \"%s\"", network))
+	case s.Offline:
 		args = append(args, "--network none")
 	}
 	args = append(args, mounts...)
@@ -271,10 +284,81 @@ func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) erro
 	}
 	fmt.Fprintf(w, "            %s sh -c \"$STARCI_RUN\"\n", image)
 
+	if len(s.Services) > 0 {
+		// Whatever became of the step: a runner that is kept would otherwise
+		// keep its services too.
+		always := "always()"
+		if s.Cache {
+			always += " && steps.passed.outputs.cache-hit != 'true'"
+		}
+		fmt.Fprintf(w, "      - name: Stop the services\n        if: %s\n        run: |\n", always)
+		for _, l := range stopServices(s, network) {
+			fmt.Fprintf(w, "          %s\n", l)
+		}
+	}
 	if s.Cache {
 		fmt.Fprintf(w, "      - name: Remember this pass\n%s        run: mkdir -p \"$RUNNER_TEMP/starci-passed\" && date > \"$RUNNER_TEMP/starci-passed/at\"\n", skip)
 	}
 	return nil
+}
+
+func serviceNames(s plan.Step) []string {
+	names := make([]string, len(s.Services))
+	for i, sv := range s.Services {
+		names[i] = sv.Name
+	}
+	return names
+}
+
+// startServices is the shell that does for a job what a worker does for a
+// step with services: a network for this job alone, each service on it under
+// its own name, and no going on until each says it is ready. network is the
+// network's name, as shell: it may hold variables.
+func startServices(s plan.Step, network string) []string {
+	create := "docker network create "
+	if s.Offline {
+		// Without the network a step still reaches its services, and they
+		// reach nothing else either.
+		create += "--internal "
+	}
+	lines := []string{fmt.Sprintf("%s\"%s\"", create, network)}
+	for _, sv := range s.Services {
+		run := fmt.Sprintf("docker run -d --name \"%s-%s\" --network \"%s\" --network-alias %s --hostname %s", network, sv.Name, network, sv.Name, sv.Name)
+		for _, k := range sortedKeys(sv.Env) {
+			run += " -e " + shq(k+"="+sv.Env[k])
+		}
+		run += " " + sv.Image
+		for _, a := range sv.Args {
+			run += " " + shq(a)
+		}
+		lines = append(lines, run)
+	}
+	for _, sv := range s.Services {
+		if sv.Ready == "" {
+			continue
+		}
+		// Two minutes, as a worker allows, by the clock: a try that hangs is
+		// cut short, and counts against the same two minutes.
+		lines = append(lines,
+			"until=$(($(date +%s) + 120))",
+			fmt.Sprintf("until timeout 10 docker exec \"%s-%s\" sh -c %s; do", network, sv.Name, shq(sv.Ready)),
+			"  if [ \"$(date +%s)\" -ge \"$until\" ]; then",
+			fmt.Sprintf("    echo \"service %s was not ready after 2 minutes\"", sv.Name),
+			fmt.Sprintf("    docker logs --tail 20 \"%s-%s\"", network, sv.Name),
+			"    exit 1",
+			"  fi",
+			"  sleep 0.5",
+			"done")
+	}
+	return lines
+}
+
+func stopServices(s plan.Step, network string) []string {
+	var lines []string
+	for _, sv := range s.Services {
+		lines = append(lines, fmt.Sprintf("docker rm -f -v \"%s-%s\" || true", network, sv.Name))
+	}
+	return append(lines, fmt.Sprintf("docker network rm \"%s\" || true", network))
 }
 
 // stepKey is everything about a step, other than its inputs' contents, that
@@ -293,6 +377,11 @@ func stepKey(s plan.Step, arch string) string {
 	// Only said when it is off, so that every other step keeps its key.
 	if s.Offline {
 		parts = append(parts, "offline")
+	}
+	// Likewise only said when there are some. A service's image is known
+	// here by its name alone, as the step's is: nothing has been pulled.
+	if len(s.Services) > 0 {
+		parts = append(parts, "services", s.Services)
 	}
 	material, _ := json.Marshal(parts)
 	sum := sha256.Sum256(material)
