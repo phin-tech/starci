@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -35,9 +36,28 @@ const maxOutput = 2 << 30
 // that stays inside the output, and unpacking refuses the same again, since
 // what comes back from a store is trusted no further.
 
-// packOutput writes the output at rel, a path inside workspace, to the file at
-// dest, and returns its digest.
-func packOutput(workspace, rel, dest string) (digest string, err error) {
+// packOutput writes the output at rel, a path inside the workspace that root
+// is opened on, to the file at dest, and returns its digest.
+//
+// The worker reads the output from its own side of the workspace, where a
+// link means what it means on the worker and not what it meant in the step's
+// container. So everything is read through root, which will not follow a
+// path out of the workspace, and a link anywhere on the way to the output is
+// refused: `ln -s /run/secrets out` would otherwise make an output of
+// whatever the worker can read.
+func packOutput(root *os.Root, rel, dest string) (digest string, err error) {
+	parts := strings.Split(rel, "/")
+	for i := 1; i < len(parts); i++ {
+		dir := strings.Join(parts[:i], "/")
+		info, err := root.Lstat(filepath.FromSlash(dir))
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return "", fmt.Errorf("%s is a link, and an output cannot be reached through one", dir)
+		}
+	}
+
 	out, err := os.Create(dest)
 	if err != nil {
 		return "", err
@@ -51,19 +71,13 @@ func packOutput(workspace, rel, dest string) (digest string, err error) {
 	limited := &capped{w: io.MultiWriter(out, sum), left: maxOutput}
 	tw := tar.NewWriter(limited)
 
-	top := filepath.Join(workspace, filepath.FromSlash(rel))
-	// WalkDir visits in lexical order and does not follow links, which are
-	// the two things the archive's being repeatable and safe depend on.
-	err = filepath.WalkDir(top, func(file string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		within, err := filepath.Rel(workspace, file)
-		if err != nil {
-			return err
-		}
-		name := filepath.ToSlash(within)
-		info, err := d.Info()
+	// Entries are written in name order and links are recorded, never
+	// followed, which are the two things the archive's being repeatable and
+	// safe depend on.
+	var add func(name string) error
+	add = func(name string) error {
+		local := filepath.FromSlash(name)
+		info, err := root.Lstat(local)
 		if err != nil {
 			return err
 		}
@@ -71,10 +85,39 @@ func packOutput(workspace, rel, dest string) (digest string, err error) {
 		switch {
 		case info.Mode().IsRegular():
 			h.Typeflag, h.Size = tar.TypeReg, info.Size()
+			if err := tw.WriteHeader(h); err != nil {
+				return err
+			}
+			f, err := root.Open(local)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			_, err = io.Copy(tw, f)
+			return err
 		case info.IsDir():
 			h.Typeflag, h.Name = tar.TypeDir, name+"/"
+			if err := tw.WriteHeader(h); err != nil {
+				return err
+			}
+			dir, err := root.Open(local)
+			if err != nil {
+				return err
+			}
+			entries, err := dir.ReadDir(-1)
+			dir.Close()
+			if err != nil {
+				return err
+			}
+			sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+			for _, e := range entries {
+				if err := add(name + "/" + e.Name()); err != nil {
+					return err
+				}
+			}
+			return nil
 		case info.Mode()&fs.ModeSymlink != 0:
-			target, err := os.Readlink(file)
+			target, err := root.Readlink(local)
 			if err != nil {
 				return err
 			}
@@ -82,23 +125,11 @@ func packOutput(workspace, rel, dest string) (digest string, err error) {
 				return fmt.Errorf("%s is a link to %s, which is outside the output", name, target)
 			}
 			h.Typeflag, h.Linkname = tar.TypeSymlink, target
-		default:
-			return fmt.Errorf("%s is neither a file, a directory nor a link", name)
+			return tw.WriteHeader(h)
 		}
-		if err := tw.WriteHeader(h); err != nil {
-			return err
-		}
-		if h.Typeflag != tar.TypeReg {
-			return nil
-		}
-		f, err := os.Open(file)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		_, err = io.Copy(tw, f)
-		return err
-	})
+		return fmt.Errorf("%s is neither a file, a directory nor a link", name)
+	}
+	err = add(rel)
 	if err == nil {
 		err = tw.Close()
 	}
@@ -234,13 +265,18 @@ func (c *capped) Write(p []byte) (int, error) {
 // goes into the step's result: each path with its digest. scratch is a
 // directory to work in.
 func keep(ctx context.Context, results Store, workspace, scratch string, outputs []string, log func(string)) (map[string]string, error) {
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
 	kept := map[string]string{}
 	for i, rel := range outputs {
-		if _, err := os.Lstat(filepath.Join(workspace, filepath.FromSlash(rel))); err != nil {
+		archive := filepath.Join(scratch, fmt.Sprintf("output-%d.tar", i))
+		digest, err := packOutput(root, rel, archive)
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("it declares the output %s and did not produce it", rel)
 		}
-		archive := filepath.Join(scratch, fmt.Sprintf("output-%d.tar", i))
-		digest, err := packOutput(workspace, rel, archive)
 		if err != nil {
 			return nil, fmt.Errorf("output %s: %v", rel, err)
 		}

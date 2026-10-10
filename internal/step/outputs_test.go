@@ -135,6 +135,50 @@ func TestAnOutputMayNotLeadOutOfItself(t *testing.T) {
 	}
 }
 
+// The worker reads an output from its own side of the workspace, so a link
+// on the way to one would be followed on the worker: to its tokens, or to
+// whatever else it can read. Neither a link the step makes nor one the
+// commit holds may make an output of a file outside the workspace.
+func TestAnOutputCannotBeReachedThroughALink(t *testing.T) {
+	needDocker(t)
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "token"), []byte("the worker's secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := newRepo(t)
+	// In the commit: a link out of the repository, and one to a directory
+	// within it.
+	if err := os.Symlink(outside, filepath.Join(r.dir, "committed")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real", filepath.Join(r.dir, "sideways")); err != nil {
+		t.Fatal(err)
+	}
+	sha := r.commit(map[string]string{"real/file.txt": "x"})
+
+	for name, s := range map[string]plan.Step{
+		"a link the step makes":       {Run: "ln -s " + outside + " made", Outputs: []string{"made/token"}},
+		"a link the commit holds":     {Run: "true", Outputs: []string{"committed/token"}},
+		"a link that is the output":   {Run: "ln -s " + outside + "/token direct", Outputs: []string{"direct"}},
+		"a link within the workspace": {Run: "true", Outputs: []string{"sideways/file.txt"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := Config{Worker: "one", StateDir: t.TempDir()}
+			s.Name = "leak"
+			got := run(t, cfg, r, sha, s)
+			if got.Status != "failed" || len(got.Outputs) != 0 {
+				t.Fatalf("%+v, want the step failed with nothing kept", got)
+			}
+			if !strings.Contains(got.Detail, "link") {
+				t.Errorf("detail = %q, want it to say a link is why", got.Detail)
+			}
+			if kept, _ := filepath.Glob(filepath.Join(cfg.StateDir, "results", "outputs", "*", "*")); len(kept) != 0 {
+				t.Errorf("something was stored: %v", kept)
+			}
+		})
+	}
+}
+
 // An archive in a store is trusted no further than the step that wrote it.
 func TestUnpackingRefusesWhatPackingWould(t *testing.T) {
 	archive := func(t *testing.T, entries ...tar.Header) (path, digest string) {
