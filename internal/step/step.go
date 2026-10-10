@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go.opentelemetry.io/otel/trace"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,6 +72,14 @@ func DefaultStateDir() (string, error) {
 	return filepath.Join(home, ".cache", "starci"), nil
 }
 
+// phase marks one part of running a step, for whoever is tracing the run:
+// where a step's time went is otherwise one number. It costs nothing when
+// nobody is. The returned function ends the phase, and may be called twice.
+func phase(ctx context.Context, name string) (done func()) {
+	_, span := trace.SpanFromContext(ctx).TracerProvider().Tracer("starci").Start(ctx, name)
+	return func() { span.End() }
+}
+
 // Run executes s against the commit sha fetched from cloneURL. Each line the
 // step prints is passed to log.
 //
@@ -89,21 +98,29 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	}
 	defer os.RemoveAll(root)
 
+	done := phase(ctx, "fetch the commit")
 	co, err := fetch(cloneURL, sha, root, cfg.GitEnv)
+	done()
 	if err != nil {
 		return failed("fetch of %s failed: %v", sha, err)
 	}
+	done = phase(ctx, "identify the inputs")
 	content, err := co.contentID(s.Inputs)
+	done()
 	if err != nil {
 		return failed("%v", err)
 	}
+	done = phase(ctx, "find the image")
 	img, err := inspectImage(s.Image)
+	done()
 	if err != nil {
 		return failed("%v", err)
 	}
 	var tools []installed
 	for _, t := range s.Tools {
+		done := phase(ctx, "install "+t.Name)
 		in, err := install(cfg.StateDir, t, img.arch)
+		done()
 		if err != nil {
 			return failed("%v", err)
 		}
@@ -125,26 +142,41 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	if s.Cache {
 		// An earlier pass whose outputs nobody holds any more is not one to
 		// reuse: the steps given them would have nothing to be given.
-		if earlier, ok := results.Get(ctx, resultKey); ok && held(ctx, results, earlier, s.Outputs) {
+		done := phase(ctx, "look for an earlier pass")
+		earlier, ok := results.Get(ctx, resultKey)
+		ok = ok && held(ctx, results, earlier, s.Outputs)
+		done()
+		if ok {
 			log(fmt.Sprintf("same image, command and inputs as a passing run on %s; not run again", earlier.Worker))
 			earlier.Name, earlier.Cached, earlier.Seconds = s.Name, true, 0
 			return earlier
 		}
 	}
 
-	if err := co.materialise(s.Inputs); err != nil {
+	done = phase(ctx, "check out the inputs")
+	err = co.materialise(s.Inputs)
+	done()
+	if err != nil {
 		return failed("checkout failed: %v", err)
 	}
 	// After the checkout, so that what another step produced stands in for
 	// whatever the repository has at the same path.
-	if err := receive(ctx, results, co.workspace, root, s.Given); err != nil {
-		return failed("%v", err)
+	if len(s.Given) > 0 {
+		done := phase(ctx, "fetch what other steps produced")
+		err := receive(ctx, results, co.workspace, root, s.Given)
+		done()
+		if err != nil {
+			return failed("%v", err)
+		}
 	}
 
 	runImage := s.Image
 	if len(s.Packages) > 0 {
 		log("preparing an image with " + strings.Join(s.Packages, ", "))
-		if runImage, err = withPackages(s.Image, img.id, s.Packages); err != nil {
+		done := phase(ctx, "prepare an image with packages")
+		runImage, err = withPackages(s.Image, img.id, s.Packages)
+		done()
+		if err != nil {
 			return failed("%v", err)
 		}
 	}
@@ -165,6 +197,8 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	args = append(args, toolMounts...)
 	args = append(args, runImage, "sh", "-c", s.Run)
 
+	done = phase(ctx, "run the command")
+	defer done()
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
@@ -190,6 +224,8 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 		log(line)
 	}
 	runErr := cmd.Wait()
+	// The command is over; what follows is the machine's doing, not its.
+	done()
 	if ctx.Err() != nil {
 		_ = exec.Command("docker", "rm", "-f", container).Run()
 		return failed("cancelled")
@@ -211,7 +247,9 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	if len(s.Outputs) > 0 {
 		// A step that passed without leaving what it said it would has not
 		// done what the steps after it are counting on.
+		done := phase(ctx, "keep the outputs")
 		kept, err := keep(ctx, results, co.workspace, root, s.Outputs, log)
+		done()
 		if err != nil {
 			r := failed("the command passed, but %v", err)
 			r.Seconds, r.Output = seconds, output.String()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	hatchetotel "github.com/hatchet-dev/hatchet/sdks/go/opentelemetry"
 	"os"
 	"sort"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"git.phin.tech/sam/starci/internal/engine"
 	"git.phin.tech/sam/starci/internal/plan"
 	"git.phin.tech/sam/starci/internal/step"
+	"git.phin.tech/sam/starci/internal/tracing"
 )
 
 // Options are what an Engine is made with. Everything here matters only to a
@@ -32,6 +34,14 @@ type Options struct {
 	Slots int
 	// Labels are what this machine offers to steps that ask.
 	Labels map[string]string
+	// Traces sends starci's spans to Hatchet as well as wherever else they
+	// go, and has Hatchet carry the trace from a run to its steps. Hatchet
+	// must have been started with SERVER_OBSERVABILITY_ENABLED.
+	Traces bool
+	// Dashboard is the address of Hatchet's dashboard, as a person reaches
+	// it. With it, the status a run posts links to the run's page there,
+	// which has each step's output and how long it took.
+	Dashboard string
 }
 
 // Engine is Hatchet, as starci uses it. It does everything an engine may:
@@ -59,7 +69,7 @@ func New(o Options) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Engine{client: client, tasks: NewTasks(client, o.Machine, o.Post, o.Reception), opts: o}, nil
+	return &Engine{client: client, tasks: NewTasks(client, o.Machine, o.Post, o.Reception, o.Dashboard), opts: o}, nil
 }
 
 func (e *Engine) Name() string { return "hatchet" }
@@ -113,6 +123,22 @@ func (e *Engine) Work(ctx context.Context) error {
 	)
 	if err != nil {
 		return err
+	}
+	if e.opts.Traces {
+		// Hatchet's own part of tracing: a span for each task, in a trace it
+		// carries from a run to its steps itself, and its collector as one
+		// more place starci's spans are sent, which is what puts them on a
+		// step's page in the dashboard.
+		theirs, err := hatchetotel.NewInstrumentor(hatchetotel.WithTracerProvider(tracing.Provider()))
+		if err != nil {
+			return fmt.Errorf("setting up traces: %w", err)
+		}
+		worker.Use(theirs.Middleware())
+		defer func() {
+			flush, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stop()
+			_ = theirs.Shutdown(flush)
+		}()
 	}
 
 	// A worker that fires schedules also looks, as it starts and from time to
