@@ -29,6 +29,7 @@ import (
 	"git.phin.tech/sam/starci/internal/forge"
 	"git.phin.tech/sam/starci/internal/plan"
 	"git.phin.tech/sam/starci/internal/step"
+	"git.phin.tech/sam/starci/internal/tracing"
 	"git.phin.tech/sam/starci/internal/trigger"
 )
 
@@ -38,15 +39,23 @@ const (
 	ScriptTask   = "ci-script"
 )
 
+// askedKey is where, in a step run's metadata, the time it was asked for is.
+const askedKey = "starci-asked"
+
 type StepInput struct {
 	CloneURL string    `json:"clone_url"`
 	SHA      string    `json:"sha"`
 	Step     plan.Step `json:"step"`
+	// Trace places the step in its run's trace, and says when it was asked
+	// for.
+	Trace tracing.Carrier `json:"trace"`
 }
 
 type PipelineInput struct {
 	Plan     plan.Plan `json:"plan"`
 	CloneURL string    `json:"clone_url"`
+	// Asked is when the run was asked for.
+	Asked time.Time `json:"asked,omitzero"`
 	// Supersedes names what this run replaces: a new run with the same value
 	// cancels any still in progress. A branch, so that a push makes the run
 	// for the previous push pointless; or the commit, for a one-off run that
@@ -71,6 +80,7 @@ type ScriptInput struct {
 	Supersedes string          `json:"supersedes"`
 	Exclusive  string          `json:"exclusive"`
 	Report     *trigger.Report `json:"report,omitempty"`
+	Asked      time.Time       `json:"asked,omitzero"`
 }
 
 // RunResult is how a run ended, in either mode.
@@ -117,6 +127,41 @@ var (
 	notEqual               = types.WorkerLabelComparator_NOT_EQUAL
 )
 
+// orNow is asked, or began for a run that was not told when it was asked for.
+func orNow(asked, began time.Time) time.Time {
+	if asked.IsZero() {
+		return began
+	}
+	return asked
+}
+
+// story is how a run went, as one log message: a line for each step, then
+// why the script ended early if it did, then how long it all took.
+func story(results []plan.Result, runErr string, elapsed time.Duration) string {
+	var lines []string
+	for _, r := range results {
+		lines = append(lines, "starci: "+r.Name+": "+summary(r))
+	}
+	if runErr != "" {
+		lines = append(lines, "starci: the script ended early: "+runErr)
+	}
+	lines = append(lines, "starci: finished in "+elapsed.Round(100*time.Millisecond).String())
+	return strings.Join(lines, "\n")
+}
+
+// summary is one step's result in a line, for the run's log.
+func summary(r plan.Result) string {
+	switch {
+	case r.Cached:
+		return "passed, reused from " + r.Worker
+	case r.Status == "passed":
+		return fmt.Sprintf("passed in %.1fs on %s", r.Seconds, r.Worker)
+	case r.Status == "skipped":
+		return "skipped: " + r.Detail
+	}
+	return r.Status + ": " + strings.SplitN(r.Detail, "\n", 2)[0]
+}
+
 // Reporter posts a run's outcome to the forge it came from. A worker that
 // holds no credentials for that forge has none to give, and says so.
 type Reporter func(ctx context.Context, to trigger.Report, s forge.Status) error
@@ -147,7 +192,14 @@ var superseded = forge.Status{State: "error", Description: "superseded by a newe
 // NewTasks defines the tasks on the client. Register them on a worker to
 // execute runs, or use them from any process to trigger and await runs. cfg,
 // post and reception matter only to a worker; reception may be nil.
-func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Reception) Tasks {
+func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Reception, dashboard string) Tasks {
+	// Every status a run posts links to the run, when there is a page to link to.
+	report := func(ctx sdk.DurableContext, post Reporter, to *trigger.Report, s forge.Status) {
+		if dashboard != "" && s.URL == "" {
+			s.URL = strings.TrimRight(dashboard, "/") + "/tenants/" + ctx.TenantId() + "/runs/" + ctx.WorkflowRunId()
+		}
+		report(ctx, post, to, s)
+	}
 	// A newer run for the same branch makes the one before it pointless.
 	// And of runs that are exclusive with one another, the one in progress
 	// stays and a newer one is turned away.
@@ -158,14 +210,26 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 
 	stepTask := client.NewStandaloneTask(StepTask,
 		func(ctx sdk.Context, in StepInput) (plan.Result, error) {
-			r := step.Run(ctx, cfg, in.CloneURL, in.SHA, in.Step, func(line string) {
-				// Hatchet rejects an empty log message; a blank line still
-				// matters for reading test output, so send it as a space.
-				if line == "" {
-					line = " "
+			out := newBatcher(func(m string) { ctx.Log(m) })
+			defer out.Close()
+			if at, err := time.Parse(time.RFC3339Nano, ctx.AdditionalMetadata()[askedKey]); err == nil {
+				in.Trace.Asked = at
+			}
+			traced, end := in.Trace.Step(ctx, in.Step.Name)
+			r := step.Run(traced, cfg, in.CloneURL, in.SHA, in.Step, out.Line)
+			end(r)
+			// A step that was not run printed nothing just now. Whoever opens
+			// it should still find what it printed when it passed, and be
+			// told that is what they are reading.
+			if r.Cached {
+				out.Line("")
+				out.Line("starci: this is what it printed when it passed:")
+				for _, line := range strings.Split(strings.TrimRight(r.Output, "\n"), "\n") {
+					out.Line(line)
 				}
-				ctx.Log(line)
-			})
+			}
+			out.Line("")
+			out.Line("starci: " + summary(r))
 			if r.Status != "passed" {
 				// An error is what marks the task failed in Hatchet, so a
 				// broken step is red in the dashboard instead of a green task
@@ -180,6 +244,16 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 
 	pipeline := client.NewStandaloneDurableTask(PipelineTask,
 		func(ctx sdk.DurableContext, in PipelineInput) (RunResult, error) {
+			began := time.Now()
+			tracing.Waited(ctx, ctx.WorkflowRunId(), in.Asked)
+			ended := func(ok bool, why string) {
+				tracing.End(ctx, tracing.Run{ID: ctx.WorkflowRunId(), Began: orNow(in.Asked, began), Repo: in.Plan.Repo, SHA: in.Plan.SHA, Mode: plan.Basic, OK: ok, Error: why})
+			}
+			var names []string
+			for _, st := range in.Plan.Steps {
+				names = append(names, st.Name)
+			}
+			ctx.Log(fmt.Sprintf("starci: %s @ %.8s, %d step(s): %s", in.Plan.Repo, in.Plan.SHA, len(names), strings.Join(names, ", ")))
 			results, err := plan.RunPlan(&in.Plan, children(ctx, client, stepTask, in.CloneURL, in.Plan.SHA))
 			if ctx.Err() != nil {
 				report(ctx, post, in.Report, superseded)
@@ -187,9 +261,12 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 			}
 			if err != nil {
 				report(ctx, post, in.Report, forge.Status{State: "error", Description: err.Error()})
+				ended(false, err.Error())
 				return RunResult{}, sdk.NewNonRetryableError(err)
 			}
-			report(ctx, post, in.Report, trigger.Outcome(results, ""))
+			ended(plan.Passed(results), "a step did not pass")
+			ctx.Log(story(results, "", time.Since(began)))
+			report(ctx, post, in.Report, trigger.Timed(trigger.Outcome(results, ""), results, time.Since(began)))
 			return RunResult{OK: plan.Passed(results), Steps: results}, nil
 		},
 		sdk.WithExecutionTimeout(time.Hour),
@@ -204,6 +281,9 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 	// answers, which a Starlark script cannot fail to do.
 	script := client.NewStandaloneDurableTask(ScriptTask,
 		func(ctx sdk.DurableContext, in ScriptInput) (RunResult, error) {
+			began := time.Now()
+			tracing.Waited(ctx, ctx.WorkflowRunId(), in.Asked)
+			ctx.Log(fmt.Sprintf("starci: %s @ %.8s, running %s", in.Context.Repo, in.Context.SHA, in.Filename))
 			runner := children(ctx, client, stepTask, in.CloneURL, in.Context.SHA)
 			results, err := plan.RunPipeline(ctx, in.Filename, []byte(in.Source), in.Context, runner)
 			if ctx.Err() != nil {
@@ -214,7 +294,9 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 			if err != nil {
 				out.Error = err.Error()
 			}
-			report(ctx, post, in.Report, trigger.Outcome(results, out.Error))
+			tracing.End(ctx, tracing.Run{ID: ctx.WorkflowRunId(), Began: orNow(in.Asked, began), Repo: in.Context.Repo, SHA: in.Context.SHA, Mode: plan.Advanced, OK: out.OK, Error: out.Error})
+			ctx.Log(story(results, out.Error, time.Since(began)))
+			report(ctx, post, in.Report, trigger.Timed(trigger.Outcome(results, out.Error), results, time.Since(began)))
 			return out, nil
 		},
 		sdk.WithExecutionTimeout(time.Hour),
@@ -294,14 +376,14 @@ func (t Tasks) Start(ctx context.Context, r trigger.Run) error {
 
 func pipelineInput(r engine.Run) PipelineInput {
 	return PipelineInput{
-		Plan: *r.Plan, CloneURL: r.CloneURL,
+		Plan: *r.Plan, CloneURL: r.CloneURL, Asked: time.Now(),
 		Supersedes: OrUnique(r.Supersedes), Exclusive: OrUnique(r.Exclusive), Report: r.Report,
 	}
 }
 
 func scriptInput(r engine.Run) ScriptInput {
 	return ScriptInput{
-		Filename: r.Filename, Source: string(r.Source), Context: r.Context, CloneURL: r.CloneURL,
+		Filename: r.Filename, Source: string(r.Source), Context: r.Context, CloneURL: r.CloneURL, Asked: time.Now(),
 		Supersedes: OrUnique(r.Supersedes), Exclusive: OrUnique(r.Exclusive), Report: r.Report,
 	}
 }
@@ -341,7 +423,16 @@ func (c *childRunner) Run(steps []plan.Step) ([]plan.Result, error) {
 		if err := single.Validate(); err != nil {
 			return nil, err
 		}
-		inputs[i] = sdk.RunManyOpt{Input: StepInput{CloneURL: c.cloneURL, SHA: c.sha, Step: steps[i]}}
+		// When a script is evaluated again after an interruption, Hatchet
+		// answers for a step it has already run only if it is asked for with
+		// exactly the same input. Where the step belongs in the trace is the
+		// same every time and goes in the input. When it was asked for is
+		// not, and goes beside it, where Hatchet does not compare.
+		asked := tracing.Ask(c.ctx.WorkflowRunId())
+		inputs[i] = sdk.RunManyOpt{
+			Input: StepInput{CloneURL: c.cloneURL, SHA: c.sha, Step: steps[i], Trace: tracing.Carrier{Parent: asked.Parent}},
+			Opts:  []sdk.RunOptFunc{sdk.WithRunMetadata(map[string]string{askedKey: asked.Asked.Format(time.RFC3339Nano)})},
+		}
 		if labels := placement(s); len(labels) > 0 {
 			inputs[i].Opts = append(inputs[i].Opts, sdk.WithDesiredWorkerLabels(labels))
 		}

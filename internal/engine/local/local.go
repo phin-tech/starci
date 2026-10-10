@@ -8,10 +8,14 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
+
+	"github.com/google/uuid"
 
 	"git.phin.tech/sam/starci/internal/engine"
 	"git.phin.tech/sam/starci/internal/plan"
 	"git.phin.tech/sam/starci/internal/step"
+	"git.phin.tech/sam/starci/internal/tracing"
 )
 
 // Runner runs each batch of steps as concurrent containers on this machine.
@@ -24,6 +28,8 @@ type Runner struct {
 	Slots int
 	// Log receives each line a step prints, with the step's name. Optional.
 	Log func(stepName, line string)
+	// RunID names the run these steps belong to, for tracing. Optional.
+	RunID string
 }
 
 func (r *Runner) Run(steps []plan.Step) ([]plan.Result, error) {
@@ -33,6 +39,12 @@ func (r *Runner) Run(steps []plan.Step) ([]plan.Result, error) {
 	}
 	gate := make(chan struct{}, slots)
 	results := make([]plan.Result, len(steps))
+
+	// Asked for now; a batch larger than the slots waits here, and says so.
+	asked := make([]tracing.Carrier, len(steps))
+	for i := range steps {
+		asked[i] = tracing.Ask(r.RunID)
+	}
 
 	var wg sync.WaitGroup
 	for i, s := range steps {
@@ -45,7 +57,12 @@ func (r *Runner) Run(steps []plan.Step) ([]plan.Result, error) {
 			if r.Log != nil {
 				log = func(line string) { r.Log(s.Name, line) }
 			}
-			results[i] = step.Run(r.Ctx, r.Config, r.CloneURL, r.SHA, s, log)
+			ctx, end := r.Ctx, func(plan.Result) {}
+			if r.RunID != "" {
+				ctx, end = asked[i].Step(ctx, s.Name)
+			}
+			results[i] = step.Run(ctx, r.Config, r.CloneURL, r.SHA, s, log)
+			end(results[i])
 		}()
 	}
 	wg.Wait()
@@ -71,13 +88,16 @@ func (e *Engine) Name() string { return "local" }
 func (e *Engine) Can() engine.Capabilities { return engine.Capabilities{} }
 
 func (e *Engine) Execute(ctx context.Context, r engine.Run) (engine.Result, error) {
-	runner := &Runner{Ctx: ctx, Config: e.Config, CloneURL: r.CloneURL, SHA: r.Context.SHA, Slots: e.Slots, Log: e.Log}
+	run := tracing.Run{ID: uuid.NewString(), Began: time.Now(), Repo: r.Context.Repo, SHA: r.Context.SHA, Mode: r.Mode}
+	runner := &Runner{Ctx: ctx, Config: e.Config, CloneURL: r.CloneURL, SHA: r.Context.SHA, Slots: e.Slots, Log: e.Log, RunID: run.ID}
 	if r.Mode == plan.Advanced {
 		results, err := plan.RunPipeline(ctx, r.Filename, r.Source, r.Context, runner)
 		out := engine.Result{OK: err == nil, Steps: results}
 		if err != nil {
 			out.Error = err.Error()
 		}
+		run.OK, run.Error = out.OK, out.Error
+		tracing.End(ctx, run)
 		return out, nil
 	}
 	if r.Plan == nil {
@@ -87,5 +107,7 @@ func (e *Engine) Execute(ctx context.Context, r engine.Run) (engine.Result, erro
 	if err != nil {
 		return engine.Result{}, err
 	}
+	run.OK, run.Error = plan.Passed(results), "a step did not pass"
+	tracing.End(ctx, run)
 	return engine.Result{OK: plan.Passed(results), Steps: results}, nil
 }

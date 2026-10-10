@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"git.phin.tech/sam/starci/internal/forge"
 	"git.phin.tech/sam/starci/internal/plan"
@@ -665,5 +666,22 @@ func TestAScheduleThatFires(t *testing.T) {
 	run, found, err = h4.recv.Scheduled(ctx, "forgejo", "sam/app", "nightly")
 	if !found || err != nil || !strings.Contains(run.Broken, `needs "zz"`) {
 		t.Errorf("a broken script: found = %v, err = %v, broken = %q", found, err, run.Broken)
+	}
+}
+
+func TestTimed(t *testing.T) {
+	results := []plan.Result{{Name: "a", Status: "passed", Cached: true}, {Name: "b", Status: "passed"}}
+	for _, c := range []struct {
+		elapsed time.Duration
+		results []plan.Result
+		want    string
+	}{
+		{5240 * time.Millisecond, results, "2 step(s) passed in 5.2s, 1 reused"},
+		{125 * time.Second, results[1:], "1 step(s) passed in 2m 05s"},
+		{400 * time.Millisecond, nil, "0 step(s) passed in 0.4s"},
+	} {
+		if got := Timed(Outcome(c.results, ""), c.results, c.elapsed).Description; got != c.want {
+			t.Errorf("got %q, want %q", got, c.want)
+		}
 	}
 }
