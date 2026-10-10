@@ -17,6 +17,7 @@ import (
 	"git.phin.tech/sam/starci/internal/engine"
 	"git.phin.tech/sam/starci/internal/plan"
 	"git.phin.tech/sam/starci/internal/step"
+	"git.phin.tech/sam/starci/internal/tracing"
 )
 
 // Options are what an Engine is made with. Everything here matters only to a
@@ -33,9 +34,9 @@ type Options struct {
 	Slots int
 	// Labels are what this machine offers to steps that ask.
 	Labels map[string]string
-	// Traces has each step send Hatchet a trace of where its time went:
-	// fetching, finding the image, looking for an earlier pass, running.
-	// Hatchet must have been started with SERVER_OBSERVABILITY_ENABLED.
+	// Traces sends starci's spans to Hatchet as well as wherever else they
+	// go, and has Hatchet carry the trace from a run to its steps. Hatchet
+	// must have been started with SERVER_OBSERVABILITY_ENABLED.
 	Traces bool
 	// Dashboard is the address of Hatchet's dashboard, as a person reaches
 	// it. With it, the status a run posts links to the run's page there,
@@ -124,15 +125,19 @@ func (e *Engine) Work(ctx context.Context) error {
 		return err
 	}
 	if e.opts.Traces {
-		tracing, err := hatchetotel.NewInstrumentor()
+		// Hatchet's own part of tracing: a span for each task, in a trace it
+		// carries from a run to its steps itself, and its collector as one
+		// more place starci's spans are sent, which is what puts them on a
+		// step's page in the dashboard.
+		theirs, err := hatchetotel.NewInstrumentor(hatchetotel.WithTracerProvider(tracing.Provider()))
 		if err != nil {
 			return fmt.Errorf("setting up traces: %w", err)
 		}
-		worker.Use(tracing.Middleware())
+		worker.Use(theirs.Middleware())
 		defer func() {
 			flush, stop := context.WithTimeout(context.Background(), 5*time.Second)
 			defer stop()
-			_ = tracing.Shutdown(flush)
+			_ = theirs.Shutdown(flush)
 		}()
 	}
 
