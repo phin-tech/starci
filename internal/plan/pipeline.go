@@ -47,6 +47,9 @@ type Result struct {
 	// Outputs is what the step left for other steps, each path it declared
 	// with the digest of what was there when it passed.
 	Outputs map[string]string `json:"outputs,omitempty"`
+	// Tests is what the step's test reports said, if it named any and they
+	// could be read. It is there whether the step passed or failed.
+	Tests *Tests `json:"tests,omitempty"`
 }
 
 func (r Result) ok() bool { return r.Status == "passed" }
@@ -333,5 +336,6 @@ func resultValue(r Result) starlark.Value {
 		"cached":  starlark.Bool(r.Cached),
 		"worker":  starlark.String(r.Worker),
 		"detail":  starlark.String(r.Detail),
+		"tests":   testsValue(r.Tests),
 	})
 }

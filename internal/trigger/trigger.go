@@ -396,7 +396,13 @@ func Outcome(results []plan.Result, runErr string) forge.Status {
 		case "skipped":
 			skipped++
 		default:
-			failed = append(failed, r.Name)
+			// Which tests, where the step said: it is the first thing
+			// anyone looking at a failed commit wants to know.
+			name := r.Name
+			if which := r.Tests.Naming(3); which != "" {
+				name += " (" + which + ")"
+			}
+			failed = append(failed, name)
 		}
 	}
 	switch {

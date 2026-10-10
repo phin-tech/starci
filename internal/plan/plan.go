@@ -146,6 +146,10 @@ type Step struct {
 	// each step in From, with the content it turned out to have. It is part
 	// of what the step's result is keyed on, as the content of an input is.
 	Given []Given `json:"given,omitempty"`
+	// Reports are test reports the step writes in its working directory, as
+	// JUnit XML. They are read when the step ends, however it ended, so
+	// that a failure can say which tests failed.
+	Reports []string `json:"reports,omitempty"`
 }
 
 // Given is one output of an earlier step, handed to a later one.
@@ -203,6 +207,11 @@ func (p *Plan) Validate() error {
 		for _, in := range s.Inputs {
 			if c := path.Clean(in); in == "" || path.IsAbs(c) || c == ".." || strings.HasPrefix(c, "../") {
 				return fmt.Errorf("step %q: input %q must be a path inside the repository", s.Name, in)
+			}
+		}
+		for _, rep := range s.Reports {
+			if !outputPath(rep) {
+				return fmt.Errorf("step %q: report %q must be a file inside the working directory, written without wildcards", s.Name, rep)
 			}
 		}
 		for _, out := range s.Outputs {
@@ -416,14 +425,14 @@ func (s *stepValue) Hash() (uint32, error) { return starlark.String(s.Name).Hash
 
 func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var name, image, run string
-	var needs, inputs, tools, packages, outputs *starlark.List
+	var needs, inputs, tools, packages, outputs, reports *starlark.List
 	var env, caches, worker, prefer, avoid *starlark.Dict
 	cache, network := true, true
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
 		"name", &name, "image", &image, "run", &run, "needs?", &needs, "env?", &env,
 		"inputs?", &inputs, "caches?", &caches, "cache?", &cache,
 		"worker?", &worker, "prefer?", &prefer, "avoid?", &avoid, "tools?", &tools,
-		"packages?", &packages, "network?", &network, "outputs?", &outputs); err != nil {
+		"packages?", &packages, "network?", &network, "outputs?", &outputs, "reports?", &reports); err != nil {
 		return nil, err
 	}
 	if name == "" || image == "" || run == "" {
@@ -495,6 +504,20 @@ func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 			return nil, err
 		}
 		s.Inputs, s.From = paths, from
+	}
+	if reports != nil {
+		seen := map[string]bool{}
+		for i := 0; i < reports.Len(); i++ {
+			v, ok := reports.Index(i).(starlark.String)
+			if !ok || !outputPath(string(v)) {
+				return nil, fmt.Errorf("step %q: reports must be files inside the working directory, written without wildcards; got %s", name, reports.Index(i).String())
+			}
+			if p := path.Clean(string(v)); !seen[p] {
+				seen[p] = true
+				s.Reports = append(s.Reports, p)
+			}
+		}
+		sort.Strings(s.Reports)
 	}
 	if outputs != nil {
 		seen := map[string]bool{}

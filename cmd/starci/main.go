@@ -328,6 +328,24 @@ func runCmd(args []string) error {
 				fmt.Println("           " + l)
 			}
 		}
+		if r.Tests != nil && r.Tests.Failed > 0 {
+			fmt.Printf("           %d test(s) failed:\n", r.Tests.Failed)
+			shown := 0
+			for _, c := range r.Tests.Cases {
+				if c.Status != "failed" || shown == 15 {
+					continue
+				}
+				shown++
+				line := c.Display()
+				if c.Message != "" {
+					line += ": " + c.Message
+				}
+				fmt.Println("             " + line)
+			}
+			if more := r.Tests.Failed - shown; more > 0 {
+				fmt.Printf("             and %d more\n", more)
+			}
+		}
 	}
 	if result.Error != "" {
 		fmt.Println("\n" + result.Error)

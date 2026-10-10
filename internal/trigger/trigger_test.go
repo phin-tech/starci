@@ -685,3 +685,18 @@ func TestTimed(t *testing.T) {
 		}
 	}
 }
+
+func TestAFailedCommitNamesTheTestsThatFailed(t *testing.T) {
+	results := []plan.Result{
+		{Name: "lint", Status: "passed"},
+		{Name: "unit", Status: "failed", Tests: &plan.Tests{Passed: 10, Failed: 5, Cases: []plan.TestCase{
+			{Name: "test_a", Status: "failed"}, {Name: "test_b", Status: "failed"}, {Name: "test_c", Status: "failed"},
+			{Name: "test_d", Status: "failed"}, {Name: "test_e", Status: "failed"},
+		}}},
+		{Name: "build", Status: "failed"},
+	}
+	got := Outcome(results, "")
+	if want := "failed: unit (test_a, test_b, test_c and 2 more), build"; got.State != "failure" || got.Description != want {
+		t.Errorf("status = %s %q, want %q", got.State, got.Description, want)
+	}
+}

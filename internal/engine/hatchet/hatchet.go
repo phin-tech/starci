@@ -13,6 +13,7 @@ package hatchet
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -154,12 +155,18 @@ func summary(r plan.Result) string {
 	switch {
 	case r.Cached:
 		return "passed, reused from " + r.Worker
+	case r.Status == "passed" && r.Tests != nil:
+		return fmt.Sprintf("passed in %.1fs on %s, %d test(s)", r.Seconds, r.Worker, r.Tests.Passed)
 	case r.Status == "passed":
 		return fmt.Sprintf("passed in %.1fs on %s", r.Seconds, r.Worker)
 	case r.Status == "skipped":
 		return "skipped: " + r.Detail
 	}
-	return r.Status + ": " + strings.SplitN(r.Detail, "\n", 2)[0]
+	line := r.Status + ": " + strings.SplitN(r.Detail, "\n", 2)[0]
+	if which := r.Tests.Naming(8); which != "" {
+		line += "; failed tests: " + which
+	}
+	return line
 }
 
 // Reporter posts a run's outcome to the forge it came from. A worker that
@@ -235,7 +242,7 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 				// broken step is red in the dashboard instead of a green task
 				// carrying a bad result. It would fail the same way again on
 				// the same inputs, so it is never retried.
-				return plan.Result{}, sdk.NewNonRetryableError(errors.New(stepFailed + r.Detail))
+				return plan.Result{}, sdk.NewNonRetryableError(errors.New(stepFailed + r.Detail + testsTail(r.Tests)))
 			}
 			return r, nil
 		},
@@ -494,13 +501,59 @@ func placement(s plan.Step) map[string]*sdk.DesiredWorkerLabel {
 func await(ref *sdk.WorkflowRunRef, name string) plan.Result {
 	res, err := ref.Result()
 	if err != nil {
-		return plan.Result{Name: name, Status: "failed", Detail: reason(err)}
+		detail, tests := withoutTests(reason(err))
+		return plan.Result{Name: name, Status: "failed", Detail: detail, Tests: tests}
 	}
 	var out plan.Result
 	if err := res.TaskOutput(StepTask).Into(&out); err != nil {
 		return plan.Result{Name: name, Status: "failed", Detail: "unreadable result: " + err.Error()}
 	}
 	return out
+}
+
+// A failed step reaches whoever asked as an error, which is a sentence and
+// nothing else. Which tests failed is what a script most wants of a failed
+// step, so it rides on the end of the sentence, encoded, and is taken off
+// again on the other side. Only the failures go: an error is no place for
+// two thousand test names.
+const testsMark = "\nstarci-tests:"
+
+// maxFailuresCarried is how many failed tests a failed step's error carries.
+const maxFailuresCarried = 200
+
+func testsTail(t *plan.Tests) string {
+	if t == nil {
+		return ""
+	}
+	carried := plan.Tests{Passed: t.Passed, Failed: t.Failed, Skipped: t.Skipped, Truncated: t.Truncated}
+	for _, c := range t.Cases {
+		if c.Status == "failed" && len(carried.Cases) < maxFailuresCarried {
+			carried.Cases = append(carried.Cases, c)
+		}
+	}
+	if len(carried.Cases) < t.Failed || len(t.Cases) > len(carried.Cases) {
+		carried.Truncated = true
+	}
+	data, err := json.Marshal(carried)
+	if err != nil {
+		return ""
+	}
+	return testsMark + base64.StdEncoding.EncodeToString(data)
+}
+
+func withoutTests(detail string) (string, *plan.Tests) {
+	i := strings.LastIndex(detail, testsMark)
+	if i < 0 {
+		return detail, nil
+	}
+	// Whatever follows the mark is not for reading, whether or not it can
+	// still be decoded: an engine that cut the error short leaves half of it.
+	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(detail[i+len(testsMark):]))
+	var tests plan.Tests
+	if err != nil || json.Unmarshal(data, &tests) != nil {
+		return detail[:i], nil
+	}
+	return detail[:i], &tests
 }
 
 // stepFailed marks an error as the step's own failure, so that reason can

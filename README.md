@@ -408,7 +408,7 @@ Runs for different branches, or for a bare commit, leave each other alone.
 
 | | |
 |---|---|
-| `step(name, image, run, needs = [], env = {}, inputs = ["."], outputs = [], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {}, tools = [], packages = [], network = True)` | Declare a container to run. Returns a handle usable in another step's `needs`, or in its `inputs` to be given this step's `outputs`. |
+| `step(name, image, run, needs = [], env = {}, inputs = ["."], outputs = [], reports = [], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {}, tools = [], packages = [], network = True)` | Declare a container to run. Returns a handle usable in another step's `needs`, or in its `inputs` to be given this step's `outputs`. |
 | `ctx.repo`, `ctx.sha`, `ctx.ref` | What is being built. `ref` is the branch. |
 | `ctx.event` | Why the run started: `"push"`, `"tag"`, `"pull_request"`, `"schedule"` or `"manual"`. |
 | `ctx.tag` | The tag's name, for a tag. |
@@ -453,6 +453,7 @@ def pipeline(ctx):
 | `run(step, allow_failure = False)` | Run one step and return its result. |
 | `parallel(steps, allow_failure = False)` | Run several together; results come back in the same order. |
 | `result.ok`, `.status`, `.output`, `.name`, `.seconds`, `.cached`, `.worker`, `.detail` | What a result carries. `output` is what the step printed, up to 64 KB. |
+| `result.tests` | What the step's [test reports](#test-reports) said: `.passed`, `.failed` and `.skipped`, each a list of tests with `.name`, `.classname`, `.file`, `.seconds` and `.message`. |
 | `fail(message)` | End the run as failed. |
 
 A step that fails ends the run, unless `allow_failure` hands the script the
@@ -690,6 +691,68 @@ when there is one. Between two workers they travel through that store. A step
 given an output its machine cannot get fails saying so, and does not run
 without it. An earlier pass whose outputs can no longer be had is not reused;
 the step runs again and keeps them again.
+
+## Test reports
+
+A failed step says `exit code 1` and the last forty lines it printed. Which
+tests failed is in there somewhere. A step that writes a JUnit XML report,
+as most test runners can, can say where it is:
+
+```python
+step("unit", image = "python:3.13", run = "pytest --junitxml=junit.xml", reports = ["junit.xml"])
+```
+
+The report is read when the step ends, whether it passed or failed, and the
+failure then names its tests wherever it is shown. On the commit:
+
+```
+failed: unit (test_math.test_divides, test_api.test_login and 3 more)
+```
+
+and in the terminal, each with the first line of why:
+
+```
+  failed   unit  12.4s on luigi
+           exit code 1 after 12.4s
+           5 test(s) failed:
+             test_math.test_divides: ZeroDivisionError: division by zero
+```
+
+In an advanced script the tests come back with the result, so a script that
+wants to run the failures again has their names and does not have to find
+them in what a step printed:
+
+```python
+def pipeline(ctx):
+    first = run(tests, allow_failure = True)
+    again = parallel([test_one(t.file + "::" + t.name) for t in first.tests.failed], allow_failure = True)
+    if [r for r in again if not r.ok]:
+        fail("failed twice")
+```
+
+`result.tests` has `.passed`, `.failed` and `.skipped`, each a list of tests
+with `.name`, `.classname`, `.file`, `.seconds` and, for a failure,
+`.message`.
+A step with no reports has empty lists. The name is the test's own, as its
+report gives it, and its class name is kept beside it and not joined to it: what
+a runner is asked to run again is spelled differently by each, and a script
+puts the parts together the way its runner wants.
+
+What to know:
+
+- **A report explains a step and never fails one.** One the step did not
+  write, or that is not JUnit XML, is a warning in the log.
+- **A result carries two thousand tests by name,** failures first, and counts
+  all of them; `.tests.truncated` says when some were left out. A failed
+  step on Hatchet carries its failures only, two hundred at most.
+- **A reused pass carries what its reports said when it passed.** Naming
+  reports is part of a step's key, so a pass from before a step had any is
+  not reused for it.
+- A report is read from inside the step's workspace only, and never through
+  a link, as an [output](#outputs) is. One may be up to 16 MB.
+- When [compiled](#where-starci-is-not-running-compiling-to-a-workflow),
+  `reports` is ignored: the job runs the same command and says only whether
+  it passed.
 
 ## Development
 

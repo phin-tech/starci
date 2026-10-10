@@ -232,6 +232,9 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	}
 
 	seconds := float64(time.Since(started).Round(100*time.Millisecond)) / float64(time.Second)
+	// Read whether the step passed or failed: it is a failure that most
+	// needs explaining.
+	tests := readReports(co.workspace, s.Reports, log)
 	if runErr != nil {
 		code := -1
 		var exit *exec.ExitError
@@ -239,11 +242,11 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 			code = exit.ExitCode()
 		}
 		r := failed("exit code %d after %.1fs\n%s", code, seconds, strings.Join(tail, "\n"))
-		r.Seconds, r.Output = seconds, output.String()
+		r.Seconds, r.Output, r.Tests = seconds, output.String(), tests
 		return r
 	}
 
-	result := plan.Result{Name: s.Name, Status: "passed", Seconds: seconds, Worker: cfg.Worker, Output: output.String()}
+	result := plan.Result{Name: s.Name, Status: "passed", Seconds: seconds, Worker: cfg.Worker, Output: output.String(), Tests: tests}
 	if len(s.Outputs) > 0 {
 		// A step that passed without leaving what it said it would has not
 		// done what the steps after it are counting on.
@@ -427,6 +430,10 @@ func key(s plan.Step, img image, content string, tools [][]string) string {
 	}
 	if len(s.Outputs) > 0 {
 		parts = append(parts, "outputs", s.Outputs)
+	}
+	// A pass that was not asked for its reports has none to hand on.
+	if len(s.Reports) > 0 {
+		parts = append(parts, "reports", s.Reports)
 	}
 	material, _ := json.Marshal(parts)
 	sum := sha256.Sum256(material)

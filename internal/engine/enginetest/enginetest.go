@@ -43,6 +43,7 @@ func Run(t *testing.T, eng engine.Engine) {
 	t.Run("a step that gave up the network has none", func(t *testing.T) { offline(t, eng, repo) })
 	t.Run("a step is given what another produced", func(t *testing.T) { outputs(t, eng, repo) })
 	t.Run("an advanced script hands one step's outputs to the next", func(t *testing.T) { advancedOutputs(t, eng, repo) })
+	t.Run("a script is handed the tests a step reported", func(t *testing.T) { reports(t, eng, repo) })
 	t.Run("an advanced script acts on what its steps return", func(t *testing.T) { advanced(t, eng, repo) })
 	t.Run("an advanced script that fails says why", func(t *testing.T) { advancedFailure(t, eng, repo) })
 	t.Run("what the engine says it can do, it does", func(t *testing.T) { claims(t, eng, repo) })
@@ -258,6 +259,25 @@ def pipeline(ctx):
 	}
 	if got := step(result, "use two").Output; got != "alpha\n" {
 		t.Errorf("use two printed %q", got)
+	}
+}
+
+// What a step's reports said has to come back through the engine with its
+// result, failed or not, for a script to act on.
+func reports(t *testing.T, eng engine.Engine, r repo) {
+	result := execute(t, eng, r, helpers+`
+def pipeline(ctx):
+    xml = "<testsuite><testcase name='one' classname='t'/><testcase name='two' classname='t' time='1.5'><failure message='not two'/></testcase></testsuite>"
+    first = run(sh("tests", "echo \"" + xml + "\" > junit.xml; exit 1", reports = ["junit.xml"], cache = False), allow_failure = True)
+    for t in first.tests.failed:
+        run(sh("again " + t.name + " of " + t.classname + " after " + t.message, "true", cache = False))
+`)
+	if got, want := statuses(result), "tests=failed again two of t after not two=passed"; got != want {
+		t.Fatalf("results:\n  %s (%s)\nwant:\n  %s", got, result.Error, want)
+	}
+	tests := step(result, "tests").Tests
+	if tests == nil || tests.Passed != 1 || tests.Failed != 1 || tests.Cases[0].Name != "two" || tests.Cases[0].Class != "t" || tests.Cases[0].Seconds != 1.5 {
+		t.Errorf("the failed step's tests = %+v", tests)
 	}
 }
 
