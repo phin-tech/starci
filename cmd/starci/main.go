@@ -43,6 +43,7 @@ import (
 	"git.phin.tech/sam/starci/internal/plan"
 	"git.phin.tech/sam/starci/internal/step"
 	s3store "git.phin.tech/sam/starci/internal/store/s3"
+	"git.phin.tech/sam/starci/internal/tracing"
 	"git.phin.tech/sam/starci/internal/trigger"
 )
 
@@ -267,6 +268,14 @@ func runCmd(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Spans go wherever the standard OTEL_EXPORTER_OTLP_* variables say,
+	// and nowhere if they say nothing.
+	_, flush, err := tracing.Export(ctx)
+	if err != nil {
+		return fmt.Errorf("setting up traces: %w", err)
+	}
+	defer flush()
+
 	var eng engine.Engine
 	if *localRun {
 		eng, err = localEngine(*slots, *verbose)
@@ -369,6 +378,10 @@ func localEngine(slots int, verbose bool) (engine.Engine, error) {
 //	                    the most a step may have here, and what one that does not say gets
 //	STARCI_SLOTS        steps to run at once (default: 4)
 //	STARCI_LABELS       what this machine offers, as k=v,k=v (e.g. gpu=true)
+//	STARCI_DASHBOARD    Hatchet's dashboard, as a person reaches it; statuses then link to the run
+//	STARCI_TRACES       true to send Hatchet a trace of where each step's time went
+//	OTEL_EXPORTER_OTLP_ENDPOINT (and the other standard OTEL_EXPORTER_OTLP_*
+//	                    variables) send the same traces to any OpenTelemetry endpoint
 func workerCmd() error {
 	name := os.Getenv("STARCI_WORKER_NAME")
 	if name == "" {
@@ -411,12 +424,17 @@ func workerCmd() error {
 		}
 	}
 
-	eng, err := onhatchet.New(onhatchet.Options{Machine: cfg, Post: reporter(forges), Reception: reception, Slots: slots, Labels: labels})
+	eng, err := onhatchet.New(onhatchet.Options{Machine: cfg, Post: reporter(forges), Reception: reception, Slots: slots, Labels: labels, Dashboard: os.Getenv("STARCI_DASHBOARD"), Traces: os.Getenv("STARCI_TRACES") == "true"})
 	if err != nil {
 		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	_, flush, err := tracing.Export(ctx)
+	if err != nil {
+		return fmt.Errorf("setting up traces: %w", err)
+	}
+	defer flush()
 	return engine.Host(eng).Work(ctx)
 }
 
