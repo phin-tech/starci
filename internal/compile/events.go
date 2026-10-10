@@ -92,6 +92,9 @@ func GitHubEvents(filename string, src []byte, o Options) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("for %s: %w", pr.name, err)
 		}
+		if err := noOutputs(p); err != nil {
+			return "", err
+		}
 		for _, f := range fields {
 			read[f] = true
 		}

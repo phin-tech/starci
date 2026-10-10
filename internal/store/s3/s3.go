@@ -16,6 +16,7 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
 	"git.phin.tech/sam/starci/internal/plan"
+	"git.phin.tech/sam/starci/internal/step"
 )
 
 // Store keeps one small JSON object per result.
@@ -100,6 +101,50 @@ func (s *Store) Put(ctx context.Context, key string, r plan.Result) error {
 	defer cancel()
 	_, err = s.client.PutObject(ctx, s.bucket, s.object(key), bytes.NewReader(data), int64(len(data)),
 		minio.PutObjectOptions{ContentType: "application/json"})
+	if err != nil {
+		return fmt.Errorf("shared store: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) blob(digest string) string {
+	name := "outputs/" + digest[:2] + "/" + digest + ".tar"
+	if s.prefix != "" {
+		name = s.prefix + "/" + name
+	}
+	return name
+}
+
+// An output can be large, so moving one is given far longer than a result.
+const blobTimeout = 10 * time.Minute
+
+func (s *Store) HasBlob(ctx context.Context, digest string) bool {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	_, err := s.client.StatObject(ctx, s.bucket, s.blob(digest), minio.StatObjectOptions{})
+	return err == nil
+}
+
+func (s *Store) GetBlob(ctx context.Context, digest, dest string) error {
+	ctx, cancel := context.WithTimeout(ctx, blobTimeout)
+	defer cancel()
+	err := s.client.FGetObject(ctx, s.bucket, s.blob(digest), dest, minio.GetObjectOptions{})
+	if minio.ToErrorResponse(err).Code == "NoSuchKey" {
+		return step.ErrNoBlob
+	}
+	if err != nil {
+		return fmt.Errorf("shared store: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) PutBlob(ctx context.Context, digest, src string) error {
+	if s.HasBlob(ctx, digest) {
+		return nil // the same content, already there
+	}
+	ctx, cancel := context.WithTimeout(ctx, blobTimeout)
+	defer cancel()
+	_, err := s.client.FPutObject(ctx, s.bucket, s.blob(digest), src, minio.PutObjectOptions{ContentType: "application/x-tar"})
 	if err != nil {
 		return fmt.Errorf("shared store: %w", err)
 	}

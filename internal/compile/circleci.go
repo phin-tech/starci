@@ -33,6 +33,9 @@ func CircleCI(p *plan.Plan, o Options) (string, error) {
 	if err := p.Validate(); err != nil {
 		return "", err
 	}
+	if err := noOutputs(p); err != nil {
+		return "", err
+	}
 
 	ids := jobIDs(p.Steps)
 	var w strings.Builder

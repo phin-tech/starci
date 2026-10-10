@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"git.phin.tech/sam/starci/internal/plan"
 )
 
 func compileEvents(t *testing.T, src string) string {
@@ -152,7 +154,14 @@ func TestEveryBasicExampleCompilesForEvents(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := GitHubEvents(file, src, Options{}); err != nil {
+		_, err = GitHubEvents(file, src, Options{})
+		// The one kind of example that is refused, and must be: compiled,
+		// its steps would run without the files they are given.
+		if p, perr := plan.Eval(file, src, plan.Context{}); perr == nil && usesOutputs(p) {
+			wantRefused(t, err)
+			continue
+		}
+		if err != nil {
 			t.Errorf("%s: %v", filepath.Base(file), err)
 		}
 	}

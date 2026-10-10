@@ -170,6 +170,10 @@ func TestExamplesCompile(t *testing.T) {
 				t.Fatal(err)
 			}
 			out, err := GitHub(p, Options{Source: filepath.Base(file), Read: read})
+			if usesOutputs(p) {
+				wantRefused(t, err)
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -182,5 +186,40 @@ func TestExamplesCompile(t *testing.T) {
 				t.Errorf("actionlint rejects the workflow:\n%s", msg)
 			}
 		})
+	}
+}
+
+func TestOutputsAreRefusedNotDropped(t *testing.T) {
+	p, err := plan.Eval("ci.star", []byte(`
+def ci(ctx):
+    build = step("build", image = "alpine:3", run = "make", outputs = ["dist"])
+    return [build, step("test", image = "alpine:3", run = "make test", inputs = [build])]
+`), plan.Context{Repo: "sam/app", SHA: "abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, compile := range map[string]func(*plan.Plan, Options) (string, error){"GitHub": GitHub, "CircleCI": CircleCI} {
+		t.Run(name, func(t *testing.T) {
+			_, err := compile(p, Options{})
+			wantRefused(t, err)
+		})
+	}
+}
+
+// usesOutputs reports whether a plan hands files from one step to another,
+// which is the one thing an example may do that cannot be compiled.
+func usesOutputs(p *plan.Plan) bool {
+	for _, s := range p.Steps {
+		if len(s.Outputs) > 0 || len(s.From) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func wantRefused(t *testing.T, err error) {
+	t.Helper()
+	if err == nil || !strings.Contains(err.Error(), "outputs, which cannot be compiled yet") {
+		t.Errorf("err = %v, want the script refused for its outputs", err)
 	}
 }

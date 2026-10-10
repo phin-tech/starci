@@ -41,6 +41,8 @@ func Run(t *testing.T, eng engine.Engine) {
 	t.Run("steps are given the commit and only their inputs", func(t *testing.T) { inputs(t, eng, repo) })
 	t.Run("a step that already passed is not run again", func(t *testing.T) { reuse(t, eng, repo) })
 	t.Run("a step that gave up the network has none", func(t *testing.T) { offline(t, eng, repo) })
+	t.Run("a step is given what another produced", func(t *testing.T) { outputs(t, eng, repo) })
+	t.Run("an advanced script hands one step's outputs to the next", func(t *testing.T) { advancedOutputs(t, eng, repo) })
 	t.Run("an advanced script acts on what its steps return", func(t *testing.T) { advanced(t, eng, repo) })
 	t.Run("an advanced script that fails says why", func(t *testing.T) { advancedFailure(t, eng, repo) })
 	t.Run("what the engine says it can do, it does", func(t *testing.T) { claims(t, eng, repo) })
@@ -214,6 +216,48 @@ def ci(ctx):
 	// A reused pass hands back what the step printed when it ran.
 	if got.Output != step(first, "once").Output || got.Output == "" {
 		t.Errorf("the reused result's output is %q, the original's %q", got.Output, step(first, "once").Output)
+	}
+}
+
+func outputs(t *testing.T, eng engine.Engine, r repo) {
+	src := helpers + `
+def ci(ctx):
+    build = sh("build", "mkdir dist && cat src/a.txt src/b.txt > dist/all.txt && ` + unique() + `", inputs = ["src"], outputs = ["dist"])
+    return [
+        build,
+        sh("use", "cat dist/all.txt; ls", inputs = ["tests", build]),
+        sh("blind", "test ! -e dist", inputs = ["tests"], needs = [build]),
+    ]
+`
+	first := execute(t, eng, r, src)
+	if got, want := statuses(first), "build=passed use=passed blind=passed"; got != want {
+		t.Fatalf("results:\n  %s\nwant:\n  %s\n%s", got, want, step(first, "use").Detail)
+	}
+	// What build left, beside the step's own inputs and nothing else.
+	if got := step(first, "use").Output; got != "alpha\nbeta\ndist\ntests\n" {
+		t.Errorf("use printed %q", got)
+	}
+	// A step that is not run again still hands on what it produced, and the
+	// step given the same thing is not run again either.
+	again := execute(t, eng, r, src)
+	if !again.OK || !step(again, "build").Cached || !step(again, "use").Cached {
+		t.Errorf("second run: %s, build cached = %v, use cached = %v; want both reused",
+			statuses(again), step(again, "build").Cached, step(again, "use").Cached)
+	}
+}
+
+func advancedOutputs(t *testing.T, eng engine.Engine, r repo) {
+	result := execute(t, eng, r, helpers+`
+def pipeline(ctx):
+    build = sh("build", "cp src/a.txt out.txt", inputs = ["src"], outputs = ["out.txt"], cache = False)
+    run(build)
+    parallel([sh("use " + n, "cat out.txt", inputs = [build], cache = False) for n in ["one", "two"]])
+`)
+	if got, want := statuses(result), "build=passed use one=passed use two=passed"; got != want {
+		t.Fatalf("results:\n  %s\nwant:\n  %s\n%s %s", got, want, result.Error, step(result, "use one").Detail)
+	}
+	if got := step(result, "use two").Output; got != "alpha\n" {
+		t.Errorf("use two printed %q", got)
 	}
 }
 

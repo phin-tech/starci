@@ -44,6 +44,9 @@ type Result struct {
 	Worker  string  `json:"worker"`
 	Cached  bool    `json:"cached"`
 	Detail  string  `json:"detail"`
+	// Outputs is what the step left for other steps, each path it declared
+	// with the digest of what was there when it passed.
+	Outputs map[string]string `json:"outputs,omitempty"`
 }
 
 func (r Result) ok() bool { return r.Status == "passed" }
@@ -124,6 +127,9 @@ type recorder struct {
 	// running a step is refused: the top level also runs just to find out
 	// which mode a script is in.
 	started bool
+	// latest is each step's most recent result, by name: what a later step
+	// that names it as an input is given the outputs of.
+	latest map[string]Result
 }
 
 // stepsFailed is the error that ends a pipeline when a step fails and the
@@ -282,6 +288,12 @@ func execute(thread *starlark.Thread, fn string, steps []Step, allowFailure bool
 			return nil, fmt.Errorf("step %q: needs has no meaning in pipeline(ctx); run steps in the order you need them", s.Name)
 		}
 	}
+	steps = append([]Step(nil), steps...)
+	for i := range steps {
+		if missing := give(&steps[i], rec.latest); missing != "" {
+			return nil, fmt.Errorf("step %q: %s", steps[i].Name, missing)
+		}
+	}
 	results, err := rec.runner.Run(steps)
 	if err != nil {
 		return nil, err
@@ -290,6 +302,12 @@ func execute(thread *starlark.Thread, fn string, steps []Step, allowFailure bool
 		return nil, fmt.Errorf("%s: ran %d steps but got %d results", fn, len(steps), len(results))
 	}
 	rec.results = append(rec.results, results...)
+	if rec.latest == nil {
+		rec.latest = map[string]Result{}
+	}
+	for _, r := range results {
+		rec.latest[r.Name] = r
+	}
 
 	if !allowFailure {
 		var failed []string

@@ -14,6 +14,8 @@ type fakeRunner struct {
 	outcomes map[string][]Result
 	seen     map[string]int
 	batches  [][]string
+	// given is what each step was handed from other steps when it was run.
+	given map[string][]Given
 }
 
 func (f *fakeRunner) Run(steps []Step) ([]Result, error) {
@@ -34,6 +36,17 @@ func (f *fakeRunner) Run(steps []Step) ([]Result, error) {
 		}
 		f.seen[s.Name]++
 		r.Name = s.Name
+		// A step that passes leaves what it declared, as a real one must.
+		if r.Status == "passed" && r.Outputs == nil && len(s.Outputs) > 0 {
+			r.Outputs = map[string]string{}
+			for _, o := range s.Outputs {
+				r.Outputs[o] = "digest of " + s.Name + "/" + o
+			}
+		}
+		if f.given == nil {
+			f.given = map[string][]Given{}
+		}
+		f.given[s.Name] = s.Given
 		out = append(out, r)
 	}
 	f.batches = append(f.batches, names)

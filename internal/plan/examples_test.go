@@ -95,6 +95,7 @@ func TestBasicExamplesDoWhatTheySay(t *testing.T) {
 	if got := plan("matrix.ci.star", exampleContexts["nothing known"]); len(got) != 5 {
 		t.Errorf("matrix: %d steps, want 5 (3 pythons x 2 databases, less one)", len(got))
 	}
+	check("outputs", plan("outputs.ci.star", exampleContexts["nothing known"]), "build, unit, browser, size")
 	check("polyglot, python and typescript touched", plan("polyglot.ci.star", exampleContexts["a code change"]), "python, typescript")
 	check("terraform, no stack touched", plan("terraform.ci.star", exampleContexts["a code change"]), "fmt")
 	check("terraform, two stacks touched", plan("terraform.ci.star", Context{ChangedFiles: []string{"stacks/prod/main.tf", "stacks/dev/vars.tf", "stacks/prod/out.tf", "stacks/README.md"}}), "fmt, validate dev, validate prod")

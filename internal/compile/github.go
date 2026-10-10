@@ -61,6 +61,9 @@ func GitHub(p *plan.Plan, o Options) (string, error) {
 	if err := p.Validate(); err != nil {
 		return "", err
 	}
+	if err := noOutputs(p); err != nil {
+		return "", err
+	}
 
 	ids := jobIDs(p.Steps)
 	var w strings.Builder
@@ -79,6 +82,19 @@ func GitHub(p *plan.Plan, o Options) (string, error) {
 		}
 	}
 	return w.String(), nil
+}
+
+// noOutputs refuses a plan in which a step hands files to another. A job
+// starts with nothing but its checkout, and getting one job's files to the
+// next is not written yet; a workflow that ran such steps without them would
+// be worse than none.
+func noOutputs(p *plan.Plan) error {
+	for _, s := range p.Steps {
+		if len(s.Outputs) > 0 || len(s.From) > 0 {
+			return fmt.Errorf("step %q uses outputs, which cannot be compiled yet: run the script with starci itself, or with `starci run --local` inside the CI tool", s.Name)
+		}
+	}
+	return nil
 }
 
 func header(w *strings.Builder, p *plan.Plan, o Options) {

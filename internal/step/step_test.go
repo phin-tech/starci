@@ -392,6 +392,7 @@ func TestPackagesNeedApt(t *testing.T) {
 type memStore struct {
 	mu      sync.Mutex
 	results map[string]plan.Result
+	blobs   map[string][]byte
 	gets    int
 	down    bool
 }
@@ -417,6 +418,40 @@ func (m *memStore) Put(_ context.Context, key string, r plan.Result) error {
 		m.results = map[string]plan.Result{}
 	}
 	m.results[key] = r
+	return nil
+}
+
+func (m *memStore) HasBlob(_ context.Context, digest string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.blobs[digest]
+	return ok && !m.down
+}
+
+func (m *memStore) GetBlob(_ context.Context, digest, dest string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	data, ok := m.blobs[digest]
+	if m.down || !ok {
+		return ErrNoBlob
+	}
+	return os.WriteFile(dest, data, 0o644)
+}
+
+func (m *memStore) PutBlob(_ context.Context, digest, src string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.down {
+		return errors.New("the shared store is unreachable")
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if m.blobs == nil {
+		m.blobs = map[string][]byte{}
+	}
+	m.blobs[digest] = data
 	return nil
 }
 

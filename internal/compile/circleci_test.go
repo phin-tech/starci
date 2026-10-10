@@ -123,6 +123,10 @@ func TestExamplesCompileForCircleCI(t *testing.T) {
 				t.Fatal(err)
 			}
 			out, err := CircleCI(p, Options{Source: filepath.Base(file), Read: read})
+			if usesOutputs(p) {
+				wantRefused(t, err)
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}

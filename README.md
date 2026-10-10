@@ -15,7 +15,7 @@ def ci(ctx):
     ]
 ```
 
-There are thirty-one worked examples in [`examples/`](examples/), in both modes.
+There are thirty-two worked examples in [`examples/`](examples/), in both modes.
 
 ## Status
 
@@ -251,6 +251,8 @@ workflow says which apply:
   machines by resource class, not by label.
 - Advanced scripts cannot be compiled at all: their steps are only known as
   they run.
+- A script whose steps hand [outputs](#outputs) to one another is refused,
+  not compiled without them. Running starci inside the CI tool, below, works.
 
 The CircleCI output keys a pass on the exact list of files the inputs select,
 asked of git the way a worker asks, where the GitHub output has to make do
@@ -376,7 +378,7 @@ Runs for different branches, or for a bare commit, leave each other alone.
 
 | | |
 |---|---|
-| `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {}, tools = [], packages = [], network = True)` | Declare a container to run. Returns a handle usable in another step's `needs`. |
+| `step(name, image, run, needs = [], env = {}, inputs = ["."], outputs = [], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {}, tools = [], packages = [], network = True)` | Declare a container to run. Returns a handle usable in another step's `needs`, or in its `inputs` to be given this step's `outputs`. |
 | `ctx.repo`, `ctx.sha`, `ctx.ref` | What is being built. `ref` is the branch. |
 | `ctx.event` | Why the run started: `"push"`, `"tag"`, `"pull_request"`, `"schedule"` or `"manual"`. |
 | `ctx.tag` | The tag's name, for a tag. |
@@ -602,6 +604,62 @@ trust to run steps honestly.
 
 `caches = {"bun": "/root/.bun/install/cache"}` keeps a directory between runs
 on a worker. It makes a step that does run faster, and is not part of the key.
+
+## Outputs
+
+A step sees its inputs and leaves nothing behind, unless it says what it
+leaves:
+
+```python
+def ci(ctx):
+    build = step("build", image = "node:22", run = "npm ci && npm run build",
+                 inputs = ["src", "package.json", "package-lock.json"],
+                 outputs = ["dist"])
+    return [
+        build,
+        step("unit", image = "node:22", run = "node --test tests/unit", inputs = ["tests/unit", build]),
+        step("size", image = "node:22", run = "du -sk dist", inputs = [build]),
+    ]
+```
+
+`outputs` names files or directories in the step's working directory, without
+patterns. A step listed among another's `inputs` stands for its outputs: the
+second step is given them at the paths they were made at, and waits for the
+first without `needs` being written. A step can be given outputs and nothing
+from the repository.
+
+An output is an input like any other. It is kept under a checksum of its
+content, and that checksum is part of the key of every step given it:
+
+- A step that builds the same files as last time hands on the same output,
+  so the steps given it are not run again. File times are not part of it;
+  names, contents, modes and links are.
+- A step that is skipped because of an earlier pass still hands on what that
+  pass produced. The step given it cannot tell the difference.
+- A step that was not given an output does not see it, even at the same path
+  on the same machine.
+
+A step that passes without producing an output it declared has failed, and
+says which. So has one whose output holds a link that leads outside it, or
+anything that is not a file, a directory or a link. An output replaces
+whatever the repository has at its path: a step given `dist` sees what was
+built there and nothing the commit happens to hold. One output may be up to
+2 GB.
+
+In an advanced script it reads the same, and what a step is given is what the
+named step produced the last time it passed in this run:
+
+```python
+def pipeline(ctx):
+    run(build)
+    parallel([test(f, inputs = ["tests/" + f, build]) for f in files])
+```
+
+Outputs are kept where results are: on the machine, and in the shared store
+when there is one. Between two workers they travel through that store. A step
+given an output its machine cannot get fails saying so, and does not run
+without it. An earlier pass whose outputs can no longer be had is not reused;
+the step runs again and keeps them again.
 
 ## Development
 

@@ -3,6 +3,8 @@ package step
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -20,7 +22,19 @@ type Store interface {
 	// step being run, never a wrong answer.
 	Get(ctx context.Context, key string) (plan.Result, bool)
 	Put(ctx context.Context, key string, r plan.Result) error
+
+	// A store also keeps the outputs of steps: archives, each under the
+	// checksum of its content. GetBlob writes one to the file at dest, and
+	// returns ErrNoBlob if the store does not have it. PutBlob stores the
+	// file at src. Whoever takes a blob out checks it against its digest, so
+	// a store need not.
+	GetBlob(ctx context.Context, digest, dest string) error
+	PutBlob(ctx context.Context, digest, src string) error
+	HasBlob(ctx context.Context, digest string) bool
 }
+
+// ErrNoBlob is what GetBlob returns for a blob a store does not hold.
+var ErrNoBlob = errors.New("not in the store")
 
 // FileStore keeps results as files under dir. It is fast and private to one
 // machine.
@@ -67,6 +81,60 @@ func (f FileStore) Put(_ context.Context, key string, r plan.Result) error {
 	return os.Rename(tmp.Name(), path)
 }
 
+func (f FileStore) blob(digest string) string {
+	return filepath.Join(f.Dir, "outputs", digest[:2], digest+".tar")
+}
+
+func (f FileStore) HasBlob(_ context.Context, digest string) bool {
+	_, err := os.Stat(f.blob(digest))
+	return err == nil
+}
+
+func (f FileStore) GetBlob(_ context.Context, digest, dest string) error {
+	err := copyFile(f.blob(digest), dest)
+	if errors.Is(err, os.ErrNotExist) {
+		return ErrNoBlob
+	}
+	return err
+}
+
+func (f FileStore) PutBlob(_ context.Context, digest, src string) error {
+	path := f.blob(digest)
+	if _, err := os.Stat(path); err == nil {
+		return nil // the same content, already here
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-")
+	if err != nil {
+		return err
+	}
+	tmp.Close()
+	if err := copyFile(src, tmp.Name()); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
+func copyFile(src, dest string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(out, in)
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
 // Layered reads from Near first and falls back to Far, and writes to both.
 // Near is this machine's own store; Far is one shared between machines. A
 // result found only in Far is copied to Near, so that it is asked for once.
@@ -92,3 +160,37 @@ func (l Layered) Put(ctx context.Context, key string, r plan.Result) error {
 	}
 	return nearErr
 }
+
+func (l Layered) HasBlob(ctx context.Context, digest string) bool {
+	return l.Near.HasBlob(ctx, digest) || l.Far.HasBlob(ctx, digest)
+}
+
+func (l Layered) GetBlob(ctx context.Context, digest, dest string) error {
+	if err := l.Near.GetBlob(ctx, digest, dest); err == nil {
+		return nil
+	}
+	if err := l.Far.GetBlob(ctx, digest, dest); err != nil {
+		return err
+	}
+	_ = l.Near.PutBlob(ctx, digest, dest)
+	return nil
+}
+
+// PutBlob stores the blob in both. One that is kept here but did not reach
+// the shared store comes back as NotShared, which says so.
+func (l Layered) PutBlob(ctx context.Context, digest, src string) error {
+	if err := l.Near.PutBlob(ctx, digest, src); err != nil {
+		return err
+	}
+	if err := l.Far.PutBlob(ctx, digest, src); err != nil {
+		return &NotShared{err}
+	}
+	return nil
+}
+
+// NotShared is the error for something stored on this machine that could not
+// be stored where other machines would find it.
+type NotShared struct{ Err error }
+
+func (e *NotShared) Error() string { return e.Err.Error() }
+func (e *NotShared) Unwrap() error { return e.Err }

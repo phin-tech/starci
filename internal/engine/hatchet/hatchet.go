@@ -336,7 +336,9 @@ func (c *childRunner) Run(steps []plan.Step) ([]plan.Result, error) {
 		// Steps of a basic plan were validated as a whole; these may come
 		// one at a time from a script, so each is checked on its own. Its
 		// needs are the caller's business, not the engine's.
-		s.Needs = nil
+		// Nor is where its outputs come from: what it is given is already
+		// written on it.
+		s.Needs, s.From = nil, nil
 		single.Steps = []plan.Step{s}
 		if err := single.Validate(); err != nil {
 			return nil, err

@@ -123,7 +123,9 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	resultKey := key(s, img, content, toolIDs)
 	results := cfg.store()
 	if s.Cache {
-		if earlier, ok := results.Get(ctx, resultKey); ok {
+		// An earlier pass whose outputs nobody holds any more is not one to
+		// reuse: the steps given them would have nothing to be given.
+		if earlier, ok := results.Get(ctx, resultKey); ok && held(ctx, results, earlier, s.Outputs) {
 			log(fmt.Sprintf("same image, command and inputs as a passing run on %s; not run again", earlier.Worker))
 			earlier.Name, earlier.Cached, earlier.Seconds = s.Name, true, 0
 			return earlier
@@ -132,6 +134,11 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 
 	if err := co.materialise(s.Inputs); err != nil {
 		return failed("checkout failed: %v", err)
+	}
+	// After the checkout, so that what another step produced stands in for
+	// whatever the repository has at the same path.
+	if err := receive(ctx, results, co.workspace, root, s.Given); err != nil {
+		return failed("%v", err)
 	}
 
 	runImage := s.Image
@@ -201,6 +208,17 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	}
 
 	result := plan.Result{Name: s.Name, Status: "passed", Seconds: seconds, Worker: cfg.Worker, Output: output.String()}
+	if len(s.Outputs) > 0 {
+		// A step that passed without leaving what it said it would has not
+		// done what the steps after it are counting on.
+		kept, err := keep(ctx, results, co.workspace, root, s.Outputs, log)
+		if err != nil {
+			r := failed("the command passed, but %v", err)
+			r.Seconds, r.Output = seconds, output.String()
+			return r
+		}
+		result.Outputs = kept
+	}
 	if s.Cache {
 		// Only passes are remembered. A failure is always worth running again.
 		// Not being able to remember one is worth saying, but the step passed.
@@ -276,6 +294,12 @@ func pathspec(input string) string {
 // A new file that matches a pattern changes the id; one that does not, does
 // not.
 func (co *checkout) contentID(inputs []string) (string, error) {
+	// A step given only what other steps produced takes nothing from the
+	// commit. Asked with no pathspec at all, git would answer with all of it.
+	if len(inputs) == 0 {
+		sum := sha256.Sum256(nil)
+		return hex.EncodeToString(sum[:]), nil
+	}
 	// Each input is checked on its own first: one that selects nothing is a
 	// mistake in the script, and would otherwise vanish into the union.
 	for _, in := range inputs {
@@ -323,6 +347,9 @@ func MissingInputs(dir string, inputs []string) ([]string, error) {
 }
 
 func (co *checkout) materialise(inputs []string) error {
+	if len(inputs) == 0 {
+		return nil
+	}
 	args := []string{"checkout", "-q", "FETCH_HEAD", "--"}
 	for _, in := range inputs {
 		args = append(args, pathspec(in))
@@ -347,6 +374,21 @@ func key(s plan.Step, img image, content string, tools [][]string) string {
 	// Only said when it is off, so that every other step keeps its key.
 	if s.Offline {
 		parts = append(parts, "offline")
+	}
+	// What a step is given by other steps is an input like any other: its
+	// path and its content, and not which step made it. And what it is to
+	// leave behind is part of what a pass means, so a pass that left nothing
+	// is not taken for one that would have left something.
+	if len(s.Given) > 0 {
+		given := [][2]string{}
+		for _, g := range s.Given {
+			given = append(given, [2]string{g.Path, g.Digest})
+		}
+		sort.Slice(given, func(i, j int) bool { return given[i][0] < given[j][0] })
+		parts = append(parts, "given", given)
+	}
+	if len(s.Outputs) > 0 {
+		parts = append(parts, "outputs", s.Outputs)
 	}
 	material, _ := json.Marshal(parts)
 	sum := sha256.Sum256(material)

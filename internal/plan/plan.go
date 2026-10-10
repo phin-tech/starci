@@ -133,6 +133,29 @@ type Step struct {
 	// something its inputs do not hold. It is the negative so that a plan
 	// written before the field existed still means "with the network".
 	Offline bool `json:"offline,omitempty"`
+	// Outputs are paths in the step's working directory that it produces and
+	// that are kept when it passes, for other steps to be given. They are
+	// kept under their content, so a step that is skipped because of an
+	// earlier pass hands on exactly what that pass produced.
+	Outputs []string `json:"outputs,omitempty"`
+	// From names the steps whose outputs this step is given, at the paths
+	// they were produced at. It is what a script says; Given is what that
+	// came to once those steps had run.
+	From []string `json:"from,omitempty"`
+	// Given is filled in as a run unfolds, never by a script: each output of
+	// each step in From, with the content it turned out to have. It is part
+	// of what the step's result is keyed on, as the content of an input is.
+	Given []Given `json:"given,omitempty"`
+}
+
+// Given is one output of an earlier step, handed to a later one.
+type Given struct {
+	// Step is the step that produced it.
+	Step string `json:"step"`
+	// Path is where it was produced, and where it is put.
+	Path string `json:"path"`
+	// Digest identifies its content.
+	Digest string `json:"digest"`
 }
 
 // Tool is a program a step wants on its PATH without it being in the image:
@@ -173,12 +196,18 @@ func (p *Plan) Validate() error {
 		if s.Name == "" || s.Image == "" || s.Run == "" {
 			return fmt.Errorf("step %q: name, image and run must not be empty", s.Name)
 		}
-		if len(s.Inputs) == 0 {
+		// A step given another's outputs may need nothing from the repository.
+		if len(s.Inputs) == 0 && len(s.From) == 0 && len(s.Given) == 0 {
 			return fmt.Errorf("step %q: inputs must not be empty", s.Name)
 		}
 		for _, in := range s.Inputs {
 			if c := path.Clean(in); in == "" || path.IsAbs(c) || c == ".." || strings.HasPrefix(c, "../") {
 				return fmt.Errorf("step %q: input %q must be a path inside the repository", s.Name, in)
+			}
+		}
+		for _, out := range s.Outputs {
+			if !outputPath(out) {
+				return fmt.Errorf("step %q: output %q must be a file or directory inside the working directory, written without wildcards", s.Name, out)
 			}
 		}
 		for name, dir := range s.Caches {
@@ -387,14 +416,14 @@ func (s *stepValue) Hash() (uint32, error) { return starlark.String(s.Name).Hash
 
 func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var name, image, run string
-	var needs, inputs, tools, packages *starlark.List
+	var needs, inputs, tools, packages, outputs *starlark.List
 	var env, caches, worker, prefer, avoid *starlark.Dict
 	cache, network := true, true
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
 		"name", &name, "image", &image, "run", &run, "needs?", &needs, "env?", &env,
 		"inputs?", &inputs, "caches?", &caches, "cache?", &cache,
 		"worker?", &worker, "prefer?", &prefer, "avoid?", &avoid, "tools?", &tools,
-		"packages?", &packages, "network?", &network); err != nil {
+		"packages?", &packages, "network?", &network, "outputs?", &outputs); err != nil {
 		return nil, err
 	}
 	if name == "" || image == "" || run == "" {
@@ -461,11 +490,27 @@ func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 		}
 	}
 	if inputs != nil {
-		paths, err := inputPaths(name, inputs)
+		paths, from, err := inputPaths(name, inputs)
 		if err != nil {
 			return nil, err
 		}
-		s.Inputs = paths
+		s.Inputs, s.From = paths, from
+	}
+	if outputs != nil {
+		seen := map[string]bool{}
+		for i := 0; i < outputs.Len(); i++ {
+			v, ok := outputs.Index(i).(starlark.String)
+			if !ok || !outputPath(string(v)) {
+				return nil, fmt.Errorf("step %q: outputs must be files or directories inside the working directory, written without wildcards; got %s", name, outputs.Index(i).String())
+			}
+			if p := path.Clean(string(v)); !seen[p] {
+				seen[p] = true
+				s.Outputs = append(s.Outputs, p)
+			}
+		}
+		// Sorted, as inputs are: the order they are written in is not a
+		// reason to run a step again.
+		sort.Strings(s.Outputs)
 	}
 	if caches != nil {
 		for _, item := range caches.Items() {
@@ -652,31 +697,61 @@ func (t Tool) validate() error {
 // inputPaths cleans a step's inputs to sorted, unique paths inside the
 // repository. Order and spelling must not matter, because the paths feed the
 // key a step's result is stored under.
-func inputPaths(step string, inputs *starlark.List) ([]string, error) {
-	seen := map[string]bool{}
-	paths := []string{}
+//
+// An input may also be a step, which stands for that step's outputs. Those
+// are returned apart, as the names of the steps: what they hold is not known
+// until the steps have run.
+func inputPaths(step string, inputs *starlark.List) (paths, from []string, err error) {
+	seen, seenStep := map[string]bool{}, map[string]bool{}
+	paths = []string{}
 	for i := 0; i < inputs.Len(); i++ {
+		if producer, ok := inputs.Index(i).(*stepValue); ok {
+			if len(producer.Outputs) == 0 {
+				return nil, nil, fmt.Errorf("step %q: step %q is given as an input, but declares no outputs", step, producer.Name)
+			}
+			if producer.Name == step {
+				return nil, nil, fmt.Errorf("step %q: a step cannot be given its own outputs", step)
+			}
+			if !seenStep[producer.Name] {
+				seenStep[producer.Name] = true
+				from = append(from, producer.Name)
+			}
+			continue
+		}
 		v, ok := inputs.Index(i).(starlark.String)
 		if !ok {
-			return nil, fmt.Errorf("step %q: inputs must be paths, got %s", step, inputs.Index(i).Type())
+			return nil, nil, fmt.Errorf("step %q: inputs must be paths, or steps that declare outputs; got %s", step, inputs.Index(i).Type())
 		}
 		p := path.Clean(string(v))
 		if string(v) == "" || path.IsAbs(p) || p == ".." || strings.HasPrefix(p, "../") {
-			return nil, fmt.Errorf("step %q: input %q must be a path inside the repository", step, string(v))
+			return nil, nil, fmt.Errorf("step %q: input %q must be a path inside the repository", step, string(v))
 		}
 		if !seen[p] {
 			seen[p] = true
 			paths = append(paths, p)
 		}
 	}
+	sort.Strings(from)
 	if len(paths) == 0 {
-		return nil, fmt.Errorf("step %q: inputs must not be empty (omit it to give the step the whole repository)", step)
+		if len(from) == 0 {
+			return nil, nil, fmt.Errorf("step %q: inputs must not be empty (omit it to give the step the whole repository)", step)
+		}
+		// Only what other steps produced, and nothing from the repository.
+		return paths, from, nil
 	}
 	if seen["."] {
-		return []string{"."}, nil
+		return []string{"."}, from, nil
 	}
 	sort.Strings(paths)
-	return paths, nil
+	return paths, from, nil
+}
+
+// outputPath reports whether p names one file or directory beneath a step's
+// working directory. Not the directory itself: a step that kept everything
+// would hand its inputs on as if it had made them.
+func outputPath(p string) bool {
+	c := path.Clean(p)
+	return p != "" && c != "." && !path.IsAbs(c) && c != ".." && !strings.HasPrefix(c, "../") && !strings.ContainsAny(p, "*?[")
 }
 
 func collect(result starlark.Value) ([]Step, error) {
@@ -694,9 +769,27 @@ func collect(result starlark.Value) ([]Step, error) {
 		if !ok {
 			return nil, fmt.Errorf("ci(ctx) must return only steps, got %s", v.Type())
 		}
-		steps = append(steps, s.Step)
+		step := s.Step
+		// A step given another's outputs has to come after it. In a script
+		// that runs its own steps the order is the script's; here it has to
+		// be said, and saying it twice would be noise.
+		for _, producer := range step.From {
+			if !contains(step.Needs, producer) {
+				step.Needs = append(append([]string(nil), step.Needs...), producer)
+			}
+		}
+		steps = append(steps, step)
 	}
 	return steps, nil
+}
+
+func contains(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // validate rejects plans an executor could not run: duplicate names, needs
@@ -713,6 +806,18 @@ func validate(steps []Step) error {
 		for _, n := range s.Needs {
 			if _, ok := byName[n]; !ok {
 				return fmt.Errorf("step %q needs %q, which ci(ctx) did not return", s.Name, n)
+			}
+		}
+		for _, n := range s.From {
+			producer, ok := byName[n]
+			if !ok {
+				return fmt.Errorf("step %q is given the outputs of %q, which ci(ctx) did not return", s.Name, n)
+			}
+			if len(producer.Outputs) == 0 {
+				return fmt.Errorf("step %q is given the outputs of %q, which declares none", s.Name, n)
+			}
+			if !contains(s.Needs, n) {
+				return fmt.Errorf("step %q is given the outputs of %q but does not need it", s.Name, n)
 			}
 		}
 	}
