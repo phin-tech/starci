@@ -284,7 +284,17 @@ func NewTasks(client *sdk.Client, cfg step.Config, post Reporter, reception *Rec
 			began := time.Now()
 			tracing.Waited(ctx, ctx.WorkflowRunId(), in.Asked)
 			ctx.Log(fmt.Sprintf("starci: %s @ %.8s, running %s", in.Context.Repo, in.Context.SHA, in.Filename))
-			runner := children(ctx, client, stepTask, in.CloneURL, in.Context.SHA)
+			runner := children(ctx, client, stepTask, in.CloneURL, in.Context.SHA).(*childRunner)
+			// While it waits for a person, the commit says what for, and
+			// the run's log says how to answer.
+			runner.waiting = func(g plan.Gate) {
+				ctx.Log(fmt.Sprintf("starci: waiting for %q. To answer:\n  %s\n  %s", g.Name, engine.AnswerCommand("approve", g), engine.AnswerCommand("refuse", g)))
+				report(ctx, post, in.Report, forge.Status{State: "pending", Description: "waiting for: " + g.Name})
+			}
+			runner.answered = func(g plan.Gate, a plan.Answer) {
+				ctx.Log("starci: " + engine.Describe(g, a))
+				report(ctx, post, in.Report, forge.Status{State: "pending", Description: engine.Describe(g, a)})
+			}
 			results, err := plan.RunPipeline(ctx, in.Filename, []byte(in.Source), in.Context, runner)
 			if ctx.Err() != nil {
 				report(ctx, post, in.Report, superseded)
@@ -405,6 +415,59 @@ type childRunner struct {
 	step     *sdk.StandaloneTask
 	cloneURL string
 	sha      string
+	// waiting and answered are told when the run stops at a gate and when
+	// it moves on, so that the commit can say so. Optional.
+	waiting  func(plan.Gate)
+	answered func(plan.Gate, plan.Answer)
+}
+
+// GateEvent is the event that answers a gate. It carries a plan.Answer, and
+// is scoped to the gate's id so that it reaches only the runs waiting there.
+const GateEvent = "starci:gate"
+
+// Wait stops the run at a gate until it is answered or its time is up.
+//
+// Hatchet keeps the wait, not this process: if the worker is lost while the
+// run waits, another evaluates the script again from the top, with every
+// step, and this wait, answered from the record.
+//
+// A waiting run keeps its place among the runs its worker carries, which
+// are counted apart from steps. Hatchet can put a waiting task aside and
+// free the place (an eviction policy), and that was tried: it also puts
+// aside a script that is waiting on a long step, by cancelling it, which
+// this code takes for the run having been replaced. Telling the two apart
+// comes first.
+func (c *childRunner) Wait(g plan.Gate) (plan.Answer, error) {
+	if c.waiting != nil {
+		c.waiting(g)
+	}
+	// However long the task was given, it is given the wait on top.
+	if err := c.ctx.RefreshTimeout(fmt.Sprintf("%ds", g.Seconds)); err != nil {
+		c.ctx.Log("starci: the run's time could not be extended to cover the wait: " + err.Error())
+	}
+	result, err := c.ctx.WaitFor(sdk.OrCondition(
+		sdk.UserEventCondition(GateEvent, "", sdk.WithEventScope(g.ID())),
+		sdk.SleepCondition(time.Duration(g.Seconds)*time.Second),
+	))
+	if err != nil {
+		if c.ctx.Err() != nil {
+			return plan.Answer{}, errors.New("cancelled")
+		}
+		return plan.Answer{}, err
+	}
+	// Whichever came first is what the result holds: the answer, or nothing
+	// but the time having passed.
+	answer := plan.Answer{TimedOut: true}
+	for _, key := range result.Keys() {
+		var got plan.Answer
+		if !strings.HasPrefix(key, "sleep:") && result.Unmarshal(key, &got) == nil {
+			answer = got
+		}
+	}
+	if c.answered != nil {
+		c.answered(g, answer)
+	}
+	return answer, nil
 }
 
 func children(ctx sdk.DurableContext, client *sdk.Client, stepTask *sdk.StandaloneTask, cloneURL, sha string) plan.Runner {

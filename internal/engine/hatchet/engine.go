@@ -60,6 +60,7 @@ var (
 	_ engine.Host      = (*Engine)(nil)
 	_ engine.Fleet     = (*Engine)(nil)
 	_ engine.Relay     = (*Engine)(nil)
+	_ engine.Approver  = (*Engine)(nil)
 )
 
 // New connects to Hatchet, which is found through the HATCHET_CLIENT_*
@@ -75,7 +76,7 @@ func New(o Options) (*Engine, error) {
 func (e *Engine) Name() string { return "hatchet" }
 
 func (e *Engine) Can() engine.Capabilities {
-	return engine.Capabilities{Durable: true, Placement: true, Supersedes: true, Exclusive: true}
+	return engine.Capabilities{Durable: true, Placement: true, Supersedes: true, Exclusive: true, Waits: true}
 }
 
 func (e *Engine) Execute(ctx context.Context, r engine.Run) (engine.Result, error) {
@@ -95,6 +96,12 @@ func (e *Engine) Execute(ctx context.Context, r engine.Run) (engine.Result, erro
 		return out, err
 	}
 	return out, res.Into(&out)
+}
+
+// Answer raises the event every run waiting at the gate is listening for.
+func (e *Engine) Answer(ctx context.Context, g plan.Gate, a plan.Answer) error {
+	scope := g.ID()
+	return e.client.Events().Push(ctx, GateEvent, a, sdk.WithFilterScope(&scope))
 }
 
 func (e *Engine) Start(ctx context.Context, r engine.Run) error { return e.tasks.Start(ctx, r) }

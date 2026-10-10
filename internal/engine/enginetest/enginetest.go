@@ -41,6 +41,7 @@ func Run(t *testing.T, eng engine.Engine) {
 	t.Run("steps are given the commit and only their inputs", func(t *testing.T) { inputs(t, eng, repo) })
 	t.Run("a step that already passed is not run again", func(t *testing.T) { reuse(t, eng, repo) })
 	t.Run("a step that gave up the network has none", func(t *testing.T) { offline(t, eng, repo) })
+	t.Run("a script waits for a person and acts on the answer", func(t *testing.T) { gates(t, eng, repo) })
 	t.Run("an advanced script acts on what its steps return", func(t *testing.T) { advanced(t, eng, repo) })
 	t.Run("an advanced script that fails says why", func(t *testing.T) { advancedFailure(t, eng, repo) })
 	t.Run("what the engine says it can do, it does", func(t *testing.T) { claims(t, eng, repo) })
@@ -214,6 +215,78 @@ def ci(ctx):
 	// A reused pass hands back what the step printed when it ran.
 	if got.Output != step(first, "once").Output || got.Output == "" {
 		t.Errorf("the reused result's output is %q, the original's %q", got.Output, step(first, "once").Output)
+	}
+}
+
+// An engine that says it can wait has to hold a run at a gate, hear an
+// answer that comes from outside the run, and give up when the time is up.
+func gates(t *testing.T, eng engine.Engine, r repo) {
+	approver, ok := eng.(engine.Approver)
+	if !eng.Can().Waits || !ok {
+		t.Skip("this engine does not wait for answers from outside a run")
+	}
+	script := func(gate, timeout string) string {
+		return helpers + `
+def pipeline(ctx):
+    run(sh("build", "true", cache = False))
+    answer = wait_for("` + gate + `", timeout = "` + timeout + `")
+    if answer.approved:
+        run(sh("deploy for " + answer.by, "true", cache = False))
+    elif answer.timed_out:
+        run(sh("nobody answered", "true", cache = False))
+    else:
+        run(sh("refused by " + answer.by, "true", cache = False))
+`
+	}
+	// A name of its own for each gate, so that an answer meant for an
+	// earlier one cannot be heard by a later one.
+	gateFor := func(what string) plan.Gate {
+		return plan.Gate{Repo: "test/repo", SHA: r.sha, Event: plan.EventManual, Name: what + " " + unique()}
+	}
+	// The answer is given over and over until the run ends: one given
+	// before the run has reached the gate is not kept for it.
+	answering := func(g plan.Gate, a plan.Answer) (stop func()) {
+		done := make(chan struct{})
+		go func() {
+			for {
+				select {
+				case <-done:
+					return
+				case <-time.After(time.Second):
+					_ = approver.Answer(context.Background(), g, a)
+				}
+			}
+		}()
+		return func() { close(done) }
+	}
+
+	g := gateFor("approve")
+	stop := answering(g, plan.Answer{Approved: true, By: "sam"})
+	result := execute(t, eng, r, script(g.Name, "2m"))
+	stop()
+	if got, want := statuses(result), "build=passed deploy for sam=passed"; got != want || !result.OK {
+		t.Errorf("approved:\n  %s (%s)\nwant:\n  %s", got, result.Error, want)
+	}
+
+	g = gateFor("refuse")
+	stop = answering(g, plan.Answer{By: "alex"})
+	result = execute(t, eng, r, script(g.Name, "2m"))
+	stop()
+	if got, want := statuses(result), "build=passed refused by alex=passed"; got != want {
+		t.Errorf("refused:\n  %s (%s)\nwant:\n  %s", got, result.Error, want)
+	}
+
+	// Nobody answers this one, and an answer for another gate is not one.
+	g = gateFor("ignore")
+	stop = answering(gateFor("another"), plan.Answer{Approved: true, By: "sam"})
+	began := time.Now()
+	result = execute(t, eng, r, script(g.Name, "5s"))
+	stop()
+	if got, want := statuses(result), "build=passed nobody answered=passed"; got != want {
+		t.Errorf("unanswered:\n  %s (%s)\nwant:\n  %s", got, result.Error, want)
+	}
+	if took := time.Since(began); took > 2*time.Minute {
+		t.Errorf("a gate given 5s was waited at for %s", took)
 	}
 }
 

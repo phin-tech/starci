@@ -100,6 +100,9 @@ type Capabilities struct {
 	// Supersedes and Exclusive: Run.Supersedes and Run.Exclusive are honoured.
 	Supersedes bool
 	Exclusive  bool
+	// Waits: an advanced script can stop at a gate and wait for a person
+	// (wait_for), and the run is still there when the answer comes.
+	Waits bool
 }
 
 // Missing lists, in plain sentences, what r asks for that these capabilities
@@ -117,6 +120,9 @@ func (c Capabilities) Missing(r Run) []string {
 		if len(placed) > 0 {
 			missing = append(missing, fmt.Sprintf("worker, prefer and avoid are ignored: there is only one place to run (%s)", strings.Join(placed, ", ")))
 		}
+	}
+	if !c.Waits && r.Mode == plan.Advanced && plan.Waits(r.Filename, r.Source) {
+		missing = append(missing, "the script waits for a person (wait_for), and there is nobody here to ask: it will fail when it gets there")
 	}
 	if !c.Durable && r.Mode == plan.Advanced {
 		missing = append(missing, "if this is interrupted, the script cannot pick up where it was")
@@ -152,6 +158,16 @@ type Fleet interface {
 	// Shun stops a worker being given new work, or lets it be given work
 	// again. What it has already been given, it finishes.
 	Shun(ctx context.Context, worker string, shun bool) error
+}
+
+// Approver is an engine whose runs can be answered while they wait at a
+// gate. The answer is for every run waiting at that gate: a gate is known by
+// what the run is for and its name, not by which run it is.
+//
+// An answer given when no run is waiting is not kept for one that waits
+// later.
+type Approver interface {
+	Answer(ctx context.Context, g plan.Gate, a plan.Answer) error
 }
 
 // Relay is an engine that deliveries from a forge can be passed to.
@@ -235,4 +251,29 @@ func sortedKeys(m map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// AnswerCommand is the command that answers a gate, written out in full so
+// that it can be copied from a log and run from anywhere.
+func AnswerCommand(verb string, g plan.Gate) string {
+	event := g.Event
+	if event == "" {
+		event = plan.EventPush
+	}
+	return fmt.Sprintf("starci %s %q --repo %s --sha %s --event %s", verb, g.Name, g.Repo, g.SHA, event)
+}
+
+// Describe says how a gate was answered, in a sentence.
+func Describe(g plan.Gate, a plan.Answer) string {
+	by := ""
+	if a.By != "" {
+		by = " by " + a.By
+	}
+	switch {
+	case a.TimedOut:
+		return fmt.Sprintf("%q was not answered in time", g.Name)
+	case a.Approved:
+		return fmt.Sprintf("%q was approved%s", g.Name, by)
+	}
+	return fmt.Sprintf("%q was refused%s", g.Name, by)
 }

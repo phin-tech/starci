@@ -30,6 +30,17 @@ type Runner struct {
 	Log func(stepName, line string)
 	// RunID names the run these steps belong to, for tracing. Optional.
 	RunID string
+	// Ask puts a gate to whoever is there to answer it. Optional.
+	Ask func(plan.Gate) (plan.Answer, error)
+}
+
+// Wait asks whoever is at hand. There is no run to come back to here, so
+// the only person who can answer is one who is present while it runs.
+func (r *Runner) Wait(g plan.Gate) (plan.Answer, error) {
+	if r.Ask == nil {
+		return plan.Answer{}, errors.New("there is nobody to ask: this run is on one machine with no terminal, and is not kept while it waits")
+	}
+	return r.Ask(g)
 }
 
 func (r *Runner) Run(steps []plan.Step) ([]plan.Result, error) {
@@ -79,17 +90,20 @@ type Engine struct {
 	Slots int
 	// Log receives each line a step prints, with the step's name. Optional.
 	Log func(stepName, line string)
+	// Ask puts a gate an advanced script waits at to whoever is there to
+	// answer it: a person at a terminal. Without it a script cannot wait.
+	Ask func(plan.Gate) (plan.Answer, error)
 }
 
 var _ engine.Engine = (*Engine)(nil)
 
 func (e *Engine) Name() string { return "local" }
 
-func (e *Engine) Can() engine.Capabilities { return engine.Capabilities{} }
+func (e *Engine) Can() engine.Capabilities { return engine.Capabilities{Waits: e.Ask != nil} }
 
 func (e *Engine) Execute(ctx context.Context, r engine.Run) (engine.Result, error) {
 	run := tracing.Run{ID: uuid.NewString(), Began: time.Now(), Repo: r.Context.Repo, SHA: r.Context.SHA, Mode: r.Mode}
-	runner := &Runner{Ctx: ctx, Config: e.Config, CloneURL: r.CloneURL, SHA: r.Context.SHA, Slots: e.Slots, Log: e.Log, RunID: run.ID}
+	runner := &Runner{Ctx: ctx, Config: e.Config, CloneURL: r.CloneURL, SHA: r.Context.SHA, Slots: e.Slots, Log: e.Log, RunID: run.ID, Ask: e.Ask}
 	if r.Mode == plan.Advanced {
 		results, err := plan.RunPipeline(ctx, r.Filename, r.Source, r.Context, runner)
 		out := engine.Result{OK: err == nil, Steps: results}

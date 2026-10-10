@@ -46,6 +46,7 @@ Everything is one binary:
 | `starci hooks add` | Have Hatchet itself be that address. |
 | `starci compile` | Write a basic script out for GitHub Actions or CircleCI. |
 | `starci validate` | Check that a script's inputs select files and that the tools it pins download as pinned. Runs nothing. |
+| `starci approve`, `refuse` | Answer a run that is waiting for a person. |
 | `starci workers`, `shun`, `unshun` | See the workers, and take one out of rotation. |
 
 ## Trying it
@@ -306,8 +307,8 @@ type Engine interface {
 ```
 
 `Can` says which of the things a run may ask for the engine honours: surviving
-an interruption, placing steps by label, superseding, and running one at a
-time. What a run asks for that its engine cannot do is said before the run
+an interruption, placing steps by label, superseding, running one at a
+time, and waiting for a person. What a run asks for that its engine cannot do is said before the run
 starts, not dropped. `starci run --local` on a script with `worker` rules
 prints which steps lost them.
 
@@ -321,10 +322,12 @@ a caller asks for with a type assertion:
 | `Host` | make this process a worker | `starci worker` |
 | `Fleet` | list its workers, shun and unshun them | `starci workers`, `shun`, `unshun` |
 | `Relay` | be passed a forge's deliveries, or receive them itself | `starci serve`, `starci hooks add` |
+| `Approver` | be told the answer to a gate a run is waiting at | `starci approve`, `starci refuse` |
 
-Hatchet has all of them. The local engine has none, and no capabilities
-either: there is nowhere else to place a step, no other run to supersede, and
-no record to resume from.
+Hatchet has all of them. The local engine has none, and one capability at
+most: there is nowhere else to place a step, no other run to supersede, and
+no record to resume from, but run at a terminal it can ask the person there
+when a script waits.
 
 A new engine is a package that implements `Engine` and passes the shared
 tests, which put real containers through basic and advanced runs and hold the
@@ -452,6 +455,7 @@ def pipeline(ctx):
 | `parallel(steps, allow_failure = False)` | Run several together; results come back in the same order. |
 | `result.ok`, `.status`, `.output`, `.name`, `.seconds`, `.cached`, `.worker`, `.detail` | What a result carries. `output` is what the step printed, up to 64 KB. |
 | `fail(message)` | End the run as failed. |
+| `wait_for(name, timeout = "24h")` | Stop until a person answers, and return the answer: `.approved`, `.by`, `.timed_out`. The name is letters, digits, spaces and `- _ . :`. |
 
 A step that fails ends the run, unless `allow_failure` hands the script the
 failed result to decide on. Steps are the same `step(...)` as in basic mode,
@@ -464,6 +468,57 @@ and each step it asks for is answered from the record of the run, so finished
 steps are not repeated. This is why the language matters. A script that cannot
 read a clock or a file asks for the same steps, in the same order, whenever it
 is given the same answers.
+
+### Waiting for a person
+
+A script can stop and wait to be told to go on:
+
+```python
+def pipeline(ctx):
+    run(build)
+    run(tests)
+    answer = wait_for("approve deploy", timeout = "4h")
+    if not answer.approved:
+        fail("not deployed: refused by " + answer.by if answer.by else "not deployed: nobody answered")
+    run(deploy)
+```
+
+While it waits, the commit's status is pending and says what for, and the
+run's log has the command that answers it, written out in full:
+
+```sh
+starci approve "approve deploy" --repo sam/app --sha 9c9be2c0… --event push
+starci refuse  "approve deploy" --repo sam/app --sha 9c9be2c0… --event push
+```
+
+In a checkout of the repository at that commit, `starci approve "approve
+deploy"` is enough for a run started by a push. A gate nobody answers within
+its `timeout` comes back refused, with `.timed_out` set.
+
+The wait is the engine's, not a worker's. A worker lost while a run waits
+changes nothing: another evaluates the script again from the top, and every
+step before the gate, and the gate, is answered from the record. The time a
+run spends waiting is added to the time it is allowed. A newer push to
+the branch replaces a run that is waiting, as it does any other.
+
+What to know:
+
+- **A gate is known by the repository, the commit, the event and its name,**
+  not by which run it is. Two runs for the same commit and event that wait at
+  a gate of the same name are answered together.
+- **A waiting run keeps its place on its worker.** A worker carries twenty
+  runs at once, counted apart from the steps it runs, and one that is waiting
+  is one of the twenty. Steps are not held up by it; a twenty-first run on
+  that worker is.
+- **An answer is heard only by a run that is already waiting.** One given too
+  early is not kept.
+- **Who may answer is whoever can reach the engine.** `by` is what the person
+  answering said, and defaults to their user name; nothing checks it.
+- **`starci run --local` asks at the terminal,** if there is one. With none,
+  it says before the run starts that the script waits and nobody is there,
+  and the run fails when it reaches the gate.
+- Only advanced scripts can wait. A basic script's steps are all known in
+  advance and there is nowhere in it to stop.
 
 The trade is predictability. A basic script's graph depends only on the
 commit; an advanced script's depends on what its steps return.

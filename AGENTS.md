@@ -37,7 +37,7 @@ assumes more: DBOS, Temporal, Kubernetes Jobs and the like. Keep it that way.
 
 One thing is required (`engine.Engine`: `Name`, `Can`, `Execute`). Everything
 else is a small optional interface, asked for with a type assertion: `Starter`,
-`Scheduler`, `Host`, `Fleet`, `Relay`.
+`Scheduler`, `Host`, `Fleet`, `Relay`, `Approver`.
 
 - An engine says what it can do in `Can()`. What a run asks for that the engine
   cannot do is reported before the run starts (`Capabilities.Missing`). Never
@@ -79,6 +79,22 @@ The engine side has to hold up its end:
 - Test it by killing a worker partway through a step of an advanced script and
   checking that the run resumes, finished steps are not repeated, and the run
   passes. A passing test suite does not show this.
+
+### Waiting for a person
+
+`wait_for` in an advanced script reaches an engine through `plan.Waiter`,
+which the engine's `Runner` implements if it can wait, and is answered through
+`engine.Approver`.
+
+- Claim `Capabilities.Waits` only if a run is still there when the answer
+  comes, however long that takes and whichever machine is left.
+- A wait falls under the replay rule: evaluated again, the script must be
+  given the answer it was given the first time, from the engine's record.
+- A gate is matched to its answer by `plan.Gate.ID()`. Do not key on the
+  gate's name alone, or one answer opens every run waiting at a gate of that
+  name.
+- Test it as the replay section says, with the worker killed while the run
+  waits. `enginetest` covers approving, refusing and the time running out.
 
 ### Tracing
 

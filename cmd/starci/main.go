@@ -17,6 +17,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -56,6 +57,8 @@ const usage = `usage:
   starci hooks add forgejo|github
   starci compile [--target github|circleci] [--file .ci.star] [--runs-on NAME] [--arch amd64] [--offline] [--check FILE]
   starci validate [--file .ci.star] [--arch amd64,arm64]
+  starci approve GATE [--repo owner/name] [--sha SHA] [--event push] [--by WHO]
+  starci refuse  GATE [--repo owner/name] [--sha SHA] [--event push] [--by WHO]
   starci workers
   starci shun WORKER
   starci unshun WORKER`
@@ -80,6 +83,8 @@ func main() {
 		err = serveCmd()
 	case "hooks":
 		err = hooksCmd(os.Args[2:])
+	case "approve", "refuse":
+		err = answerCmd(os.Args[1] == "approve", os.Args[2:])
 	case "workers":
 		err = workersCmd()
 	case "shun", "unshun":
@@ -93,6 +98,73 @@ func main() {
 	if err != nil {
 		die("starci: " + err.Error())
 	}
+}
+
+// askAtTerminal puts a gate to the person running starci.
+func askAtTerminal(g plan.Gate) (plan.Answer, error) {
+	fmt.Printf("\nThe script is waiting for: %s\nApprove? [y/N] ", g.Name)
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && line == "" {
+		return plan.Answer{}, errors.New("nothing could be read from the terminal")
+	}
+	who := os.Getenv("USER")
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return plan.Answer{Approved: answer == "y" || answer == "yes", By: who}, nil
+}
+
+// answerCmd answers a gate that runs are waiting at: approve or refuse.
+//
+// A gate is known by the repository, the commit, the event the run was
+// started by and the gate's name. In a checkout the first two are taken from
+// it; the log of a waiting run has the command written out in full.
+func answerCmd(approve bool, args []string) error {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		die(usage)
+	}
+	name := args[0]
+	fs := flag.NewFlagSet("approve", flag.ExitOnError)
+	repo := fs.String("repo", "", "repository the run is for, as owner/name (default: from this checkout's origin)")
+	sha := fs.String("sha", "", "commit the run is for (default: this checkout's HEAD)")
+	event := fs.String("event", plan.EventPush, "what started the run: push, tag, pull_request, schedule or manual")
+	by := fs.String("by", os.Getenv("USER"), "who is answering")
+	fs.Parse(args[1:])
+
+	git := func(a ...string) string {
+		out, _ := exec.Command("git", a...).Output()
+		return strings.TrimSpace(string(out))
+	}
+	if *sha == "" {
+		if *sha = git("rev-parse", "HEAD"); *sha == "" {
+			return errors.New("this is not a checkout, so say which commit with --sha")
+		}
+	} else if full := git("rev-parse", *sha); full != "" {
+		*sha = full
+	}
+	if *repo == "" {
+		parts := strings.Split(step.RepoPath(git("remote", "get-url", "origin")), "/")
+		if len(parts) < 2 {
+			return errors.New("this checkout has no origin to take the repository's name from, so say it with --repo owner/name")
+		}
+		*repo = strings.Join(parts[len(parts)-2:], "/")
+	}
+	g := plan.Gate{Repo: *repo, SHA: *sha, Event: *event, Name: name}
+
+	eng, err := onhatchet.New(onhatchet.Options{})
+	if err != nil {
+		return err
+	}
+	approver, ok := engine.Engine(eng).(engine.Approver)
+	if !ok {
+		return fmt.Errorf("%s cannot be told an answer", eng.Name())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	answer := plan.Answer{Approved: approve, By: *by}
+	if err := approver.Answer(ctx, g, answer); err != nil {
+		return err
+	}
+	fmt.Printf("%s, for %s @ %.8s (%s).\nOnly a run that is waiting there now hears it.\n", engine.Describe(g, answer), g.Repo, g.SHA, g.Event)
+	return nil
 }
 
 func die(msg string) {
@@ -358,6 +430,11 @@ func localEngine(slots int, verbose bool) (engine.Engine, error) {
 		return nil, err
 	}
 	eng := &local.Engine{Config: cfg, Slots: slots}
+	// A script that waits for a person can be answered here only by one who
+	// is here: at a terminal, while the run goes on.
+	if info, err := os.Stdin.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
+		eng.Ask = askAtTerminal
+	}
 	if verbose {
 		var mu sync.Mutex
 		eng.Log = func(name, line string) {

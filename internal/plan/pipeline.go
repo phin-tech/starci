@@ -83,7 +83,7 @@ func Mode(filename string, src []byte) (string, error) {
 // script.
 func RunPipeline(ctx context.Context, filename string, src []byte, c Context, r Runner) ([]Result, error) {
 	thread := newThread("pipeline")
-	rec := &recorder{runner: r}
+	rec := &recorder{runner: r, run: c}
 	thread.SetLocal(runnerKey, rec)
 
 	done := make(chan struct{})
@@ -124,6 +124,9 @@ type recorder struct {
 	// running a step is refused: the top level also runs just to find out
 	// which mode a script is in.
 	started bool
+	// run is what the script is being run for, which is how a gate it waits
+	// at is known to whoever answers.
+	run Context
 }
 
 // stepsFailed is the error that ends a pipeline when a step fails and the
@@ -155,6 +158,7 @@ func predeclared() starlark.StringDict {
 		"tool":     starlark.NewBuiltin("tool", toolBuiltin),
 		"run":      starlark.NewBuiltin("run", runBuiltin),
 		"parallel": starlark.NewBuiltin("parallel", parallelBuiltin),
+		"wait_for": starlark.NewBuiltin("wait_for", waitForBuiltin),
 		"schedule": starlark.NewBuiltin("schedule", scheduleBuiltin),
 	}
 }
