@@ -105,32 +105,39 @@ func startServices(ctx context.Context, base, worker string, s plan.Step) (up si
 	return up, stop, nil
 }
 
-// waitFor returns when the service's readiness command succeeds. A service
-// with none is ready as soon as it is running.
+// waitFor returns when the service is ready. One with a readiness command is
+// ready when that succeeds; one without, when its image's own health check
+// says so; and one whose image has none, as soon as it is running.
 func (up sidecars) waitFor(ctx context.Context, sv plan.Service) error {
 	container := up.containers[sv.Name]
 	deadline := time.Now().Add(readyWithin)
 	for {
-		running, err := exec.Command("docker", "inspect", "--format", "{{.State.Running}}", container).Output()
-		if err != nil || strings.TrimSpace(string(running)) != "true" {
+		state, err := exec.Command("docker", "inspect", "--format",
+			"{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{end}}", container).Output()
+		running, health, _ := strings.Cut(strings.TrimSpace(string(state)), " ")
+		if err != nil || running != "true" {
 			return fmt.Errorf("service %q stopped before the step could use it\n%s", sv.Name, up.tail(sv.Name))
 		}
-		if sv.Ready == "" {
-			return nil
-		}
-		// One try may not outlast what is left of the wait: a command that
-		// hangs, asking a server that accepts and never answers, is not ready.
-		attempt, cancel := context.WithDeadline(ctx, deadline)
-		err = exec.CommandContext(attempt, "docker", "exec", container, "sh", "-c", sv.Ready).Run()
-		cancel()
-		if err == nil {
+		asked := "its image's health check never passed"
+		if sv.Ready != "" {
+			asked = "`" + sv.Ready + "` never succeeded in its container"
+			// One try may not outlast what is left of the wait: a command
+			// that hangs, asking a server that accepts and never answers, is
+			// not ready.
+			attempt, cancel := context.WithDeadline(ctx, deadline)
+			err = exec.CommandContext(attempt, "docker", "exec", container, "sh", "-c", sv.Ready).Run()
+			cancel()
+			if err == nil {
+				return nil
+			}
+		} else if health == "" || health == "healthy" {
 			return nil
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("service %q was not ready after %s: `%s` never succeeded in its container\n%s", sv.Name, readyWithin, sv.Ready, up.tail(sv.Name))
+			return fmt.Errorf("service %q was not ready after %s: %s\n%s", sv.Name, readyWithin, asked, up.tail(sv.Name))
 		}
 		select {
 		case <-ctx.Done():

@@ -638,11 +638,12 @@ other step is on, so tests running side by side cannot see each other's data,
 and nothing is left from the run before.
 
 `ready` is a command run inside the service's container, every half second
-until it succeeds, and the step starts only then. Without one the step starts
-as soon as the container has, which is before most servers are listening. A
-service that is not ready within two minutes, or that stops, fails the step,
-with the last of what the service printed. The command is run by `sh`, so an
-image without a shell cannot have one. For Postgres ask over TCP, as above:
+until it succeeds, and the step starts only then. Without one, an image that
+declares a health check is waited on until it is healthy, and any other is
+taken to be ready as soon as its container has started, which is before most
+servers are listening. A service that is not ready within two minutes, or
+that stops, fails the step, with the last of what the service printed. The
+command is run by `sh`, so an image without a shell cannot have one. For Postgres ask over TCP, as above:
 while the image is setting a database up it runs a server that answers only
 on its socket, and `pg_isready` alone would be satisfied by that one.
 

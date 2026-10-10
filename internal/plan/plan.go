@@ -152,9 +152,10 @@ type Service struct {
 	// what to serve.
 	Args []string `json:"args,omitempty"`
 	// Ready is a command run inside the service's container, again and again
-	// until it succeeds; the step starts only then. Without one, the step
-	// starts as soon as the container has, which is before most servers are
-	// listening.
+	// until it succeeds; the step starts only then. Without one, an image
+	// that declares a health check is waited on until it is healthy, and any
+	// other is taken to be ready as soon as its container has started, which
+	// is before most servers are listening.
 	Ready string `json:"ready,omitempty"`
 }
 

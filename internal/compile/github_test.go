@@ -209,9 +209,8 @@ func TestAJobStartsItsServicesAndStopsThem(t *testing.T) {
 		"      - name: Stop the services\n        if: always() && steps.passed.outputs.cache-hit != 'true'\n",
 		`          docker network rm "starci-$GITHUB_RUN_ID-${GITHUB_RUN_ATTEMPT:-1}-api-tests" || true`+"\n",
 	)
-	if strings.Count(out, "until timeout 10 docker exec") != 1 {
-		t.Errorf("a service with no readiness command is waited for:\n%s", out)
-	}
+	// The other is waited for by its image's health check, if it has one.
+	wants(t, out, `          until [ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}healthy{{end}}' "starci-$GITHUB_RUN_ID-${GITHUB_RUN_ATTEMPT:-1}-api-tests-store")" = healthy ]; do`+"\n")
 
 	// Without the network the step still reaches them, and nothing else.
 	sealed := compileScript(t, strings.Replace(withServices, `inputs = ["api"],`, `inputs = ["api"], network = False,`, 1), Options{})

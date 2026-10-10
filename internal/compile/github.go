@@ -334,17 +334,21 @@ func startServices(s plan.Step, network string) []string {
 		lines = append(lines, run)
 	}
 	for _, sv := range s.Services {
-		if sv.Ready == "" {
-			continue
+		container := fmt.Sprintf("\"%s-%s\"", network, sv.Name)
+		// Without a command of its own a service is ready when its image's
+		// health check says so, and at once if the image has none.
+		ready := fmt.Sprintf("[ \"$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}healthy{{end}}' %s)\" = healthy ]", container)
+		if sv.Ready != "" {
+			ready = fmt.Sprintf("timeout 10 docker exec %s sh -c %s", container, shq(sv.Ready))
 		}
 		// Two minutes, as a worker allows, by the clock: a try that hangs is
 		// cut short, and counts against the same two minutes.
 		lines = append(lines,
 			"until=$(($(date +%s) + 120))",
-			fmt.Sprintf("until timeout 10 docker exec \"%s-%s\" sh -c %s; do", network, sv.Name, shq(sv.Ready)),
+			"until "+ready+"; do",
 			"  if [ \"$(date +%s)\" -ge \"$until\" ]; then",
 			fmt.Sprintf("    echo \"service %s was not ready after 2 minutes\"", sv.Name),
-			fmt.Sprintf("    docker logs --tail 20 \"%s-%s\"", network, sv.Name),
+			"    docker logs --tail 20 "+container,
 			"    exit 1",
 			"  fi",
 			"  sleep 0.5",

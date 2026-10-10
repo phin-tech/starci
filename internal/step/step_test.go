@@ -627,6 +627,28 @@ func TestAServiceThatFailsFailsTheStepAndSaysWhy(t *testing.T) {
 	}
 }
 
+func TestAServiceWithNoReadyIsWaitedForByItsImagesHealthCheck(t *testing.T) {
+	needDocker(t)
+	// An image whose health check passes only once the server answers, which
+	// it does two seconds after it starts.
+	const healthy = "starci-test-healthcheck"
+	build := exec.Command("docker", "build", "-q", "-t", healthy, "-")
+	build.Stdin = strings.NewReader("FROM " + testImage + `
+HEALTHCHECK --interval=1s --timeout=2s --retries=30 CMD nc -w 2 127.0.0.1 8080 </dev/null | grep -q .
+CMD ["sh", "-c", "sleep 2; exec nc -lk -p 8080 -e hostname"]
+`)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("building an image with a health check: %v\n%s", err, out)
+	}
+	r := newRepo(t)
+	sha := r.commit(map[string]string{"a.txt": "a"})
+	cfg := Config{Worker: "test-" + t.Name(), StateDir: t.TempDir()}
+	s := plan.Step{Name: "ask", Run: "nc -w 2 slow 8080 </dev/null", Services: []plan.Service{{Name: "slow", Image: healthy}}}
+	if got := run(t, cfg, r, sha, s); got.Status != "passed" || got.Output != "slow\n" {
+		t.Fatalf("the step did not wait for the image's health check: %+v", got)
+	}
+}
+
 func TestCancelStopsTheServices(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
