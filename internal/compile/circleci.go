@@ -112,6 +112,12 @@ func gitPathspec(in string) string {
 func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
 	fmt.Fprintf(w, "  %s:\n    machine:\n      image: ubuntu-2404:current\n    resource_class: %s\n    steps:\n      - checkout\n", id, o.RunsOn)
 
+	// Taken out of the checkout while the whole of it is still there.
+	given := "\"$HOME/starci-services\""
+	if lines := copyServiceFiles(s, given); len(lines) > 0 {
+		circleRun(w, "Files for the services", nil, lines...)
+	}
+
 	whole := len(s.Inputs) == 1 && s.Inputs[0] == "."
 	if !whole {
 		var patterns []string
@@ -126,7 +132,7 @@ func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
 	passKey := ""
 	if s.Cache {
 		var specs []string
-		for _, in := range s.Inputs {
+		for _, in := range append(append([]string{}, s.Inputs...), serviceFiles(s)...) {
 			specs = append(specs, shq(gitPathspec(in)))
 		}
 		// The same question a worker asks git: which files, with which
@@ -184,7 +190,7 @@ func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
 	// CIRCLE_BUILD_NUM is this job's own number.
 	network := "starci-$CIRCLE_BUILD_NUM-" + id
 	if len(s.Services) > 0 {
-		circleRun(w, "Services: "+strings.Join(serviceNames(s), ", "), nil, startServices(s, network)...)
+		circleRun(w, "Services: "+strings.Join(serviceNames(s), ", "), nil, startServices(s, network, given)...)
 	}
 
 	var lines []string

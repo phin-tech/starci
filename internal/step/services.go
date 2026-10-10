@@ -4,13 +4,15 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"git.phin.tech/sam/starci/internal/plan"
 )
 
-// How long a service is given to become ready before the step is failed.
+// How long a service is given to become ready before the step is failed,
+// unless it asks for something else.
 var readyWithin = 2 * time.Minute
 
 const (
@@ -60,7 +62,10 @@ type sidecars struct {
 //
 // stop must be called whether or not an error is returned: a service that
 // started before another failed is still running.
-func startServices(ctx context.Context, base, worker string, s plan.Step) (up sidecars, stop func(), err error) {
+//
+// files says where on this machine each service's files have been checked
+// out, by service name.
+func startServices(ctx context.Context, base, worker string, s plan.Step, files map[string]string) (up sidecars, stop func(), err error) {
 	up = sidecars{network: base, containers: map[string]string{}}
 	stop = func() {
 		// Not tied to ctx: a cancelled run is exactly when this has to work.
@@ -89,6 +94,9 @@ func startServices(ctx context.Context, base, worker string, s plan.Step) (up si
 		for _, name := range sortedKeys(sv.Env) {
 			args = append(args, "-e", name+"="+sv.Env[name])
 		}
+		for _, from := range sv.FilePaths() {
+			args = append(args, "-v", filepath.Join(files[sv.Name], filepath.FromSlash(from))+":"+sv.Files[from]+":ro")
+		}
 		args = append(append(args, sv.Image), sv.Args...)
 		// Recorded before it is known to have started: a container that was
 		// created and then failed to start is still there to remove.
@@ -110,7 +118,11 @@ func startServices(ctx context.Context, base, worker string, s plan.Step) (up si
 // says so; and one whose image has none, as soon as it is running.
 func (up sidecars) waitFor(ctx context.Context, sv plan.Service) error {
 	container := up.containers[sv.Name]
-	deadline := time.Now().Add(readyWithin)
+	within := readyWithin
+	if sv.ReadyWithin > 0 {
+		within = time.Duration(sv.ReadyWithin) * time.Second
+	}
+	deadline := time.Now().Add(within)
 	for {
 		state, err := exec.Command("docker", "inspect", "--format",
 			"{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{end}}", container).Output()
@@ -137,7 +149,7 @@ func (up sidecars) waitFor(ctx context.Context, sv plan.Service) error {
 			return ctx.Err()
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("service %q was not ready after %s: %s\n%s", sv.Name, readyWithin, asked, up.tail(sv.Name))
+			return fmt.Errorf("service %q was not ready after %s: %s\n%s", sv.Name, within, asked, up.tail(sv.Name))
 		}
 		select {
 		case <-ctx.Done():

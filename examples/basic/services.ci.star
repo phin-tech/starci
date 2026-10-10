@@ -13,6 +13,9 @@ postgres = service(
     # asks over TCP: while the image is setting a database up it runs a server
     # that answers only on its socket, and that one is not the one to wait for.
     ready = "pg_isready -h localhost -U app",
+    # The image runs what it finds here as it sets the database up. The script
+    # is the service's: the test steps are not given db/.
+    files = {"db/roles.sql": "/docker-entrypoint-initdb.d/10-roles.sql"},
 )
 
 def tests(name, path):

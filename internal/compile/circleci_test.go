@@ -150,4 +150,17 @@ func TestCircleCIStartsAJobsServicesAndStopsThem(t *testing.T) {
 		"      - run:\n          name: Stop the services\n          when: always\n",
 		`            docker network rm "starci-$CIRCLE_BUILD_NUM-api-tests" || true`+"\n",
 	)
+
+	files := compileCircle(t, strings.Replace(withServices, `ready = "pg_isready -h localhost"`,
+		`ready = "pg_isready -h localhost", files = {"db/init.sql": "/docker-entrypoint-initdb.d/01.sql"}`, 1), Options{})
+	wants(t, files,
+		// Taken out of the checkout before it is cut down to the step's inputs.
+		"          name: \"Files for the services\"\n",
+		`            cp -R 'db/init.sql' "$HOME/starci-services"'/postgres/db/init.sql'`+"\n",
+		"git ls-files -s -- ':(top,literal)api' ':(top,literal)db/init.sql' > /tmp/starci-inputs",
+		` -v "$HOME/starci-services"'/postgres/db/init.sql:/docker-entrypoint-initdb.d/01.sql':ro postgres:17`+"\n",
+	)
+	if strings.Index(files, "Files for the services") > strings.Index(files, "Keep only this step's inputs") {
+		t.Errorf("the services' files are copied after the checkout is cut down:\n%s", files)
+	}
 }

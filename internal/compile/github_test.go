@@ -227,6 +227,21 @@ func TestAJobStartsItsServicesAndStopsThem(t *testing.T) {
 	if other := compileScript(t, strings.Replace(withServices, "postgres:17", "postgres:18", 1), Options{}); key(out) == key(other) {
 		t.Errorf("the pass key did not change with a service's image: %s", key(out))
 	}
+	// What a service is given is fetched, kept out of the step's sight, counted
+	// in what a pass means, and waited for as long as it asks.
+	files := compileScript(t, strings.Replace(withServices, `ready = "pg_isready -h localhost"`,
+		`ready = "pg_isready -h localhost", ready_within = 300, files = {"db/init.sql": "/docker-entrypoint-initdb.d/01.sql"}`, 1), Options{})
+	wants(t, files,
+		"            /api\n            /db/init.sql\n",
+		"hashFiles('api', 'api/**', 'db/init.sql', 'db/init.sql/**')",
+		`          cp -R 'db/init.sql' "$RUNNER_TEMP/starci-services/api-tests"'/postgres/db/init.sql'`+"\n",
+		"          git sparse-checkout set --no-cone '/api'\n",
+		` -v "$RUNNER_TEMP/starci-services/api-tests"'/postgres/db/init.sql:/docker-entrypoint-initdb.d/01.sql':ro postgres:17`+"\n",
+		"          until=$(($(date +%s) + 300))\n",
+	)
+	if key(out) == key(files) {
+		t.Errorf("the pass key did not change with a service's files: %s", key(out))
+	}
 	if strings.Contains(compileScript(t, script, Options{}), "ervices") {
 		t.Error("a workflow with no services mentions them")
 	}

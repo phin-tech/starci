@@ -256,11 +256,14 @@ func TestCancelStopsTheContainer(t *testing.T) {
 	sha := r.commit(map[string]string{"a.txt": "a"})
 	cfg := Config{Worker: "test", StateDir: t.TempDir()}
 
+	// Something only this step's command holds, to know its container by:
+	// other steps may be running on this machine, and they are not ours.
+	mark := "cancel-" + filepath.Base(t.TempDir())
 	ctx, cancel := context.WithCancel(context.Background())
 	started := make(chan struct{})
 	done := make(chan plan.Result)
 	go func() {
-		done <- Run(ctx, cfg, r.dir, sha, plan.Step{Name: "slow", Image: testImage, Inputs: []string{"."}, Run: "echo up; sleep 120"}, func(line string) {
+		done <- Run(ctx, cfg, r.dir, sha, plan.Step{Name: "slow", Image: testImage, Inputs: []string{"."}, Run: "echo up; sleep 120 # " + mark}, func(line string) {
 			if line == "up" {
 				close(started)
 			}
@@ -272,9 +275,9 @@ func TestCancelStopsTheContainer(t *testing.T) {
 	if got.Status != "failed" || got.Detail != "cancelled" {
 		t.Errorf("result = %+v, want a cancelled failure", got)
 	}
-	out, _ := exec.Command("docker", "ps", "-q", "--filter", "name=starci-starci").Output()
-	if strings.TrimSpace(string(out)) != "" {
-		t.Errorf("a step container is still running after cancel: %s", out)
+	out, _ := exec.Command("docker", "ps", "--no-trunc", "--format", "{{.Names}} {{.Command}}").Output()
+	if strings.Contains(string(out), mark) {
+		t.Errorf("the step's container is still running after cancel:\n%s", out)
 	}
 }
 
@@ -649,6 +652,59 @@ CMD ["sh", "-c", "sleep 2; exec nc -lk -p 8080 -e hostname"]
 	}
 }
 
+func TestAServiceIsGivenItsFilesAndTheStepIsNot(t *testing.T) {
+	needDocker(t)
+	r := newRepo(t)
+	sha := r.commit(map[string]string{"a.txt": "a", "db/init.sql": "one", "db/conf/app.conf": "x=1"})
+	cfg := Config{Worker: "test-" + t.Name(), StateDir: t.TempDir()}
+	// A service that answers with what it was given: one file and one
+	// directory, each where it asked for them.
+	teller := plan.Service{
+		Name: "teller", Image: testImage, Env: map[string]string{},
+		Files: map[string]string{"db/init.sql": "/init/01.sql", "db/conf": "/etc/app"},
+		Args:  []string{"sh", "-c", "exec nc -lk -p 8080 -e sh -c 'cat /init/01.sql /etc/app/app.conf; touch /init/01.sql 2>/dev/null && echo writable'"},
+		Ready: "test -e /init/01.sql",
+	}
+	s := plan.Step{
+		Name: "ask", Inputs: []string{"a.txt"}, Cache: true, Services: []plan.Service{teller},
+		// The files are the service's: the step was not given db/.
+		Run: "nc -w 2 teller 8080 </dev/null; ls",
+	}
+	got := run(t, cfg, r, sha, s)
+	if got.Status != "passed" || got.Output != "onex=1a.txt\n" {
+		t.Fatalf("result = %+v, want the service's two files, read-only, and a workspace holding only a.txt", got)
+	}
+
+	// What a service is given is part of what a pass means.
+	if again := run(t, cfg, r, sha, s); !again.Cached {
+		t.Error("a pass with the same files was not reused")
+	}
+	changed := r.commit(map[string]string{"db/init.sql": "two"})
+	if after := run(t, cfg, r, changed, s); after.Cached || !strings.HasPrefix(after.Output, "two") {
+		t.Errorf("after a service's file changed: %+v", after)
+	}
+
+	// A file that is not in the commit is a mistake in the script.
+	teller.Files = map[string]string{"db/absent.sql": "/init/01.sql"}
+	s.Services = []plan.Service{teller}
+	if got := run(t, cfg, r, sha, s); got.Status != "failed" || !strings.Contains(got.Detail, `service "teller": file "db/absent.sql" matches nothing`) {
+		t.Errorf("a service file that does not exist: %+v", got)
+	}
+}
+
+func TestAServiceMayAskForLongerOrShorter(t *testing.T) {
+	needDocker(t)
+	r := newRepo(t)
+	sha := r.commit(map[string]string{"a.txt": "a"})
+	cfg := Config{Worker: "test-" + t.Name(), StateDir: t.TempDir()}
+	never := plan.Service{Name: "never", Image: testImage, Args: []string{"sleep", "600"}, Ready: "false", ReadyWithin: 1}
+	began := time.Now()
+	got := run(t, cfg, r, sha, plan.Step{Name: "a", Run: "true", Services: []plan.Service{never}})
+	if got.Status != "failed" || !strings.Contains(got.Detail, "was not ready after 1s") || time.Since(began) > 30*time.Second {
+		t.Errorf("a service given one second, after %s: %+v", time.Since(began).Round(time.Second), got)
+	}
+}
+
 func TestCancelStopsTheServices(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
@@ -686,7 +742,7 @@ func TestSweepRemovesWhatAKilledWorkerLeft(t *testing.T) {
 	var stops []func()
 	for _, worker := range []string{mine, other} {
 		s := plan.Step{Services: []plan.Service{web("one", "0")}}
-		_, stop, err := startServices(context.Background(), "starci-sweep-"+worker, worker, s)
+		_, stop, err := startServices(context.Background(), "starci-sweep-"+worker, worker, s, nil)
 		stops = append(stops, stop)
 		if err != nil {
 			t.Fatal(err)

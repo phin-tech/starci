@@ -916,15 +916,30 @@ func checkInputs(dir string, steps []plan.Step) (failed int) {
 	}
 	for _, s := range steps {
 		missing, err := step.MissingInputs(dir, s.Inputs)
+		// A service's files are looked for the same way.
+		var absent []string
+		for _, sv := range s.Services {
+			if err != nil {
+				break
+			}
+			var gone []string
+			gone, err = step.MissingInputs(dir, sv.FilePaths())
+			for _, f := range gone {
+				absent = append(absent, fmt.Sprintf("service %q: file %q is not a file that git tracks here", sv.Name, f))
+			}
+		}
 		switch {
 		case err != nil:
 			failed++
 			fmt.Printf("  %-8s %s\n           %v\n", "failed", s.Name, err)
-		case len(missing) > 0:
+		case len(missing)+len(absent) > 0:
 			failed++
 			fmt.Printf("  %-8s %s\n", "failed", s.Name)
 			for _, in := range missing {
 				fmt.Printf("           input %q selects no file that git tracks here\n", in)
+			}
+			for _, line := range absent {
+				fmt.Printf("           %s\n", line)
 			}
 		default:
 			fmt.Printf("  %-8s %s\n", "ok", s.Name)

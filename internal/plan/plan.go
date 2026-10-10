@@ -157,6 +157,24 @@ type Service struct {
 	// other is taken to be ready as soon as its container has started, which
 	// is before most servers are listening.
 	Ready string `json:"ready,omitempty"`
+	// ReadyWithin is how many seconds the service is given to become ready.
+	// Zero means the usual two minutes.
+	ReadyWithin int `json:"ready_within,omitempty"`
+	// Files are paths in the repository put inside the service's container,
+	// read-only, as repository path -> path in the container: a script for a
+	// database to run as it starts, a server's configuration. They are the
+	// service's alone. The step sees them only if they are among its inputs.
+	Files map[string]string `json:"files,omitempty"`
+}
+
+// FilePaths are the repository paths of a service's files, sorted.
+func (s Service) FilePaths() []string {
+	paths := make([]string, 0, len(s.Files))
+	for p := range s.Files {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 // Tool is a program a step wants on its PATH without it being in the image:
@@ -581,13 +599,27 @@ var serviceName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 func serviceBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var name, image, ready string
-	var env *starlark.Dict
+	var env, files *starlark.Dict
 	var command *starlark.List
+	within := 0
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
-		"name", &name, "image", &image, "env?", &env, "args?", &command, "ready?", &ready); err != nil {
+		"name", &name, "image", &image, "env?", &env, "args?", &command, "ready?", &ready,
+		"ready_within?", &within, "files?", &files); err != nil {
 		return nil, err
 	}
-	sv := Service{Name: name, Image: image, Env: map[string]string{}, Ready: ready}
+	sv := Service{Name: name, Image: image, Env: map[string]string{}, Ready: ready, ReadyWithin: within}
+	if files != nil {
+		sv.Files = map[string]string{}
+		for _, item := range files.Items() {
+			k, kok := item[0].(starlark.String)
+			v, vok := item[1].(starlark.String)
+			if !kok || !vok {
+				return nil, fmt.Errorf("service %q: files must map a path in the repository to a path in the container", name)
+			}
+			// Cleaned, so that one file is named one way.
+			sv.Files[path.Clean(string(k))] = string(v)
+		}
+	}
 	if command != nil {
 		for i := 0; i < command.Len(); i++ {
 			v, ok := command.Index(i).(starlark.String)
@@ -622,6 +654,18 @@ func (s Service) validate() error {
 	}
 	if strings.ContainsAny(s.Ready, "\r\n") {
 		return fmt.Errorf("service %q: ready must be one line", s.Name)
+	}
+	if s.ReadyWithin < 0 || s.ReadyWithin > 3600 {
+		return fmt.Errorf("service %q: ready_within is in seconds, and at most an hour; got %d", s.Name, s.ReadyWithin)
+	}
+	for from, to := range s.Files {
+		// One path, not a pattern: it is put at one place in the container.
+		if c := path.Clean(from); from == "" || from != c || c == "." || path.IsAbs(c) || c == ".." || strings.HasPrefix(c, "../") || strings.ContainsAny(c, "*?[") {
+			return fmt.Errorf("service %q: file %q must be one file or directory inside the repository", s.Name, from)
+		}
+		if !path.IsAbs(to) || to != path.Clean(to) || to == "/" || strings.ContainsAny(to, ":\n") {
+			return fmt.Errorf("service %q: file %q needs an absolute path in the container, got %q", s.Name, from, to)
+		}
 	}
 	return nil
 }

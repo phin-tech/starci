@@ -591,6 +591,16 @@ def ci(ctx):
 	wantError(t, one(`service("db", image = "i"), service("db", image = "j")`), "listed twice")
 	wantError(t, one(`"postgres:17"`), "service(...)")
 
+	// A file is one path in the repository, put at one place in the container.
+	given := mustEval(t, one(`service("db", image = "i", ready_within = 300, files = {"./db/init.sql": "/docker-entrypoint-initdb.d/01.sql", "db/conf": "/etc/db"})`)).Steps[0].Services[0]
+	if given.ReadyWithin != 300 || given.Files["db/init.sql"] != "/docker-entrypoint-initdb.d/01.sql" || strings.Join(given.FilePaths(), " ") != "db/conf db/init.sql" {
+		t.Errorf("service = %+v", given)
+	}
+	wantError(t, one(`service("db", image = "i", files = {"db/*.sql": "/init"})`), "one file or directory")
+	wantError(t, one(`service("db", image = "i", files = {"../secrets": "/init"})`), "inside the repository")
+	wantError(t, one(`service("db", image = "i", files = {"db/init.sql": "init.sql"})`), "absolute path")
+	wantError(t, one(`service("db", image = "i", ready_within = 7200)`), "at most an hour")
+
 	// And a plan that arrives as JSON is held to the same.
 	p.Steps[1].Services[1].Name = "postgres"
 	if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "listed twice") {

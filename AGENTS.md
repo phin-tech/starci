@@ -91,7 +91,8 @@ capability for them: like `network = False`, every engine is held to them.
   things: each service answers to its name from the step, the step does not
   start until `ready` succeeds in the service's container, a step with
   `network = False` reaches its services and nothing else, and nothing of them
-  is left when the step ends or is cancelled.
+  is left when the step ends or is cancelled. A service's `files` are in its
+  container, read-only, and not in the step's workspace.
 - A worker that is killed leaves its steps' services running, and they do not
   end by themselves. `step.Sweep` removes what an earlier life of a worker
   left; a durable engine's worker calls it as it starts, as Hatchet's does in

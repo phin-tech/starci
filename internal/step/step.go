@@ -130,7 +130,21 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 		for _, k := range sortedKeys(sv.Env) {
 			env = append(env, [2]string{k, sv.Env[k]})
 		}
-		serviceIDs = append(serviceIDs, []any{sv.Name, svImg.id, env, sv.Args, sv.Ready})
+		id := []any{sv.Name, svImg.id, env, sv.Args, sv.Ready}
+		// Only said when it has some, so that every other service keeps the
+		// identity it had.
+		if len(sv.Files) > 0 {
+			given, err := co.contentID(sv.FilePaths())
+			if err != nil {
+				return failed("service %q: %v", sv.Name, strings.Replace(err.Error(), "input ", "file ", 1))
+			}
+			places := [][2]string{}
+			for _, from := range sv.FilePaths() {
+				places = append(places, [2]string{from, sv.Files[from]})
+			}
+			id = append(id, places, given)
+		}
+		serviceIDs = append(serviceIDs, id)
 	}
 	var tools []installed
 	for _, t := range s.Tools {
@@ -193,7 +207,20 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	case len(s.Services) > 0:
 		log("starting " + strings.Join(serviceNames(s), ", "))
 		done := phase(ctx, "start the services")
-		up, stop, err := startServices(ctx, container, cfg.Worker, s)
+		// A service's files are checked out beside the workspace, never in
+		// it: the step is given its own inputs and nothing of theirs.
+		given := map[string]string{}
+		for _, sv := range s.Services {
+			if len(sv.Files) == 0 {
+				continue
+			}
+			given[sv.Name] = filepath.Join(root, "services", sv.Name)
+			if err := co.materialiseInto(given[sv.Name], sv.FilePaths()); err != nil {
+				done()
+				return failed("checkout of the files of service %q failed: %v", sv.Name, err)
+			}
+		}
+		up, stop, err := startServices(ctx, container, cfg.Worker, s, given)
 		done()
 		// Deferred before the error is looked at: some may have started.
 		defer stop()
@@ -314,7 +341,12 @@ func fetch(cloneURL, sha, root string, env []string) (*checkout, error) {
 }
 
 func (co *checkout) git(args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"--git-dir=" + co.gitDir, "--work-tree=" + co.workspace}, args...)...)
+	return co.gitIn(co.workspace, args...)
+}
+
+// gitIn is git with dir as the place files are written to.
+func (co *checkout) gitIn(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"--git-dir=" + co.gitDir, "--work-tree=" + dir}, args...)...)
 	// Never wait at a prompt for a password nobody will type.
 	cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), co.env...)
 	out, err := cmd.CombinedOutput()
@@ -393,11 +425,20 @@ func MissingInputs(dir string, inputs []string) ([]string, error) {
 }
 
 func (co *checkout) materialise(inputs []string) error {
+	return co.materialiseInto(co.workspace, inputs)
+}
+
+// materialiseInto writes the files the inputs select under dir, at the paths
+// they have in the repository.
+func (co *checkout) materialiseInto(dir string, inputs []string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
 	args := []string{"checkout", "-q", "FETCH_HEAD", "--"}
 	for _, in := range inputs {
 		args = append(args, pathspec(in))
 	}
-	_, err := co.git(args...)
+	_, err := co.gitIn(dir, args...)
 	return err
 }
 

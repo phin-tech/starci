@@ -412,7 +412,7 @@ Runs for different branches, or for a bare commit, leave each other alone.
 | | |
 |---|---|
 | `step(name, image, run, needs = [], env = {}, inputs = ["."], caches = {}, cache = True, worker = {}, prefer = {}, avoid = {}, tools = [], packages = [], network = True, services = [])` | Declare a container to run. Returns a handle usable in another step's `needs`. |
-| `service(name, image, env = {}, args = [], ready = "")` | Declare a container to run beside a step, for its `services`. |
+| `service(name, image, env = {}, args = [], ready = "", ready_within = 120, files = {})` | Declare a container to run beside a step, for its `services`. |
 | `ctx.repo`, `ctx.sha`, `ctx.ref` | What is being built. `ref` is the branch. |
 | `ctx.event` | Why the run started: `"push"`, `"tag"`, `"pull_request"`, `"schedule"` or `"manual"`. |
 | `ctx.tag` | The tag's name, for a tag. |
@@ -642,18 +642,34 @@ until it succeeds, and the step starts only then. Without one, an image that
 declares a health check is waited on until it is healthy, and any other is
 taken to be ready as soon as its container has started, which is before most
 servers are listening. A service that is not ready within two minutes, or
-that stops, fails the step, with the last of what the service printed. The
-command is run by `sh`, so an image without a shell cannot have one. For Postgres ask over TCP, as above:
+that stops, fails the step, with the last of what the service printed.
+`ready_within` gives one that is slow to start more seconds than that, up to
+an hour. The command is run by `sh`, so an image without a shell cannot have
+one. For Postgres ask over TCP, as above:
 while the image is setting a database up it runs a server that answers only
 on its socket, and `pg_isready` alone would be satisfied by that one.
 
 `args` replaces the image's command, for a server that has to be told what to
 serve: `service("store", image = "minio/minio", args = ["server", "/data"])`.
 
+`files` puts paths from the repository inside the service's container,
+read-only, as repository path to path in the container:
+
+```python
+service("postgres", image = "postgres:17", env = {"POSTGRES_PASSWORD": "pw"},
+        ready = "pg_isready -h localhost",
+        files = {"db/roles.sql": "/docker-entrypoint-initdb.d/10-roles.sql"})
+```
+
+Each is one file or one directory, not a pattern. They are the service's
+alone: the step sees them only if they are also among its `inputs`. A file
+that is not in the commit fails the step, and `starci validate` looks for
+them as it does for inputs.
+
 A service is part of what a pass means. A step's result is keyed on each
-service's name, image, `env`, `args` and `ready`, and the image is identified
-by its content like the step's own, so a new `postgres:17` runs the step
-again. A step with `network = False` still reaches its services, and they
+service's name, image, `env`, `args`, `ready` and the contents of its `files`,
+and the image is identified by its content like the step's own, so a new
+`postgres:17` or an edited script runs the step again. A step with `network = False` still reaches its services, and they
 reach nothing else either: the step's container has a network interface, but
 no route out.
 

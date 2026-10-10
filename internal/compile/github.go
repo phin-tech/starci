@@ -188,13 +188,18 @@ func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) erro
 		for _, in := range s.Inputs {
 			fmt.Fprintf(w, "            %s\n", sparsePattern(in))
 		}
+		// What its services are given has to be fetched too. It is taken
+		// out of the step's sight again before the step runs.
+		for _, in := range serviceFiles(s) {
+			fmt.Fprintf(w, "            %s\n", sparsePattern(in))
+		}
 	}
 
 	skip := ""
 	if s.Cache {
 		skip = "        if: steps.passed.outputs.cache-hit != 'true'\n"
 		fmt.Fprintf(w, "      - name: Has this already passed with these inputs?\n        id: passed\n        uses: actions/cache@v4\n        with:\n          path: ${{ runner.temp }}/starci-passed\n          key: starci-passed-%s-%s-${{ hashFiles(%s) }}\n",
-			id, stepKey(s, o.Arch), strings.Join(hashGlobs(s.Inputs), ", "))
+			id, stepKey(s, o.Arch), strings.Join(hashGlobs(append(append([]string{}, s.Inputs...), serviceFiles(s)...)), ", "))
 	}
 
 	var mounts, pathDirs []string
@@ -242,7 +247,17 @@ func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) erro
 	network := "starci-$GITHUB_RUN_ID-${GITHUB_RUN_ATTEMPT:-1}-" + id
 	if len(s.Services) > 0 {
 		fmt.Fprintf(w, "      - name: %s\n%s        run: |\n", q("Services: "+strings.Join(serviceNames(s), ", ")), skip)
-		for _, l := range startServices(s, network) {
+		given := "\"$RUNNER_TEMP/starci-services/" + id + "\""
+		lines := copyServiceFiles(s, given)
+		if len(lines) > 0 && !whole {
+			// Back to the step's inputs alone.
+			var patterns []string
+			for _, in := range s.Inputs {
+				patterns = append(patterns, shq(sparsePattern(in)))
+			}
+			lines = append(lines, "git sparse-checkout set --no-cone "+strings.Join(patterns, " "))
+		}
+		for _, l := range append(lines, startServices(s, network, given)...) {
 			fmt.Fprintf(w, "          %s\n", l)
 		}
 	}
@@ -314,7 +329,9 @@ func serviceNames(s plan.Step) []string {
 // step with services: a network for this job alone, each service on it under
 // its own name, and no going on until each says it is ready. network is the
 // network's name, as shell: it may hold variables.
-func startServices(s plan.Step, network string) []string {
+//
+// given is the directory, as shell, that copyServiceFiles put their files in.
+func startServices(s plan.Step, network, given string) []string {
 	create := "docker network create "
 	if s.Offline {
 		// Without the network a step still reaches its services, and they
@@ -326,6 +343,9 @@ func startServices(s plan.Step, network string) []string {
 		run := fmt.Sprintf("docker run -d --name \"%s-%s\" --network \"%s\" --network-alias %s --hostname %s", network, sv.Name, network, sv.Name, sv.Name)
 		for _, k := range sortedKeys(sv.Env) {
 			run += " -e " + shq(k+"="+sv.Env[k])
+		}
+		for _, from := range sv.FilePaths() {
+			run += fmt.Sprintf(" -v %s%s:ro", given, shq("/"+sv.Name+"/"+from+":"+sv.Files[from]))
 		}
 		run += " " + sv.Image
 		for _, a := range sv.Args {
@@ -341,18 +361,46 @@ func startServices(s plan.Step, network string) []string {
 		if sv.Ready != "" {
 			ready = fmt.Sprintf("timeout 10 docker exec %s sh -c %s", container, shq(sv.Ready))
 		}
-		// Two minutes, as a worker allows, by the clock: a try that hangs is
-		// cut short, and counts against the same two minutes.
+		within := 120
+		if sv.ReadyWithin > 0 {
+			within = sv.ReadyWithin
+		}
+		// As long as a worker allows, by the clock: a try that hangs is cut
+		// short, and counts against the same wait.
 		lines = append(lines,
-			"until=$(($(date +%s) + 120))",
+			fmt.Sprintf("until=$(($(date +%%s) + %d))", within),
 			"until "+ready+"; do",
 			"  if [ \"$(date +%s)\" -ge \"$until\" ]; then",
-			fmt.Sprintf("    echo \"service %s was not ready after 2 minutes\"", sv.Name),
+			fmt.Sprintf("    echo \"service %s was not ready after %d seconds\"", sv.Name, within),
 			"    docker logs --tail 20 "+container,
 			"    exit 1",
 			"  fi",
 			"  sleep 0.5",
 			"done")
+	}
+	return lines
+}
+
+// serviceFiles are the repository paths a step's services are given.
+func serviceFiles(s plan.Step) []string {
+	var paths []string
+	for _, sv := range s.Services {
+		paths = append(paths, sv.FilePaths()...)
+	}
+	return paths
+}
+
+// copyServiceFiles is the shell that puts each service's files under given,
+// out of the checkout, where the step's container cannot see them.
+func copyServiceFiles(s plan.Step, given string) []string {
+	var lines []string
+	for _, sv := range s.Services {
+		for _, from := range sv.FilePaths() {
+			to := given + shq("/"+sv.Name+"/"+from)
+			lines = append(lines,
+				fmt.Sprintf("mkdir -p \"$(dirname %s)\"", to),
+				fmt.Sprintf("cp -R %s %s", shq(from), to))
+		}
 	}
 	return lines
 }
