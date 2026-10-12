@@ -1,3 +1,4 @@
 /starci
 .env
 *.env
+.kata.local.toml
