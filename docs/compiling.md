@@ -61,7 +61,7 @@ workflow says which apply:
   which could not be reached by name from the step's container. A pass is
   keyed on a service's image by name: a tag that moves does not run the job
   again, as it would on a worker.
-- Advanced scripts cannot be compiled to a workflow at all, or frozen into an executable: their steps are only known as
+- Advanced scripts cannot be compiled at all: their steps are only known as
   they run.
 
 Every script in `examples/basic` is compiled both ways under
@@ -75,31 +75,6 @@ container itself.
 The GitHub output has been linted and one of its jobs run by hand; the
 CircleCI output is accepted by CircleCI's own validator and one of its jobs
 has been run by hand. Neither has been run on the service it is for.
-
-## Or an executable
-
-```sh
-starci compile --target binary -o ci
-./ci            # in a checkout; ./ci path/to/checkout for another
-```
-
-writes a copy of starci with the script appended, which does what
-`starci run --local` does and nothing else. Anything after the checkout is a
-`run` flag (`-v`, `--event`, `--sha`, `--slots`).
-
-By default the script travels and is evaluated when the executable runs, so
-advanced scripts and scripts that read `ctx` work as they do under
-`run --local`. With `--freeze` the plan is evaluated now and travels instead:
-no script is evaluated at run time, advanced scripts are refused, and anything
-decided by `ctx` is fixed at what a push about which nothing is known gives,
-as in the CircleCI output.
-
-What is inside is starci and the script. Tools are still downloaded on first
-use, by checksum, images are pulled by Docker, and the repository is the
-checkout it is run in, so it needs Docker and nothing else. `--base` names the
-starci executable to copy, which is how to build for another OS or
-architecture. On macOS the appended copy no longer passes `codesign -v`, though
-it runs; a file that was downloaded may need its quarantine flag cleared.
 
 ## Or run starci inside the CI tool
 
