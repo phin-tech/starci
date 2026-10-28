@@ -1,0 +1,51 @@
+site_name: starci
+site_description: CI defined as a script instead of YAML.
+docs_dir: docs
+strict: true
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: false
+  - pymdownx.superfences
+
+# The examples are shared with the repository, which links to them from its
+# README, and are served from here as they are: the scripts and what they
+# compile to are downloads, not pages.
+nav:
+  - Home: index.md
+  - Using starci:
+      - Getting started: getting-started.md
+      - Running on every push: running.md
+      - Compiling to a workflow: compiling.md
+      - Workers: workers.md
+  - Writing a script:
+      - What a script can do: scripts.md
+      - Tools and packages: tools.md
+      - Inputs, networks and services: inputs.md
+      - Examples: examples/README.md
+  - Internals:
+      - How it fits together: architecture.md
+      - Development: development.md

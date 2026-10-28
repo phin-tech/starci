@@ -1,7 +1,8 @@
 # Working on starci
 
-starci is CI whose pipelines are Starlark scripts. The README says what it does
-and how to use it; this file is for whoever changes the code.
+starci is CI whose pipelines are Starlark scripts. The README and the docs it
+links to (`docs/`, built with MkDocs) say what it does and how to use it; this
+file is for whoever changes the code.
 
 ```sh
 go test ./...          # runs real containers; needs Docker
@@ -57,7 +58,7 @@ else is a small optional interface, asked for with a type assertion: `Starter`,
    done until it passes all that apply.
 3. If the engine needs a service to test against, gate its test behind an
    environment variable the way Hatchet's is (`STARCI_TEST_HATCHET`), and say
-   how to run it in the README's Development section.
+   how to run it in `docs/development.md`.
 4. Add optional interfaces only for what the engine really has.
 
 ### Durable engines and replay
