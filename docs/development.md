@@ -16,13 +16,15 @@ STARCI_TEST_HATCHET=1 go test ./internal/engine/hatchet -run TestEngine
 
 ## This documentation
 
-The pages in `docs/` are built with [Material for MkDocs](https://squidfunk.github.io/mkdocs-material/).
-`docs/examples` is a link to the `examples/` directory, so the scripts and what
-they compile to are served as they are in the repository.
+The pages in `docs/` are built with [Zensical](https://zensical.org/), which
+reads `mkdocs.yml` and gives the Material for MkDocs look. `docs/examples` is a
+copy of `examples/` made by the script, so the example scripts and what they
+compile to are served as they are in the repository.
 
 ```sh
-uv run --with 'mkdocs-material==9.8.0' --with 'mkdocs<2' mkdocs serve
-uv run --with 'mkdocs-material==9.8.0' --with 'mkdocs<2' mkdocs build --strict
+dev/docs.sh serve   # while writing
+dev/docs.sh         # the same build CI does; a broken link fails it
 ```
 
-The build is strict, so a broken link fails it.
+Zensical is before 1.0, so its version is pinned, in `dev/docs.sh` and in
+`.github/workflows/docs.yml`.

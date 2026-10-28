@@ -31,9 +31,9 @@ markdown_extensions:
       anchor_linenums: false
   - pymdownx.superfences
 
-# The examples are shared with the repository, which links to them from its
-# README, and are served from here as they are: the scripts and what they
-# compile to are downloads, not pages.
+# Built with Zensical, which reads this file (dev/docs.sh). docs/examples is a
+# copy of examples/, made at build time: the scripts and what they compile to
+# are downloads, not pages.
 nav:
   - Home: index.md
   - Using starci:

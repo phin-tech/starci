@@ -3,3 +3,4 @@
 *.env
 .kata.local.toml
 /site
+/docs/examples

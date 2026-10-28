@@ -1,5 +1,8 @@
 # starci
 
+> Development happens at [git.phin.tech/sam/starci](https://git.phin.tech/sam/starci). The copy on GitHub is a
+> mirror that serves the documentation site: it takes no pull requests or issues.
+
 CI defined as a script instead of YAML. A repository's `.ci.star` is a
 [Starlark](https://github.com/bazelbuild/starlark) program whose `ci(ctx)`
 function returns the steps to run. Because the graph is computed, it can follow
@@ -20,7 +23,7 @@ There are thirty-seven worked examples in [`examples/`](examples/README.md), in 
 ## Documentation
 
 The documentation is in [`docs/`](docs/index.md), and is built into a site with
-`mkdocs serve` (see [Development](docs/development.md)).
+`dev/docs.sh` (see [Development](docs/development.md)).
 
 | | |
 |---|---|
