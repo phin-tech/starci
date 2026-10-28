@@ -38,6 +38,23 @@ The three `pi-gamebook` ones run as they are against that repository.
 | [pi-gamebook](basic/pi-gamebook.ci.star) | A real repository's CI. |
 | [pi-gamebook-tools](basic/pi-gamebook-tools.ci.star) | The same, on plain Debian with Bun as a tool. |
 
+### Compiled
+
+Every basic script is also written out for GitHub Actions (which Forgejo and
+Gitea read too) and for CircleCI, to see what `starci compile` makes of it:
+
+- `basic/compiled/github/<name>.yml`, from `starci compile`
+- `basic/compiled/circleci/<name>.yml`, from `starci compile --target circleci`
+
+[events](basic/compiled/github/events.yml) is the one to read first for GitHub:
+its jobs carry conditions and the workflow's `on:` is worked out from the
+script. [services](basic/compiled/github/services.yml) shows a database
+started and stopped by the job itself. Each file's header says what did not
+carry over. Advanced scripts cannot be compiled, so there are none for them.
+
+`basic/compile.sh` writes them all again; `basic/compile.sh --check` fails if
+any is not what its script compiles to now.
+
 ## Advanced: `pipeline(ctx)` runs steps and reacts
 
 | | |

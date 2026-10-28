@@ -259,6 +259,9 @@ workflow says which apply:
 - Advanced scripts cannot be compiled at all: their steps are only known as
   they run.
 
+Every script in `examples/basic` is compiled both ways under
+`examples/basic/compiled`.
+
 The CircleCI output keys a pass on the exact list of files the inputs select,
 asked of git the way a worker asks, where the GitHub output has to make do
 with globs. It uses the machine executor, since each job starts the step's
