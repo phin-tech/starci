@@ -5,7 +5,7 @@ name: Docs
 on:
   push:
     branches: [main]
-    paths: ["docs/**", "examples/**", "mkdocs.yml", ".github/workflows/docs.yml"]
+    paths: ["docs/**", "examples/**", "mkdocs.yml", "dev/docs*", ".github/workflows/docs.yml"]
   workflow_dispatch:
 
 permissions:
@@ -27,6 +27,7 @@ jobs:
           python-version: "3.13"
       - run: pip install 'zensical==0.0.73'
       - run: cp -R examples docs/examples
+      - run: python3 dev/docs-examples.py
       - run: zensical build
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -18,8 +18,10 @@ STARCI_TEST_HATCHET=1 go test ./internal/engine/hatchet -run TestEngine
 
 The pages in `docs/` are built with [Zensical](https://zensical.org/), which
 reads `mkdocs.yml` and gives the Material for MkDocs look. `docs/examples` is a
-copy of `examples/` made by the script, so the example scripts and what they
-compile to are served as they are in the repository.
+copy of `examples/` made by the script, which also writes a page for each
+example (`dev/docs-examples.py`): the script, and for a basic one what it
+compiles to for GitHub Actions and for CircleCI. A new example has to be added
+to the nav in `mkdocs.yml`, and the build says so if it is not.
 
 ```sh
 dev/docs.sh serve   # while writing

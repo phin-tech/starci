@@ -31,6 +31,8 @@ markdown_extensions:
   - pymdownx.highlight:
       anchor_linenums: false
   - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
 
 # Built with Zensical, which reads this file (dev/docs.sh). docs/examples is a
 # copy of examples/, made at build time: the scripts and what they compile to
@@ -46,7 +48,47 @@ nav:
       - What a script can do: scripts.md
       - Tools and packages: tools.md
       - Inputs, networks and services: inputs.md
-      - Examples: examples/README.md
+      - Examples:
+          - examples/README.md
+          - Basic:
+              - examples/basic/branches.md
+              - examples/basic/changed-files.md
+              - examples/basic/changed-files-matrix.md
+              - examples/basic/diamond.md
+              - examples/basic/docs-only.md
+              - examples/basic/events.md
+              - examples/basic/go.md
+              - examples/basic/gpu.md
+              - examples/basic/hello.md
+              - examples/basic/helpers.md
+              - examples/basic/matrix.md
+              - examples/basic/monorepo.md
+              - examples/basic/pi-gamebook.md
+              - examples/basic/pi-gamebook-tools.md
+              - examples/basic/placement.md
+              - examples/basic/polyglot.md
+              - examples/basic/python-uv.md
+              - examples/basic/rust.md
+              - examples/basic/security.md
+              - examples/basic/services.md
+              - examples/basic/shell-scripts.md
+              - examples/basic/terraform.md
+              - examples/basic/wrapping-actions.md
+              - examples/basic/wrapping-lint-actions.md
+              - examples/basic/wrapping-release-actions.md
+          - Advanced:
+              - examples/advanced/affected.md
+              - examples/advanced/canary.md
+              - examples/advanced/choose-by-step.md
+              - examples/advanced/coverage-gate.md
+              - examples/advanced/deploy-gate.md
+              - examples/advanced/fanout.md
+              - examples/advanced/first-failure.md
+              - examples/advanced/pi-gamebook.md
+              - examples/advanced/retry-flaky.md
+              - examples/advanced/shards.md
+              - examples/advanced/tolerated.md
+              - examples/advanced/wait-until-ready.md
   - Internals:
       - How it fits together: architecture.md
       - Development: development.md
