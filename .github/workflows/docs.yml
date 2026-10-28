@@ -25,6 +25,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
       - run: pip install 'zensical==0.0.73'
       - run: cp -R examples docs/examples
       - run: python3 dev/docs-examples.py

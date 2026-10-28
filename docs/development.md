@@ -21,7 +21,13 @@ reads `mkdocs.yml` and gives the Material for MkDocs look. `docs/examples` is a
 copy of `examples/` made by the script, which also writes a page for each
 example (`dev/docs-examples.py`): the script, and for a basic one what it
 compiles to for GitHub Actions and for CircleCI. A new example has to be added
-to the nav in `mkdocs.yml`, and the build says so if it is not.
+to the nav in `mkdocs.yml`, and the build says so if it is not. Building needs Go,
+since the page of a basic example draws its plan with `starci plan`.
+
+The release processes (`branches`, `events`, `wrapping-release-actions`,
+`deploy-gate`, `canary`) are played from drawings in `docs/animations`, with
+[dottie.js](https://dottie.phin.tech/dottie-js/); a page gets one by having a
+drawing named for its example. See `dev/animations/README.md`.
 
 ```sh
 dev/docs.sh serve   # while writing

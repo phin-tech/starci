@@ -1,0 +1,11 @@
+/* A drawing is dark ink on paper, whatever the theme: give it the paper. */
+dottie-player {
+  display: block;
+  box-sizing: border-box;
+  max-width: 100%;
+  margin: 1rem 0;
+  padding: 0.5rem;
+  background: #fff;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.4rem;
+}

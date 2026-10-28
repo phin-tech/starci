@@ -6,8 +6,11 @@ Actions and what it compiles to for CircleCI; an advanced one has the script
 alone, since advanced scripts cannot be compiled. Run by dev/docs.sh after
 examples/ has been copied into docs/, and not kept in git.
 """
+import json
 import re
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent
@@ -37,6 +40,36 @@ for m in re.finditer(r"^\| \[([^\]]+)\]\((basic|advanced)/[^)]+\) \| (.*) \|$", 
     blurb[(m.group(2), m.group(1))] = m.group(3)
 
 
+# The examples that are release processes are played, from a drawing in
+# docs/animations; the rest get their plan as a graph.
+played = {p.stem for p in (root / "docs" / "animations").glob("*.dottie")}
+
+binary = None
+
+
+def plan(script):
+    """What starci plans for a push about which nothing is known."""
+    global binary
+    if binary is None:
+        binary = Path(tempfile.mkdtemp()) / "starci"
+        subprocess.run(["go", "build", "-o", str(binary), "./cmd/starci"], cwd=root, check=True)
+    out = subprocess.run([str(binary), "plan", "--file", str(script)], cwd=root, check=True, capture_output=True, text=True)
+    return json.loads(out.stdout)["steps"]
+
+
+def graph(steps):
+    """The steps as a Mermaid flowchart, an arrow for each `needs`."""
+    ids = {s["name"]: f"s{i}" for i, s in enumerate(steps)}
+    lines = ["flowchart LR"]
+    for s in steps:
+        lines.append(f'    {ids[s["name"]]}["{s["name"].replace(chr(34), "#quot;")}"]')
+    for s in steps:
+        for need in s.get("needs") or []:
+            if need in ids:
+                lines.append(f"    {ids[need]} --> {ids[s['name']]}")
+    return "\n".join(lines)
+
+
 def indent(text, n=4):
     return "\n".join((" " * n + l) if l else "" for l in text.splitlines())
 
@@ -56,10 +89,25 @@ for mode, glob, tail in (("basic", "*.ci.star", ".ci.star"), ("advanced", "*.pip
             for label, target in (("GitHub Actions", "github"), ("CircleCI", "circleci")):
                 tabs.append((label, fenced("yaml", (ex / "basic" / "compiled" / target / f"{name}.yml").read_text())))
         body = [f"# {name}", ""]
-        if (mode, name) in blurb:
-            body += [blurb[(mode, name)], ""]
-        if lead(src):
-            body += [lead(src), ""]
+        # The index's one-liner, and the script's own opening paragraph, unless
+        # one says what the other does.
+        words = lambda t: re.sub(r"[^a-z0-9 ]", "", t.lower().replace("`", ""))
+        one, opening = blurb.get((mode, name), ""), lead(src)
+        if one and not (opening and (words(one).strip() in words(opening) or words(opening).strip() in words(one))):
+            body += [one, ""]
+        if opening:
+            body += [opening, ""]
+        if name in played:
+            body += [
+                f'<dottie-player src="../../animations/{name}.dottie" label="How a run goes through {name}"></dottie-player>',
+                "",
+                "Amber steps have effects outside the run, so a pass is never reused. Pause it, or step through it, with the controls.",
+                "",
+            ]
+        elif mode == "basic":
+            steps = plan(script)
+            if len(steps) > 1:
+                body += ["```mermaid", graph(steps), "```", "", "The steps this script plans for a push about which nothing is known. An arrow is a `needs`.", ""]
         for label, content in tabs:
             body += [f'=== "{label}"', "", indent(content), ""]
         body += ["---", ""]

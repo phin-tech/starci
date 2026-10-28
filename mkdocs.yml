@@ -30,9 +30,20 @@ markdown_extensions:
       permalink: true
   - pymdownx.highlight:
       anchor_linenums: false
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.tabbed:
       alternate_style: true
+
+extra_css:
+  - stylesheets/extra.css
+
+# dottie.js plays the drawings in docs/animations, straight from the .dottie file.
+extra_javascript:
+  - https://cdn.jsdelivr.net/npm/@phin-tech/dottie@0.6.2/dist/dottie-player.min.js
 
 # Built with Zensical, which reads this file (dev/docs.sh). docs/examples is a
 # copy of examples/, made at build time: the scripts and what they compile to
