@@ -1,4 +1,5 @@
 site_name: starci
+site_url: https://docs.phin.tech/starci/
 site_description: CI defined as a script instead of YAML.
 docs_dir: docs
 strict: true
