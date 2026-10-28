@@ -26,6 +26,11 @@ The three `pi-gamebook` ones run as they are against that repository.
 | [monorepo](basic/monorepo.ci.star) | Test only the packages a commit touched. |
 | [polyglot](basic/polyglot.ci.star) | Per-language checks, chosen by which files changed. |
 | [helpers](basic/helpers.ci.star) | Functions that return groups of steps. |
+| [changed-files](basic/changed-files.ci.star) | `match_files` and `paths_filter`: what changed-files and paths-filter actions are for. |
+| [wrapping-actions](basic/wrapping-actions.ci.star) | setup-node, trivy, hadolint and docker build as functions that return steps. |
+| [wrapping-lint-actions](basic/wrapping-lint-actions.ci.star) | golangci-lint, ruff, shellcheck and actionlint, each run only when its kind of file changed. |
+| [wrapping-release-actions](basic/wrapping-release-actions.ci.star) | Image push and goreleaser, for a tag only and never reused. |
+| [changed-files-matrix](basic/changed-files-matrix.ci.star) | A job per service that changed, the usual use of a changed-files action. |
 | [python-uv](basic/python-uv.ci.star) | A tool (uv), apt packages, and input patterns. |
 | [services](basic/services.ci.star) | A database beside each test step, its own and ready before the step starts. |
 | [go](basic/go.ci.star) | The Go toolchain as a tool; builds for several platforms. |

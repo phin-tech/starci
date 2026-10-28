@@ -424,6 +424,12 @@ Runs for different branches, or for a bare commit, leave each other alone.
 | `schedule(name, cron, overlap = "skip", catch_up = False)` | Declare a schedule, at the top of the file. |
 | `ctx.changed_files` | Files the commit changed, sorted. |
 | `ctx.changed_dirs` | Their top-level directories, sorted (`.` for files at the root). |
+| `match_files(files, include = [], exclude = [])` | The paths that match a glob in `include` (any, when empty) and none in `exclude`: what `tj-actions/changed-files` is used for. Pass it `ctx.changed_files`. |
+| `paths_filter(files, filters)` | A dict with a list of matching paths for each named list of globs: what `dorny/paths-filter` is used for. An empty list is false. |
+
+Globs match the whole path. `*` and `?` stay within a directory, `**` does not,
+`**/` may match no directory, `{a,b}` is either, and a pattern starting with
+`!` removes what it matches from the rest of its list.
 
 Nothing else. A script cannot read files, reach the network, read the clock or
 `load()` another file, and it is stopped if it runs too long. The same script

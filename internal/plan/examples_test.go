@@ -98,6 +98,17 @@ func TestBasicExamplesDoWhatTheySay(t *testing.T) {
 	check("polyglot, python and typescript touched", plan("polyglot.ci.star", exampleContexts["a code change"]), "python, typescript")
 	check("terraform, no stack touched", plan("terraform.ci.star", exampleContexts["a code change"]), "fmt")
 	check("terraform, two stacks touched", plan("terraform.ci.star", Context{ChangedFiles: []string{"stacks/prod/main.tf", "stacks/dev/vars.tf", "stacks/prod/out.tf", "stacks/README.md"}}), "fmt, validate dev, validate prod")
+	check("changed-files, ui and docs touched", plan("changed-files.ci.star", Context{ChangedFiles: []string{"ui/src/a.tsx", "docs/x.md", "CHANGELOG.md"}}), "ui tests, markdown lint")
+	check("changed-files, only the changelog", plan("changed-files.ci.star", Context{ChangedFiles: []string{"CHANGELOG.md"}}), "")
+	check("changed-files, api readme only", plan("changed-files.ci.star", Context{ChangedFiles: []string{"api/README.md"}}), "markdown lint")
+	check("wrapping-actions", plan("wrapping-actions.ci.star", exampleContexts["nothing known"]), "web test, api test, trivy, hadolint, image")
+	check("wrapping-lint-actions, python and shell touched", plan("wrapping-lint-actions.ci.star", Context{ChangedFiles: []string{"tools/a.py", "scripts/b.sh"}}), "ruff, shellcheck")
+	check("wrapping-lint-actions, nothing known", plan("wrapping-lint-actions.ci.star", exampleContexts["nothing known"]), "golangci-lint, ruff, shellcheck, actionlint")
+	check("wrapping-release-actions on a push", plan("wrapping-release-actions.ci.star", exampleContexts["a code change"]), "test")
+	check("wrapping-release-actions on a tag", plan("wrapping-release-actions.ci.star", Context{Event: EventTag, Tag: "v1.2.3"}), "test, push image, goreleaser")
+	check("changed-files-matrix, one service and a README", plan("changed-files-matrix.ci.star", Context{ChangedFiles: []string{"services/web/a.ts", "services/search/README.md"}}), "test web")
+	check("changed-files-matrix, shared library", plan("changed-files-matrix.ci.star", exampleContexts["a shared change"]), "test billing, test search, test web")
+	check("changed-files-matrix, proto", plan("changed-files-matrix.ci.star", Context{ChangedFiles: []string{"proto/a.proto"}}), "test billing, test search, test web")
 	if got := plan("go.ci.star", exampleContexts["nothing known"]); len(got) != 5 {
 		t.Errorf("go: %d steps, want vet, test and three builds", len(got))
 	}

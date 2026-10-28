@@ -157,6 +157,9 @@ func predeclared() starlark.StringDict {
 		"run":      starlark.NewBuiltin("run", runBuiltin),
 		"parallel": starlark.NewBuiltin("parallel", parallelBuiltin),
 		"schedule": starlark.NewBuiltin("schedule", scheduleBuiltin),
+
+		"match_files":  starlark.NewBuiltin("match_files", matchFilesBuiltin),
+		"paths_filter": starlark.NewBuiltin("paths_filter", pathsFilterBuiltin),
 	}
 }
 
