@@ -2,7 +2,7 @@
 
 | Package | |
 |---|---|
-| `internal/plan` | The language: evaluating scripts in both modes, and walking a plan. Knows no engine; it asks a `Runner` to "run these steps together and hand back their results". |
+| `internal/plan` | The language: evaluating scripts in both modes, and deciding what a run does next. Knows no engine; an engine asks it what is next, given the results so far, and runs what it says. |
 | `internal/step` | Running one step on one machine: fetch, sandbox, container, result cache. Knows no engine either. |
 | `internal/engine` | What starci asks of whatever carries a run out: the `Engine` interface. |
 | `internal/engine/local` | The engine that is this machine: it calls `step` directly, concurrently. |

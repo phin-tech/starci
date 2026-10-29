@@ -35,8 +35,10 @@ only what an engine that exists needs.
 
 - `internal/plan` (the language, walking a plan) and `internal/step` (running
   one step on one machine) know no engine. Do not import an engine, or an
-  engine's SDK, from either. `plan` asks a `Runner` to "run these steps
-  together and hand back their results"; that is the whole seam.
+  engine's SDK, from either. An engine asks `plan` what is next
+  (`Plan.Next`, `NextInPipeline`), handing it the results so far, runs the
+  steps it is given, and asks again; that is the whole seam
+  (`docs/adr/0003-starci-says-what-is-next.md`).
 - `internal/engine` holds the interface and nothing engine-specific.
 - Everything specific to one engine goes in its own package under
   `internal/engine/<name>`, extras included: its dashboard links, its webhook
@@ -76,12 +78,16 @@ an engine yet.
 ### Durable engines and replay
 
 Learnt from Hatchet, and expected of any engine that resumes runs (Temporal,
-DBOS). An advanced script is evaluated again from the top when the machine
-carrying it out is lost, and each step it asks for must be answered from the
-engine's record instead of being run a second time. This works because a
+DBOS). `Next` evaluates an advanced script from the top every time it is
+asked, answering each step from the results it is handed, so an engine that
+keeps its results resumes a run by asking again. This works because a
 Starlark script asks for the same steps in the same order when given the same
-answers. The engine side has to hold up its end:
+answers; each step has a number, and `Next` ends the run if a number already
+answered is now a different step. The engine side has to hold up its end:
 
+- **Keep each result with the number and fingerprint `Asked.Answer` gave
+  it.** A step is known by its number, not its name; an advanced script may
+  give two steps one name.
 - **What is handed to the engine for a step must be identical on every
   evaluation.** Hatchet refused to resume a run whose child inputs differed
   from the first attempt. Anything that changes between evaluations (a

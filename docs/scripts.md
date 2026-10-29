@@ -54,7 +54,7 @@ def pipeline(ctx):
 |---|---|
 | `run(step, allow_failure = False)` | Run one step and return its result. |
 | `parallel(steps, allow_failure = False)` | Run several together; results come back in the same order. |
-| `result.ok`, `.status`, `.output`, `.name`, `.seconds`, `.cached`, `.machine`, `.detail` | What a result carries. `output` is what the step printed, up to 64 KB. |
+| `result.ok`, `.status`, `.output`, `.name`, `.number`, `.seconds`, `.cached`, `.machine`, `.detail` | What a result carries. `output` is what the step printed, up to 64 KB. `number` is which step of the run it was, counted in the order the script asked: two steps may share a name, never a number. |
 | `fail(message)` | End the run as failed. |
 
 A step that fails ends the run, unless `allow_failure` hands the script the

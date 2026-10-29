@@ -23,3 +23,21 @@ _Avoid_: labels (for the step's side), constraints
 **Bare step**:
 A step that names no image, and runs as the machine's own processes, in whatever the machine provides.
 _Avoid_: host step, native step
+
+**Step number**:
+Which step of its run a step is, counted in the order the run asks for them. A step is known by its number; its name is for people, and need not be unique in an advanced script.
+_Avoid_: index, sequence, step id
+
+**Artifact**:
+A file or directory a step keeps, so that a later step can be handed it. A step sees another's artifact only when the script names it.
+_Avoid_: output (that is what a step printed), product, files
+
+### Store
+
+**Store**:
+Where results, outputs and artifacts are kept, by the hash of their content: a directory on the machine, or a shared bucket.
+_Avoid_: cache (a step's caches are something else), CAS, blob store
+
+**Pointer**:
+What a result carries in place of an output or artifact: the hash and size of something in the store.
+_Avoid_: ref, handle, digest

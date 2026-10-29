@@ -311,7 +311,7 @@ func runCmd(args []string) error {
 		if r.Cached {
 			note = "cached, first passed" + where
 		}
-		fmt.Printf("  %-8s %s  %s\n", r.Status, r.Name, note)
+		fmt.Printf("  %-8s #%d %s  %s\n", r.Status, r.Number, r.Name, note)
 		if r.Detail != "" {
 			lines := strings.Split(r.Detail, "\n")
 			if len(lines) > 15 {

@@ -301,7 +301,9 @@ func TestAdvancedExamples(t *testing.T) {
 				t.Fatalf("Mode = %q, %v; want advanced", mode, err)
 			}
 			r := &fakeRunner{outcomes: c.outcomes}
-			_, err = RunPipeline(context.Background(), path, src, c.ctx, r)
+			_, err = r.drive(func(results []Result) (Decision, error) {
+				return NextInPipeline(context.Background(), path, src, c.ctx, results)
+			})
 			if c.wantErr == "" && err != nil {
 				t.Fatalf("pipeline: %v", err)
 			}

@@ -1,7 +1,6 @@
 package plan
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"regexp"
@@ -37,10 +36,14 @@ const (
 
 // Result is what a script sees of a step it ran.
 type Result struct {
-	Name    string  `json:"name"`
-	Status  string  `json:"status"` // passed, failed or skipped
-	Output  string  `json:"output"`
-	Seconds float64 `json:"seconds"`
+	// Number is which step of its run this answers.
+	Number int `json:"number"`
+	// Fingerprint stands for the step as it was asked for.
+	Fingerprint string  `json:"fingerprint,omitempty"`
+	Name        string  `json:"name"`
+	Status      string  `json:"status"` // passed, failed or skipped
+	Output      string  `json:"output"`
+	Seconds     float64 `json:"seconds"`
 	// Machine is where the step ran.
 	Machine string `json:"machine"`
 	Cached  bool   `json:"cached"`
@@ -48,13 +51,6 @@ type Result struct {
 }
 
 func (r Result) ok() bool { return r.Status == "passed" }
-
-// Runner executes steps on behalf of a running script. Run starts all the
-// given steps together and returns their results in the same order. An error
-// means the steps could not be run at all, not that one of them failed.
-type Runner interface {
-	Run(steps []Step) ([]Result, error)
-}
 
 const runnerKey = "starci.runner"
 
@@ -77,55 +73,25 @@ func Mode(filename string, src []byte) (string, error) {
 	return "", fmt.Errorf("%s: must define ci(ctx) or pipeline(ctx)", filename)
 }
 
-// RunPipeline runs an advanced script to completion, executing its steps
-// through r. It returns every result the script was handed, in the order the
-// steps were started, along with the error that ended it, if one did: a step
-// that failed without allow_failure, a call to fail(), or a mistake in the
-// script.
-func RunPipeline(ctx context.Context, filename string, src []byte, c Context, r Runner) ([]Result, error) {
-	thread := newThread("pipeline")
-	rec := &recorder{runner: r}
-	thread.SetLocal(runnerKey, rec)
-
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			thread.Cancel("cancelled")
-		case <-done:
-		}
-	}()
-
-	globals, _, err := load(thread, filename, src)
-	if err != nil {
-		return rec.results, err
-	}
-	fn, ok := globals["pipeline"].(starlark.Callable)
-	if !ok {
-		return rec.results, fmt.Errorf("%s: must define a function pipeline(ctx)", filename)
-	}
-	rec.started = true
-	if _, err := starlark.Call(thread, fn, starlark.Tuple{contextValue(c)}, nil); err != nil {
-		var failed *stepsFailed
-		if errors.As(err, &failed) {
-			return rec.results, failed
-		}
-		return rec.results, describe(err)
-	}
-	return rec.results, nil
-}
-
-// recorder sits between the script and the Runner, keeping every result in
-// the order the steps were started.
+// recorder sits between the script and the results it has been given,
+// numbering the steps it asks for and answering them.
 type recorder struct {
-	runner  Runner
+	answers *answers
+	// asked is how many steps the script has asked for so far.
+	asked int
+	// results are the answers handed to the script, by number.
 	results []Result
+	// wanted is set when the script asks for steps there are no results
+	// for yet, which ends this evaluation.
+	wanted []Asked
 	// started is false while the file's top level is being evaluated, where
 	// running a step is refused: the top level also runs just to find out
 	// which mode a script is in.
 	started bool
 }
+
+// errWaiting ends an evaluation that has reached steps with no results yet.
+var errWaiting = errors.New("waiting for steps to finish")
 
 // stepsFailed is the error that ends a pipeline when a step fails and the
 // script did not ask to carry on.
@@ -287,14 +253,26 @@ func execute(thread *starlark.Thread, fn string, steps []Step, allowFailure bool
 			return nil, fmt.Errorf("step %q: needs has no meaning in pipeline(ctx); run steps in the order you need them", s.Name)
 		}
 	}
-	results, err := rec.runner.Run(steps)
-	if err != nil {
-		return nil, err
-	}
-	if len(results) != len(steps) {
-		return nil, fmt.Errorf("%s: ran %d steps but got %d results", fn, len(steps), len(results))
+	var results []Result
+	var wanted []Asked
+	for _, s := range steps {
+		rec.asked++
+		asked := Asked{Number: rec.asked, Step: s}
+		r, ok, err := rec.answers.take(asked)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			results = append(results, r)
+		} else {
+			wanted = append(wanted, asked)
+		}
 	}
 	rec.results = append(rec.results, results...)
+	if len(wanted) > 0 {
+		rec.wanted = wanted
+		return nil, errWaiting
+	}
 
 	if !allowFailure {
 		var failed []string
@@ -312,6 +290,7 @@ func execute(thread *starlark.Thread, fn string, steps []Step, allowFailure bool
 
 func resultValue(r Result) starlark.Value {
 	return starlarkstruct.FromStringDict(starlark.String("result"), starlark.StringDict{
+		"number":  starlark.MakeInt(r.Number),
 		"name":    starlark.String(r.Name),
 		"ok":      starlark.Bool(r.ok()),
 		"status":  starlark.String(r.Status),
