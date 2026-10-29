@@ -34,6 +34,7 @@ import (
 	"syscall"
 	"time"
 
+	"git.phin.tech/sam/starci/internal/bundle"
 	"git.phin.tech/sam/starci/internal/ciinfo"
 	"git.phin.tech/sam/starci/internal/compile"
 	"git.phin.tech/sam/starci/internal/engine"
@@ -54,13 +55,28 @@ const usage = `usage:
   starci worker
   starci serve
   starci hooks add forgejo|github
-  starci compile [--target github|circleci] [--file .ci.star] [--runs-on NAME] [--arch amd64] [--offline] [--check FILE]
+  starci compile [--target github|circleci|binary] [-o FILE --freeze --base STARCI] [--file .ci.star] [--runs-on NAME] [--arch amd64] [--offline] [--check FILE]
   starci validate [--file .ci.star] [--arch amd64,arm64]
   starci workers
   starci shun WORKER
   starci unshun WORKER`
 
 func main() {
+	// An executable written by `starci compile --target binary` carries a
+	// script and does nothing but run it, in the checkout it is pointed at.
+	if b, err := bundle.Self(); err != nil {
+		die("starci: " + err.Error())
+	} else if b != nil {
+		embedded = b
+		dir, rest := ".", os.Args[1:]
+		if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+			dir, rest = rest[0], rest[1:]
+		}
+		if err := runCmd(append([]string{dir, "--local"}, rest...)); err != nil {
+			die("starci: " + err.Error())
+		}
+		return
+	}
 	if len(os.Args) < 2 {
 		die(usage)
 	}
@@ -94,6 +110,10 @@ func main() {
 		die("starci: " + err.Error())
 	}
 }
+
+// embedded is the script this executable carries, if it was written by
+// `starci compile --target binary`.
+var embedded *bundle.Payload
 
 func die(msg string) {
 	fmt.Fprintln(os.Stderr, msg)
@@ -197,20 +217,26 @@ func runCmd(args []string) error {
 		}
 	}
 
-	src, err := os.ReadFile(*file)
-	if err != nil {
+	var src []byte
+	if embedded != nil {
+		*file, src = embedded.Name, []byte(embedded.Script)
+	} else if src, err = os.ReadFile(*file); err != nil {
 		return err
 	}
-	mode, err := plan.Mode(*file, src)
-	if err != nil {
-		return err
+	mode := plan.Basic
+	if !embedded.Frozen() {
+		if mode, err = plan.Mode(*file, src); err != nil {
+			return err
+		}
 	}
 
 	// Started by hand, unless something says otherwise.
 	c := plan.Context{Repo: *repo, SHA: commit, Ref: *ref, ChangedFiles: strings.Fields(changed), Event: plan.EventManual}
-	schedules, err := plan.Schedules(*file, src)
-	if err != nil {
-		return err
+	var schedules []plan.Schedule
+	if !embedded.Frozen() {
+		if schedules, err = plan.Schedules(*file, src); err != nil {
+			return err
+		}
 	}
 	// Inside a CI tool, the tool knows why this run exists. The script is
 	// told what it would have been told had starci received the event.
@@ -240,7 +266,16 @@ func runCmd(args []string) error {
 	// In basic mode the plan is known now, whichever engine runs it.
 	var p *plan.Plan
 	if mode == plan.Basic {
-		if p, err = plan.Eval(*file, src, c); err != nil {
+		if embedded.Frozen() {
+			// Fixed when the executable was written: not evaluated again.
+			frozen := *embedded.Plan
+			p = &frozen
+			p.Repo, p.SHA, p.Ref = c.Repo, c.SHA, c.Ref
+			err = p.Validate()
+		} else {
+			p, err = plan.Eval(*file, src, c)
+		}
+		if err != nil {
 			return err
 		}
 		fmt.Printf("%s @ %.8s: %d step(s)\n", p.Repo, p.SHA, len(p.Steps))
@@ -693,7 +728,14 @@ func compileCmd(args []string) error {
 	defaultBranch := fs.String("default-branch", "main", "the repository's default branch")
 	offline := fs.Bool("offline", false, "do not download the script's tools to check them first")
 	check := fs.String("check", "", "write nothing: fail unless this file is what would be written")
+	output := fs.String("o", "", "with --target binary, where to write the executable")
+	freeze := fs.Bool("freeze", false, "with --target binary, evaluate the script now and carry the plan, not the script (basic scripts only)")
+	base := fs.String("base", "", "with --target binary, the starci executable to copy (default: this one); use another to build for another OS or architecture")
 	fs.Parse(args)
+
+	if *target == "binary" {
+		return compileBinary(*file, *output, *base, *freeze, *offline, *arch, *check)
+	}
 
 	src, err := os.ReadFile(*file)
 	if err != nil {
@@ -718,7 +760,7 @@ func compileCmd(args []string) error {
 		opts.Read = read
 		out, err = compile.CircleCI(p, opts)
 	default:
-		return fmt.Errorf("unknown target %q: github or circleci", *target)
+		return fmt.Errorf("unknown target %q: github, circleci or binary", *target)
 	}
 	if err != nil {
 		return err
@@ -764,6 +806,78 @@ func compileCmd(args []string) error {
 		}
 	}
 	fmt.Print(out)
+	return nil
+}
+
+// compileBinary writes an executable that carries the script and runs it with
+// Docker, in the checkout it is pointed at:
+//
+//	starci compile --target binary -o ci && ./ci [checkout]
+//
+// By default the script travels and is evaluated when the executable runs, so
+// advanced scripts and scripts that read ctx behave as under `run --local`.
+// With --freeze the plan travels instead, as the other targets' files do.
+func compileBinary(file, output, base string, freeze, offline bool, arch, check string) error {
+	if check != "" {
+		return errors.New("--check is for the workflow targets: an executable is not text to compare")
+	}
+	if output == "" {
+		return errors.New("--target binary needs -o, where to write the executable")
+	}
+	src, err := os.ReadFile(file)
+	if err != nil {
+		return err
+	}
+	mode, err := plan.Mode(file, src)
+	if err != nil {
+		return err
+	}
+	payload := bundle.Payload{Name: filepath.Base(file), Script: string(src)}
+	if freeze {
+		if mode == plan.Advanced {
+			return fmt.Errorf("%s is an advanced script: its steps are only known as it runs, so it cannot be frozen (leave out --freeze to carry the script)", file)
+		}
+		p, read, err := plan.EvalTracked(file, src, plan.Context{})
+		if err != nil {
+			return err
+		}
+		if len(p.Steps) == 0 {
+			return fmt.Errorf("%s plans no steps for a push about which nothing is known; there is nothing to freeze", file)
+		}
+		if len(read) > 0 {
+			fmt.Fprintf(os.Stderr, "note: the script reads ctx.%s, so this plan is for a commit about which nothing is known, and is the same for every run\n", strings.Join(read, ", ctx."))
+		}
+		// The plan is what runs; the source is not needed again.
+		payload.Script, payload.Plan = "", p
+	}
+	if !offline {
+		declared, err := plan.Tools(file, src)
+		if err != nil {
+			return err
+		}
+		var tools []plan.Tool
+		for _, t := range declared {
+			if _, ok := t.SHA256[arch]; ok {
+				tools = append(tools, t)
+			}
+		}
+		if failed := checkTools(os.Stderr, tools, []string{arch}); failed > 0 {
+			return fmt.Errorf("%d tool download(s) failed the check; nothing was written (--offline skips the check)", failed)
+		}
+	}
+	if base == "" {
+		if base, err = os.Executable(); err != nil {
+			return err
+		}
+	}
+	if err := bundle.Write(output, base, payload); err != nil {
+		return err
+	}
+	kind := "carries " + payload.Name
+	if freeze {
+		kind = "carries the plan of " + payload.Name + ", frozen"
+	}
+	fmt.Fprintf(os.Stderr, "wrote %s, which %s; run it in a checkout: %s [dir]\n", output, kind, output)
 	return nil
 }
 
