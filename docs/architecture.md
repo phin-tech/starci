@@ -7,7 +7,7 @@
 | `internal/engine` | What starci asks of whatever carries a run out: the `Engine` interface. |
 | `internal/engine/local` | The engine that is this machine: it asks `plan` what is next and runs each step with `step`, several at once. |
 | `internal/engine/enginetest` | What an engine has to get right, as tests every engine is put through. |
-| `internal/compile` | Writing a basic plan out for GitHub Actions or CircleCI, or as an executable. |
+| `internal/compile` | Writing a basic plan out for GitHub Actions, CircleCI, Argo or Temporal, or as an executable. |
 | `internal/ciinfo` | Reading why a run started from the CI tool starci is running inside. |
 | `internal/store/s3` | The shared store, in a bucket: results, and the blobs artifacts are kept as. |
 | `internal/tracing` | A run as an OpenTelemetry trace, whatever the engine. |

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Writes a page for each example into docs/examples, from the scripts there.
 
-A basic example's page has tabs for the script, what it compiles to for GitHub
-Actions and what it compiles to for CircleCI; an advanced one has the script
-alone, since advanced scripts cannot be compiled. Run by dev/docs.sh after
+A basic example's page has tabs for the script and what it compiles to for
+GitHub Actions, CircleCI and Argo (where Argo can carry it); an advanced one
+has the script alone, since advanced scripts cannot be compiled. Run by dev/docs.sh after
 examples/ has been copied into docs/, and not kept in git.
 """
 import json
@@ -86,8 +86,11 @@ for mode, glob, tail in (("basic", "*.ci.star", ".ci.star"), ("advanced", "*.pip
         src = script.read_text()
         tabs = [("Script", fenced("python", src))]
         if mode == "basic":
-            for label, target in (("GitHub Actions", "github"), ("CircleCI", "circleci")):
-                tabs.append((label, fenced("yaml", (ex / "basic" / "compiled" / target / f"{name}.yml").read_text())))
+            for label, target in (("GitHub Actions", "github"), ("CircleCI", "circleci"), ("Argo", "argo")):
+                at = ex / "basic" / "compiled" / target / f"{name}.yml"
+                # A pod cannot keep to everything a script can ask for.
+                if at.exists():
+                    tabs.append((label, fenced("yaml", at.read_text())))
         body = [f"# {name}", ""]
         # The index's one-liner, and the script's own opening paragraph, unless
         # one says what the other does.
@@ -114,6 +117,11 @@ for mode, glob, tail in (("basic", "*.ci.star", ".ci.star"), ("advanced", "*.pip
         dl = [f"[{script.name}]({script.name})"]
         if mode == "basic":
             dl += [f"[GitHub Actions](compiled/github/{name}.yml)", f"[CircleCI](compiled/circleci/{name}.yml)"]
+            if (ex / "basic" / "compiled" / "argo" / f"{name}.yml").exists():
+                dl.append(f"[Argo](compiled/argo/{name}.yml)")
+            # A module, not a file: the plan is the part that is the script's.
+            if (ex / "basic" / "compiled" / "temporal" / name / "plan.go").exists():
+                dl.append(f"[Temporal](compiled/temporal/{name}/plan.go)")
         body.append("Download: " + ", ".join(dl))
         if mode == "advanced":
             body += ["", "An advanced script is only known as it runs, so it cannot be compiled."]

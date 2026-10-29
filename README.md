@@ -29,7 +29,7 @@ The documentation is in [`docs/`](docs/index.md), and is built into a site with
 |---|---|
 | [Overview and status](docs/index.md) | What works and what does not. |
 | [Getting started](docs/getting-started.md) | Try it against a checkout. |
-| [Compiling to a workflow](docs/compiling.md) | Write a basic script out for GitHub Actions or CircleCI, or run starci inside one. |
+| [Compiling to a workflow](docs/compiling.md) | Write a basic script out for GitHub Actions, CircleCI, Argo or Temporal, or run starci inside one. |
 | [Carrying a run out from another tool](docs/driving.md) | `starci next` and `starci step`, for Temporal, a CI job or a shell loop. |
 | [What a script can do](docs/scripts.md) | The language, and basic versus advanced mode. |
 | [Tools and packages](docs/tools.md) | Pinned downloads and system packages for a step. |

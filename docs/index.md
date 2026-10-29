@@ -36,7 +36,8 @@ job in another CI tool, which then does the triggering and the reporting.
       another tool carry a run out and resume it ([Carrying a run out from
       another tool](driving.md)).
 - [x] **Compiling** — write a basic script out as a GitHub Actions or
-      CircleCI workflow, or as an executable that runs it.
+      CircleCI workflow, an Argo WorkflowTemplate, a Temporal workflow, or an
+      executable that runs it.
 
 Everything is one binary:
 
@@ -44,7 +45,7 @@ Everything is one binary:
 |---|---|
 | `starci plan` | Evaluate a basic script and print the plan as JSON. Runs nothing. |
 | `starci run` | Execute a commit on this machine, with Docker for steps in an image. |
-| `starci compile` | Write a basic script out for GitHub Actions or CircleCI, or as an executable. |
+| `starci compile` | Write a basic script out for GitHub Actions, CircleCI, Argo or Temporal, or as an executable. |
 | `starci validate` | Check that a script's inputs select files and that the tools it pins download as pinned. Runs nothing. |
 | `starci next` | Say what a run does next, given its results so far. Runs nothing. |
 | `starci step` | Run one step that `next` asked for, on this machine, and print its result. |

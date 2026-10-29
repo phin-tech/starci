@@ -47,7 +47,9 @@ The three `pi-gamebook` ones run as they are against that repository.
 ### Compiled
 
 Every basic script is also written out for GitHub Actions (which Forgejo and
-Gitea read too) and for CircleCI, to see what `starci compile` makes of it:
+Gitea read too), CircleCI, Argo and Temporal, to see what `starci compile`
+makes of it. A script one of them cannot carry over (files handed from step to
+step, packages, a service's files) has no file for it:
 
 - `basic/compiled/github/<name>.yml`, from `starci compile`
 - `basic/compiled/circleci/<name>.yml`, from `starci compile --target circleci`
