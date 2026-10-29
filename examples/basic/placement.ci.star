@@ -1,10 +1,12 @@
 # Saying where steps may run.
 #
-#   worker  the step runs only on a worker with these labels
-#   prefer  it would like such a worker, and takes another if none is free
-#   avoid   it never runs on a worker with these labels
+#   on      the step runs only on a machine with these labels
+#   prefer  it would like such a machine, and takes another if none is free
+#   avoid   it never runs on a machine with these labels
 #
-# Workers advertise labels when they start: STARCI_LABELS=network=home,speed=fast
+# os and arch mean the same to every engine, and the machine checks them
+# itself. Other labels mean something only to an engine that places steps by
+# label; the local engine says, before the run, that it ignores them.
 
 def ci(ctx):
     return [
@@ -15,5 +17,5 @@ def ci(ctx):
         step("benchmark", image = "alpine:3", run = "./scripts/bench.sh", prefer = {"speed": "fast"}),
 
         # Needs to reach the staging database, which only one site can.
-        step("migrate staging", image = "alpine:3", run = "./scripts/migrate.sh", worker = {"site": "office"}, cache = False),
+        step("migrate staging", image = "alpine:3", run = "./scripts/migrate.sh", on = {"site": "office"}, cache = False),
     ]

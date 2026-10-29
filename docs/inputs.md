@@ -8,7 +8,7 @@ beneath it), or a pattern:
 BASE = ["src/**/*.py", "pyproject.toml", "uv.lock"]
 
 step("unit", ..., inputs = BASE + ["tests/test_runs.py", "tests/conftest.py"])
-step("gpu",  ..., inputs = BASE + ["tests/test_gpu.py"], worker = {"gpu": "true"})
+step("gpu",  ..., inputs = BASE + ["tests/test_gpu.py"], on = {"gpu": "true"})
 ```
 
 In a pattern, `*` stays within one directory and `**` crosses them. Patterns
@@ -18,7 +18,7 @@ never seen. An input that matches nothing is an error.
 
 `starci validate` finds that error without running anything. It asks, of the
 repository the script is in, whether each input selects a file that git
-tracks: a file that was never added is not in the commit a worker builds. The
+tracks: a file that was never added is not in the commit a machine builds. The
 steps it asks about are those of a basic script's plan for a commit about
 which nothing is known; a step added only for some branch, and every step of
 an advanced script, is not known in advance and is not checked.
@@ -62,7 +62,7 @@ image.
 
 A pass with the network is never taken as a pass without it: turning the
 network off runs the step once more. Tools and packages are fetched by the
-worker before the container starts and are not affected.
+machine before the container starts and are not affected.
 
 ## Services
 
@@ -127,9 +127,10 @@ no route out.
 Each step with services takes one of the machine's Docker networks for as
 long as it runs. Docker has about thirty to give unless its
 `default-address-pools` are widened, which bounds how many such steps a
-worker can run at once. A worker that is killed cannot stop the services of
-the steps it was running; it removes them when it next starts, which is why
-two workers on one machine need different names.
+machine can run at once. If starci is killed partway, the services of the
+steps it was running are left behind; they carry the label `starci.machine`,
+so `docker rm -f $(docker ps -aq --filter label=starci.machine)` clears them
+and `docker network prune --filter label=starci.machine` their networks.
 
 ## Sharing results between machines
 
@@ -143,7 +144,7 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
 
 Any S3-compatible bucket works; it has been run against Cloudflare R2. Each
 machine still keeps its own copy and asks the shared store only for what it
-does not have. The store is checked when a worker or a local run starts, so a
+does not have. The store is checked when a machine or a local run starts, so a
 wrong address or credential is an error then, not steps quietly running again.
 If it becomes unreachable later, steps run and their results are kept locally.
 
@@ -155,4 +156,6 @@ storing a pass it never earned. Give its credentials only to machines you
 trust to run steps honestly.
 
 `caches = {"bun": "/root/.bun/install/cache"}` keeps a directory between runs
-on a worker. It makes a step that does run faster, and is not part of the key.
+on a machine. It makes a step that does run faster, and is not part of the key.
+A [bare step](bare.md) names the environment variable to set to the directory
+instead of a path.

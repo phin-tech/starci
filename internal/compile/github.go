@@ -19,7 +19,7 @@ import (
 type Options struct {
 	// Source is the script the plan came from, named in the header.
 	Source string
-	// RunsOn is the runner for steps that do not ask for particular workers.
+	// RunsOn is the runner for steps that do not ask for particular machines.
 	RunsOn string
 	// Arch is the architecture those runners have, which decides which build
 	// of each tool is downloaded: amd64 or arm64.
@@ -44,7 +44,7 @@ type Options struct {
 // GitHub renders a plan as a GitHub Actions workflow. Forgejo and Gitea
 // Actions read the same format.
 //
-// Each step becomes a job that does what a starci worker does: check out only
+// Each step becomes a job that does what a starci machine does: check out only
 // the step's inputs, fetch its tools by checksum, build an image with its
 // packages, and run its command in that container. A job whose inputs are
 // unchanged since it last passed skips the work, using the Actions cache as
@@ -90,7 +90,7 @@ func header(w *strings.Builder, p *plan.Plan, o Options) {
 		}
 	}
 	if len(unplaceable) > 0 {
-		notes = append(notes, fmt.Sprintf("`prefer` and `avoid` have no equivalent here and are dropped (%s). `worker` becomes runner labels.", strings.Join(unplaceable, ", ")))
+		notes = append(notes, fmt.Sprintf("`prefer` and `avoid` have no equivalent here and are dropped (%s). `on` becomes runner labels.", strings.Join(unplaceable, ", ")))
 	}
 	notes = append(notes, "Passes are remembered in this repository's Actions cache, which GitHub scopes by branch and evicts when old. starci's own store has neither limit.")
 	writeHeader(w, "starci compile", o, notes)
@@ -146,13 +146,16 @@ func jobIDs(steps []plan.Step) map[string]string {
 }
 
 func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) error {
+	if err := bareRefusal(s); err != nil {
+		return err
+	}
 	id := ids[s.Name]
 	fmt.Fprintf(w, "  %s:\n    name: %s\n", id, q(s.Name))
 
-	if len(s.Worker) > 0 {
+	if len(s.On) > 0 {
 		labels := []string{"self-hosted"}
-		for _, k := range sortedKeys(s.Worker) {
-			labels = append(labels, k+"="+s.Worker[k])
+		for _, k := range sortedKeys(s.On) {
+			labels = append(labels, k+"="+s.On[k])
 		}
 		fmt.Fprintf(w, "    runs-on: [%s]\n", strings.Join(quoteAll(labels), ", "))
 	} else {
@@ -202,9 +205,9 @@ func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) erro
 			id, stepKey(s, o.Arch), strings.Join(hashGlobs(append(append([]string{}, s.Inputs...), serviceFiles(s)...)), ", "))
 	}
 
-	var mounts, pathDirs []string
+	var mounts, pathDirs, hostDirs []string
 	for _, t := range s.Tools {
-		sum, ok := t.SHA256[o.Arch]
+		sum, ok := t.Sum("linux/" + o.Arch)
 		if !ok {
 			return fmt.Errorf("step %q: tool %q has no build for %s, which is what %s runners are", s.Name, t.Name, o.Arch, o.RunsOn)
 		}
@@ -222,6 +225,7 @@ func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) erro
 		mounts = append(mounts, fmt.Sprintf("-v \"%s:/opt/starci/tools/%s:ro\"", dir, t.Name))
 		for _, b := range t.Bin {
 			pathDirs = append(pathDirs, path.Join("/opt/starci/tools", t.Name, fill(b)))
+			hostDirs = append(hostDirs, path.Join(dir, fill(b)))
 		}
 	}
 
@@ -235,11 +239,13 @@ func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) erro
 		w.WriteString("          DOCKERFILE\n")
 	}
 
+	cacheDirs := map[string]string{}
 	for _, name := range sortedKeys(s.Caches) {
 		dir := "${{ runner.temp }}/starci-cache/" + name
 		fmt.Fprintf(w, "      - name: %s\n%s        uses: actions/cache@v4\n        with:\n          path: %s\n          key: starci-cache-%s-${{ github.run_id }}\n          restore-keys: starci-cache-%s-\n",
 			q("Cache: "+name), skip, dir, name, name)
 		mounts = append(mounts, fmt.Sprintf("-v \"$RUNNER_TEMP/starci-cache/%s:%s\"", name, s.Caches[name]))
+		cacheDirs[s.Caches[name]] = "$RUNNER_TEMP/starci-cache/" + name
 	}
 
 	// A run can be tried again on a runner that is kept, so the attempt is
@@ -264,7 +270,19 @@ func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) erro
 
 	// The command travels in an environment variable, so that nothing in it
 	// needs escaping for the shell that starts the container.
-	fmt.Fprintf(w, "      - name: %s\n%s        env:\n          STARCI_RUN: %s\n        run: |\n", q(s.Name), skip, block(s.Run, "            "))
+	fmt.Fprintf(w, "      - name: %s\n%s        env:\n          STARCI_RUN: %s\n        run: |\n", q(s.Name), skip, block(s.Command(), "            "))
+	if s.Bare() {
+		// On the runner itself, which is the machine a bare step asks for.
+		for _, l := range bareRun(s, hostDirs, cacheDirs) {
+			for _, part := range strings.Split(l, "\n") {
+				fmt.Fprintf(w, "          %s\n", part)
+			}
+		}
+		if s.Cache {
+			fmt.Fprintf(w, "      - name: Remember this pass\n%s        run: mkdir -p \"$RUNNER_TEMP/starci-passed\" && date > \"$RUNNER_TEMP/starci-passed/at\"\n", skip)
+		}
+		return nil
+	}
 	var args []string
 	args = append(args, "-v \"$PWD:/workspace\"", "-w /workspace")
 	switch {
@@ -325,7 +343,7 @@ func serviceNames(s plan.Step) []string {
 	return names
 }
 
-// startServices is the shell that does for a job what a worker does for a
+// startServices is the shell that does for a job what a machine does for a
 // step with services: a network for this job alone, each service on it under
 // its own name, and no going on until each says it is ready. network is the
 // network's name, as shell: it may hold variables.
@@ -365,7 +383,7 @@ func startServices(s plan.Step, network, given string) []string {
 		if sv.ReadyWithin > 0 {
 			within = sv.ReadyWithin
 		}
-		// As long as a worker allows, by the clock: a try that hangs is cut
+		// As long as a machine allows, by the clock: a try that hangs is cut
 		// short, and counts against the same wait.
 		lines = append(lines,
 			fmt.Sprintf("until=$(($(date +%%s) + %d))", within),
@@ -419,13 +437,18 @@ func stopServices(s plan.Step, network string) []string {
 func stepKey(s plan.Step, arch string) string {
 	var tools [][]string
 	for _, t := range s.Tools {
-		tools = append(tools, append([]string{t.Name, t.SHA256[arch]}, t.Bin...))
+		sum, _ := t.Sum("linux/" + arch)
+		tools = append(tools, append([]string{t.Name, sum}, t.Bin...))
 	}
 	env := [][2]string{}
 	for _, k := range sortedKeys(s.Env) {
 		env = append(env, [2]string{k, s.Env[k]})
 	}
 	parts := []any{s.Image, arch, s.Run, env, tools, s.Packages, s.Inputs}
+	// Only said when there is one, so that every other step keeps its key.
+	if len(s.Argv) > 0 {
+		parts = append(parts, "argv", s.Argv)
+	}
 	// Only said when it is off, so that every other step keeps its key.
 	if s.Offline {
 		parts = append(parts, "offline")

@@ -1,6 +1,6 @@
-# One image for every role: `starci worker`, `starci serve`, or a one-off
-# `starci run`. It carries git and the docker client because a worker drives
-# both; the docker daemon it talks to is somewhere else.
+# starci in an image, for running `starci run` in a CI job. It carries git
+# and the docker client because a run drives both; the docker daemon it
+# talks to is somewhere else.
 FROM golang:1.26 AS build
 WORKDIR /src
 COPY go.mod go.sum ./

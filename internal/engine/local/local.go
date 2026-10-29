@@ -1,7 +1,7 @@
-// Package local executes runs on the machine it is called on, with nothing
-// but Docker: no queue, no other workers, and no record to resume from if the
-// process dies. It is for trying a script before pushing it, and it is the
-// smallest thing that satisfies plan.Runner.
+// Package local executes runs on the machine it is called on, with Docker for
+// steps in an image: no queue, no other machines, and no record to resume
+// from if the process dies. It is how starci runs, on a laptop or in another
+// CI tool's job, and the smallest thing that satisfies plan.Runner.
 package local
 
 import (
@@ -70,9 +70,9 @@ func (r *Runner) Run(steps []plan.Step) ([]plan.Result, error) {
 }
 
 // Engine carries a run out on this machine, start to finish, in the process
-// that asked. It can do the one thing every engine must and none of the
-// optional ones: there is nowhere else to place a step, no other run to
-// supersede, and no record to resume from.
+// that asked. It can do the one thing every engine must and has none of the
+// capabilities: there is nowhere else to place a step and no record to
+// resume from.
 type Engine struct {
 	Config step.Config
 	// Slots is how many steps run at once.

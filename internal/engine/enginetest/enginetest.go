@@ -8,7 +8,7 @@
 //
 // The runs use real containers and a real git repository, made for the
 // purpose in a temporary directory. The engine's steps must be able to fetch
-// from a path on this machine, which means its workers are on this machine.
+// from a path on this machine, which means its machines are on this machine.
 package enginetest
 
 import (
@@ -42,6 +42,7 @@ func Run(t *testing.T, eng engine.Engine) {
 	t.Run("a step that already passed is not run again", func(t *testing.T) { reuse(t, eng, repo) })
 	t.Run("a step that gave up the network has none", func(t *testing.T) { offline(t, eng, repo) })
 	t.Run("a step reaches the services it asked for, and they end with it", func(t *testing.T) { services(t, eng, repo) })
+	t.Run("a bare step runs on a machine that runs them", func(t *testing.T) { bare(t, eng, repo) })
 	t.Run("an advanced script acts on what its steps return", func(t *testing.T) { advanced(t, eng, repo) })
 	t.Run("an advanced script that fails says why", func(t *testing.T) { advancedFailure(t, eng, repo) })
 	t.Run("what the engine says it can do, it does", func(t *testing.T) { claims(t, eng, repo) })
@@ -198,6 +199,22 @@ def ci(ctx):
 	}
 }
 
+// bare is here because a bare step can only go to a machine that has agreed
+// to run one, and the engine has to find it one. The engine's machines are
+// expected to have agreed.
+func bare(t *testing.T, eng engine.Engine, r repo) {
+	result := execute(t, eng, r, `
+def ci(ctx):
+    return [step("look", run = "`+unique()+` >/dev/null; find . -type f | sort", inputs = ["src"], cache = False)]
+`)
+	if !result.OK {
+		t.Fatalf("results: %s (%s)", statuses(result), step(result, "look").Detail)
+	}
+	if got, want := step(result, "look").Output, "./src/a.txt\n./src/b.txt\n"; got != want {
+		t.Errorf("the bare step saw:\n%swant:\n%s", got, want)
+	}
+}
+
 // services is here for the same reason: a step's services are started on
 // whatever machine the engine sends the step to, so the engine has to carry
 // them there, and an engine that does not run steps through internal/step
@@ -225,7 +242,7 @@ def ci(ctx):
 	if got, want := step(result, "ask").Output, quick+"\n"+slow+"\n"; got != want {
 		t.Errorf("the step heard %q from its services, want %q", got, want)
 	}
-	// Where an engine's workers are during these tests is this machine.
+	// Where an engine's machines are during these tests is this machine.
 	if out, _ := exec.Command("docker", "ps", "-a", "--format", "{{.Names}}", "--filter", "name="+id).Output(); len(out) > 0 {
 		t.Errorf("services outlived their step:\n%s", out)
 	}
@@ -306,40 +323,15 @@ def pipeline(ctx):
 // and lacks it is worse than one that says it has none.
 func claims(t *testing.T, eng engine.Engine, r repo) {
 	can := eng.Can()
-	run := engine.Run{Mode: plan.Advanced, Plan: &plan.Plan{Steps: []plan.Step{{Name: "gpu", Worker: map[string]string{"gpu": "true"}}}}}
+	run := engine.Run{Mode: plan.Advanced, Plan: &plan.Plan{Steps: []plan.Step{{Name: "gpu", On: map[string]string{"gpu": "true"}}}}}
 	missing := strings.Join(can.Missing(run), "; ")
-	if can.Placement == strings.Contains(missing, "worker, prefer and avoid") {
-		t.Errorf("Placement = %v, but for a step that asks for a worker Missing says %q", can.Placement, missing)
+	if can.Placement == strings.Contains(missing, "on, prefer and avoid") {
+		t.Errorf("Placement = %v, but for a step that asks for a label Missing says %q", can.Placement, missing)
 	}
 	if can.Durable == strings.Contains(missing, "cannot pick up where it was") {
 		t.Errorf("Durable = %v, but for an advanced run Missing says %q", can.Durable, missing)
 	}
-
-	if !can.Placement {
-		return
-	}
-	fleet, ok := eng.(engine.Fleet)
-	if !ok {
-		t.Fatal("the engine places steps on workers but cannot say what workers it has")
-	}
-	workers, err := fleet.Workers(context.Background())
-	if err != nil || len(workers) == 0 {
-		t.Fatalf("Workers = %v, %v; want at least the one running these tests", workers, err)
-	}
-	// A step that asks for a label this worker has, runs; nothing here can
-	// test that one asking for a label nobody has waits, without waiting.
-	var label, value string
-	for label, value = range workers[0].Labels {
-		break
-	}
-	if label == "" {
-		t.Skip("the worker has no labels to ask for")
-	}
-	result := execute(t, eng, r, helpers+`
-def ci(ctx):
-    return [sh("placed", "true", cache = False, worker = {"`+label+`": "`+value+`"})]
-`)
-	if !result.OK {
-		t.Errorf("a step asking for %s=%s, which a worker offers, did not run: %s", label, value, statuses(result))
-	}
+	// Whether an engine that places steps puts them where they ask cannot be
+	// asked of every engine alike: it depends on what machines it has. Such an
+	// engine tests that itself.
 }

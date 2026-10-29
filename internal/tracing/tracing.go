@@ -4,7 +4,7 @@
 //
 // It asks nothing of the engine but to carry a Carrier, two small values,
 // from whoever asks for a step to whichever machine runs it. An engine that
-// has tracing of its own (Hatchet does) is left to place a step's span in
+// has tracing of its own is left to place a step's span in
 // its own trace; one that has none gets a whole trace from here.
 //
 // Where spans are sent is the standard OTEL_EXPORTER_OTLP_* variables'
@@ -175,7 +175,7 @@ func (c Carrier) Step(ctx context.Context, name string) (context.Context, func(p
 		span.SetAttributes(
 			attribute.String("starci.status", r.Status),
 			attribute.Bool("starci.cached", r.Cached),
-			attribute.String("starci.worker", r.Worker),
+			attribute.String("starci.machine", r.Machine),
 			attribute.Float64("starci.seconds", r.Seconds),
 		)
 		if r.Status != "passed" {

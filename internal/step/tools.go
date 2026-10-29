@@ -84,18 +84,25 @@ type build struct {
 	bins []string
 }
 
-// buildFor works out a tool's build for an architecture, spelling the
-// architecture the way the tool's publisher does.
-func buildFor(t plan.Tool, arch string) (build, bool) {
-	sum, ok := t.SHA256[arch]
+// buildFor works out a tool's build for a platform, os/arch or an
+// architecture alone for Linux, spelling the architecture the way the tool's
+// publisher does.
+func buildFor(t plan.Tool, platform string) (build, bool) {
+	if !strings.Contains(platform, "/") {
+		platform = "linux/" + platform
+	}
+	sum, ok := t.Sum(platform)
 	if !ok {
 		return build{}, false
 	}
+	goos, arch, _ := strings.Cut(platform, "/")
 	vendorArch := arch
 	if name, ok := t.ArchNames[arch]; ok {
 		vendorArch = name
 	}
-	fill := func(s string) string { return strings.ReplaceAll(s, "{arch}", vendorArch) }
+	fill := func(s string) string {
+		return strings.ReplaceAll(strings.ReplaceAll(s, "{arch}", vendorArch), "{os}", goos)
+	}
 	b := build{url: fill(t.URL), sum: sum}
 	for _, dir := range t.Bin {
 		b.bins = append(b.bins, path.Clean(fill(dir)))
@@ -103,17 +110,17 @@ func buildFor(t plan.Tool, arch string) (build, bool) {
 	return b, true
 }
 
-// install makes a tool available on this machine for the given architecture,
+// install makes a tool available on this machine for the given platform,
 // downloading and unpacking it unless that has been done before.
 //
 // A tool lives in a directory named after its checksum and is never changed
 // once there, so every step that asks for it can mount the same copy
 // read-only, and a different build of the "same" tool can never be mistaken
 // for it.
-func install(stateDir string, t plan.Tool, arch string) (installed, error) {
-	b, ok := buildFor(t, arch)
+func install(stateDir string, t plan.Tool, platform string) (installed, error) {
+	b, ok := buildFor(t, platform)
 	if !ok {
-		return installed{}, fmt.Errorf("tool %q has no build for %s, which is what the step's image runs on", t.Name, arch)
+		return installed{}, fmt.Errorf("tool %q has no build for %s, which is what the step runs on", t.Name, platform)
 	}
 	in := installed{name: t.Name, sum: b.sum, dir: filepath.Join(stateDir, "tools", b.sum), bins: b.bins}
 	if _, err := os.Stat(in.dir); err == nil {
@@ -173,7 +180,7 @@ func download(work, name string, b build) (string, error) {
 	return unpacked, nil
 }
 
-// CheckTool reports whether a tool's build for an architecture can be
+// CheckTool reports whether a tool's build for a platform can be
 // installed today: that its address still answers, that what it serves is
 // what the script pins, and that it unpacks to something with a program where
 // the script says programs are.

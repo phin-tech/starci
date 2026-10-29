@@ -6,7 +6,7 @@ checkout:
 
 ```sh
 starci plan --file examples/basic/monorepo.ci.star --changed packages/api/src/main.ts
-starci run ~/src/some-repo --local --file examples/basic/hello.ci.star
+starci run ~/src/some-repo --file examples/basic/hello.ci.star
 ```
 
 Most refer to scripts and files a real repository would have (`npm test`,
@@ -38,8 +38,8 @@ The three `pi-gamebook` ones run as they are against that repository.
 | [terraform](basic/terraform.ci.star) | Validate each stack that changed. |
 | [shell-scripts](basic/shell-scripts.ci.star) | Two small tools, one an archive and one a single binary. |
 | [security](basic/security.ci.star) | Secrets, vulnerable dependencies, Dockerfile lint. |
-| [gpu](basic/gpu.ci.star) | Shared base inputs plus per-step test files; a step that needs a GPU worker. |
-| [placement](basic/placement.ci.star) | `worker`, `prefer` and `avoid`. |
+| [gpu](basic/gpu.ci.star) | Shared base inputs plus per-step test files; a step that needs a GPU machine. |
+| [placement](basic/placement.ci.star) | `on`, `prefer` and `avoid`. |
 | [pi-gamebook](basic/pi-gamebook.ci.star) | A real repository's CI. |
 | [pi-gamebook-tools](basic/pi-gamebook-tools.ci.star) | The same, on plain Debian with Bun as a tool. |
 

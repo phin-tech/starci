@@ -117,7 +117,7 @@ def ci(ctx):
     if ctx.ref == "main" and ctx.changed_files:
         return []
     return [
-        step("gpu", image = "alpine:3", run = "true", worker = {"gpu": "true"}),
+        step("gpu", image = "alpine:3", run = "true", on = {"gpu": "true"}),
         step("picky", image = "alpine:3", run = "true", prefer = {"speed": "fast"}),
     ]
 `, Options{})

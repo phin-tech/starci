@@ -99,7 +99,7 @@ func TestToolsAreOnThePath(t *testing.T) {
 
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
-	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	cfg := Config{Machine: "test", StateDir: t.TempDir()}
 	tools := []plan.Tool{
 		{Name: "greet", URL: srv.URL + "/greet-{arch}.tar.gz", SHA256: map[string]string{arch: sumOf(archive)}, Bin: []string{"pkg-{arch}/bin"}},
 		{Name: "shout", URL: srv.URL + "/shout.zip", SHA256: map[string]string{arch: sumOf(zipFile)}, Bin: []string{"."}},
@@ -134,7 +134,7 @@ func TestToolWithTheWrongChecksumIsRefused(t *testing.T) {
 	srv := serve(t, map[string][]byte{"/tool": script("not what was pinned")})
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
-	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	cfg := Config{Machine: "test", StateDir: t.TempDir()}
 
 	got := run(t, cfg, r, sha, plan.Step{Name: "use", Run: "tool", Tools: []plan.Tool{
 		{Name: "tool", URL: srv.URL + "/tool", SHA256: map[string]string{arch: strings.Repeat("0", 64)}, Bin: []string{"."}},
@@ -152,14 +152,14 @@ func TestToolProblemsFailClearly(t *testing.T) {
 	srv := serve(t, map[string][]byte{"/tool": data})
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
-	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	cfg := Config{Machine: "test", StateDir: t.TempDir()}
 
 	cases := []struct {
 		name string
 		tool plan.Tool
 		want string
 	}{
-		{"no build for this architecture", plan.Tool{Name: "tool", URL: srv.URL + "/tool", SHA256: map[string]string{other: sumOf(data)}, Bin: []string{"."}}, "has no build for " + arch},
+		{"no build for this architecture", plan.Tool{Name: "tool", URL: srv.URL + "/tool", SHA256: map[string]string{other: sumOf(data)}, Bin: []string{"."}}, "has no build for linux/" + arch},
 		{"download missing", plan.Tool{Name: "tool", URL: srv.URL + "/gone", SHA256: map[string]string{arch: sumOf(data)}, Bin: []string{"."}}, "404"},
 		{"bin directory not in the download", plan.Tool{Name: "tool", URL: srv.URL + "/tool", SHA256: map[string]string{arch: sumOf(data)}, Bin: []string{"bin"}}, `no directory "bin" in the download`},
 	}
@@ -181,7 +181,7 @@ func TestChangingAToolRunsTheStepAgain(t *testing.T) {
 	srv := serve(t, map[string][]byte{"/v1": v1, "/v2": v2, "/v1-mirror": v1})
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
-	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	cfg := Config{Machine: "test", StateDir: t.TempDir()}
 	step := func(path string, data []byte) plan.Step {
 		return plan.Step{Name: "use", Run: "tool", Cache: true, Tools: []plan.Tool{
 			{Name: "tool", URL: srv.URL + path, SHA256: map[string]string{arch: sumOf(data)}, Bin: []string{"."}},

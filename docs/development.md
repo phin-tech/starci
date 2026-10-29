@@ -5,14 +5,9 @@ go test ./...          # the step tests run real containers
 go test -short ./...   # without them
 ```
 
-The engine tests run against the local engine with everything else. Against
-Hatchet they need one to talk to, so they run when asked, with this process
-as the worker:
-
-```sh
-set -a; . dev/.env; set +a
-STARCI_TEST_HATCHET=1 go test ./internal/engine/hatchet -run TestEngine
-```
+The engine tests run against the local engine with everything else. An engine
+that needs a service to test against runs its tests when asked, with
+`STARCI_TEST_<NAME>=1`.
 
 ## This documentation
 

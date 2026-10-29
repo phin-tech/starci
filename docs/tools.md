@@ -18,12 +18,12 @@ step("test", image = "debian:12-slim", tools = [bun], run = "bun test")
 
 | | |
 |---|---|
-| `url` | The download: a zip, a tar archive, or the program itself. `{arch}` becomes the architecture the step's image runs on. |
-| `sha256` | The download's checksum for `amd64` and/or `arm64`. An architecture not listed is not supported. |
+| `url` | The download: a zip, a tar archive, or the program itself. `{arch}` becomes the architecture the step runs on, and `{os}` `linux` or `darwin`. |
+| `sha256` | The download's checksum for `amd64` and/or `arm64`, which mean Linux, and for `darwin/arm64` or `darwin/amd64` where a [bare step](bare.md) on a Mac uses it. A platform not listed is not supported. |
 | `arch_names` | How the publisher spells an architecture, where it differs. |
 | `bin` | Directories inside the archive to put on `PATH`. Default: its top level. |
 
-The checksum is the tool's identity. A worker keeps one copy per checksum,
+The checksum is the tool's identity. A machine keeps one copy per checksum,
 downloads it once, and mounts it read-only into every step that asks. A step's
 result is keyed on it, so changing a tool runs the step again and fetching the
 same tool from a mirror does not. There is no way to ask for "the latest".
@@ -60,13 +60,13 @@ for apt packages on top of its image:
 step("test", image = "debian:12-slim", packages = ["libpq-dev", "git"], run = "...")
 ```
 
-A worker builds an image from that base and those packages the first time a
+A machine builds an image from that base and those packages the first time a
 step needs it, and reuses it for every step that asks for the same
 combination. The image must be Debian or Ubuntu based.
 
 Unlike a tool, a package is not pinned: it is whatever version apt offered on
-the day that worker built the image, and it stays that version there until
+the day that machine built the image, and it stays that version there until
 the base image or the list changes. A step's result is keyed on the base image
-and the list, so two workers that built at different times will share a result
+and the list, so two machines that built at different times will share a result
 even though their packages may differ slightly. Write `name=version` where
 that matters.

@@ -2,7 +2,7 @@
 #
 # The first step counts the tests. The script then decides how many shards
 # are worth starting: one for a small suite, more as it grows, never more than
-# the workers can usefully run at once.
+# the machines can usefully run at once.
 
 IMAGE = "python:3.13-slim"
 PER_SHARD = 200

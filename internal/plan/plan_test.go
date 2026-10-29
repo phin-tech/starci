@@ -276,7 +276,7 @@ def ci(ctx):
 	}{
 		{"input outside the repository", func(s *Step) { s.Inputs = []string{"../x"} }, "inside the repository"},
 		{"no inputs", func(s *Step) { s.Inputs = nil }, "inputs must not be empty"},
-		{"relative cache path", func(s *Step) { s.Caches = map[string]string{"c": "rel"} }, "not a valid name"},
+		{"relative cache path", func(s *Step) { s.Caches = map[string]string{"c": "rel"} }, "needs an absolute path"},
 		{"unknown need", func(s *Step) { s.Needs = []string{"zz"} }, `needs "zz"`},
 		{"no command", func(s *Step) { s.Run = "" }, "must not be empty"},
 	}
@@ -297,16 +297,16 @@ func TestWorkerPlacement(t *testing.T) {
 	p := mustEval(t, `
 def ci(ctx):
     return [step("train", image = "i", run = "r",
-                 worker = {"gpu": "true"}, prefer = {"speed": "fast"}, avoid = {"network": "home"})]
+                 on = {"gpu": "true"}, prefer = {"speed": "fast"}, avoid = {"network": "home"})]
 `)
 	s := p.Steps[0]
-	if s.Worker["gpu"] != "true" || s.Prefer["speed"] != "fast" || s.Avoid["network"] != "home" {
-		t.Errorf("placement = worker %v, prefer %v, avoid %v", s.Worker, s.Prefer, s.Avoid)
+	if s.On["gpu"] != "true" || s.Prefer["speed"] != "fast" || s.Avoid["network"] != "home" {
+		t.Errorf("placement = on %v, prefer %v, avoid %v", s.On, s.Prefer, s.Avoid)
 	}
 	wantError(t, `
 def ci(ctx):
-    return [step("a", image = "i", run = "r", worker = {"gpu": "true"}, avoid = {"gpu": "true"})]
-`, `label "gpu" is in both worker and avoid`)
+    return [step("a", image = "i", run = "r", on = {"gpu": "true"}, avoid = {"gpu": "true"})]
+`, `label "gpu" is in both on and avoid`)
 }
 
 func TestInputPatternsAreKeptAsWritten(t *testing.T) {

@@ -157,3 +157,10 @@ func circleCI(getenv func(string) string) Detected {
 	}
 	return d
 }
+
+// Disposable reports whether the machine this is running on is known to be
+// thrown away once the job is done: a runner the CI tool provides, as
+// opposed to one somebody keeps. Only GitHub says so.
+func Disposable(getenv func(string) string) bool {
+	return getenv("GITHUB_ACTIONS") == "true" && getenv("RUNNER_ENVIRONMENT") == "github-hosted"
+}

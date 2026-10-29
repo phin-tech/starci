@@ -107,7 +107,7 @@ func (s *Store) Put(ctx context.Context, key string, r plan.Result) error {
 }
 
 // Check confirms the store can be read and written, so that a mistake in its
-// address or credentials is found when a worker starts and not by every step
+// address or credentials is found when a machine starts and not by every step
 // quietly running again.
 func (s *Store) Check(ctx context.Context) error {
 	probe := strings.Repeat("0", 64)

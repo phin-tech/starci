@@ -28,12 +28,11 @@ The documentation is in [`docs/`](docs/index.md), and is built into a site with
 | | |
 |---|---|
 | [Overview and status](docs/index.md) | What works and what does not. |
-| [Getting started](docs/getting-started.md) | Try it against a checkout, then on Hatchet. |
-| [Running on every push](docs/running.md) | Webhooks, schedules and the forge. |
-| [Compiling to a workflow](docs/compiling.md) | Write a basic script out for GitHub Actions or CircleCI. |
-| [Workers](docs/workers.md) | Placing steps, looking after workers, superseded runs. |
+| [Getting started](docs/getting-started.md) | Try it against a checkout. |
+| [Compiling to a workflow](docs/compiling.md) | Write a basic script out for GitHub Actions or CircleCI, or run starci inside one. |
 | [What a script can do](docs/scripts.md) | The language, and basic versus advanced mode. |
 | [Tools and packages](docs/tools.md) | Pinned downloads and system packages for a step. |
+| [Steps without an image](docs/bare.md) | Bare steps, on the machine itself. |
 | [Inputs, networks and services](docs/inputs.md) | What a step sees, skipping, and databases beside a step. |
 | [How it fits together](docs/architecture.md) | Engines and traces. |
 | [Examples](examples/README.md) | Thirty-seven scripts, and what the basic ones compile to. |

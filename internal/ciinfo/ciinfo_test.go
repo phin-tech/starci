@@ -138,3 +138,20 @@ func TestCircleCI(t *testing.T) {
 		t.Error("a CircleCI build of a forked pull request was not marked as a fork")
 	}
 }
+
+func TestOnlyAGitHubHostedRunnerIsDisposable(t *testing.T) {
+	cases := []struct {
+		env  map[string]string
+		want bool
+	}{
+		{map[string]string{"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}, true},
+		{map[string]string{"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "self-hosted"}, false},
+		{map[string]string{"GITHUB_ACTIONS": "true"}, false},
+		{map[string]string{"RUNNER_ENVIRONMENT": "github-hosted"}, false},
+	}
+	for _, c := range cases {
+		if got := Disposable(func(k string) string { return c.env[k] }); got != c.want {
+			t.Errorf("Disposable(%v) = %v, want %v", c.env, got, c.want)
+		}
+	}
+}

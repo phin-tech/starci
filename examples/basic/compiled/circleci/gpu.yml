@@ -5,7 +5,7 @@
 # already passed with the same inputs.
 #
 # What does not carry over:
-#  - `worker`, `prefer` and `avoid` have no equivalent here and are dropped
+#  - `on`, `prefer` and `avoid` have no equivalent here and are dropped
 #    (integration, gpu): CircleCI chooses machines by resource class, not by
 #    label. Every job uses medium.
 #  - Passes are remembered in this project's CircleCI cache, which expires.

@@ -10,10 +10,10 @@ import (
 
 // CircleCI renders a plan as a CircleCI configuration.
 //
-// As with GitHub, each step becomes a job that does what a starci worker
+// As with GitHub, each step becomes a job that does what a starci machine
 // does. Two things come out closer to starci here than they do there. The
 // record of a pass is keyed on the exact list of files the inputs select,
-// asked of git with the same pathspecs a worker uses, rather than on globs.
+// asked of git with the same pathspecs a machine uses, rather than on globs.
 // And a job that has already passed ends in one place, instead of every later
 // step carrying a condition.
 //
@@ -39,13 +39,13 @@ func CircleCI(p *plan.Plan, o Options) (string, error) {
 
 	var placed []string
 	for _, s := range p.Steps {
-		if len(s.Worker) > 0 || len(s.Prefer) > 0 || len(s.Avoid) > 0 {
+		if len(s.On) > 0 || len(s.Prefer) > 0 || len(s.Avoid) > 0 {
 			placed = append(placed, s.Name)
 		}
 	}
 	notes := commitNote(o)
 	if len(placed) > 0 {
-		notes = append(notes, fmt.Sprintf("`worker`, `prefer` and `avoid` have no equivalent here and are dropped (%s): CircleCI chooses machines by resource class, not by label. Every job uses %s.", strings.Join(placed, ", "), o.RunsOn))
+		notes = append(notes, fmt.Sprintf("`on`, `prefer` and `avoid` have no equivalent here and are dropped (%s): CircleCI chooses machines by resource class, not by label. Every job uses %s.", strings.Join(placed, ", "), o.RunsOn))
 	}
 	notes = append(notes, "Passes are remembered in this project's CircleCI cache, which expires. starci's own store does not.")
 	writeHeader(&w, "starci compile --target circleci", o, notes)
@@ -98,7 +98,7 @@ func circleRun(w *strings.Builder, name string, env map[string]string, lines ...
 	}
 }
 
-// gitPathspec selects an input the way a starci worker does.
+// gitPathspec selects an input the way a starci machine does.
 func gitPathspec(in string) string {
 	switch {
 	case in == ".":
@@ -110,6 +110,9 @@ func gitPathspec(in string) string {
 }
 
 func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
+	if err := bareRefusal(s); err != nil {
+		return err
+	}
 	fmt.Fprintf(w, "  %s:\n    machine:\n      image: ubuntu-2404:current\n    resource_class: %s\n    steps:\n      - checkout\n", id, o.RunsOn)
 
 	// Taken out of the checkout while the whole of it is still there.
@@ -135,7 +138,7 @@ func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
 		for _, in := range append(append([]string{}, s.Inputs...), serviceFiles(s)...) {
 			specs = append(specs, shq(gitPathspec(in)))
 		}
-		// The same question a worker asks git: which files, with which
+		// The same question a machine asks git: which files, with which
 		// contents, do these inputs select at this commit?
 		circleRun(w, "Identify the inputs", nil, "git ls-files -s -- "+strings.Join(specs, " ")+" > /tmp/starci-inputs")
 		passKey = fmt.Sprintf("starci-passed-%s-%s-{{ checksum \"/tmp/starci-inputs\" }}", id, stepKey(s, o.Arch))
@@ -147,9 +150,9 @@ func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
 			"fi")
 	}
 
-	var mounts, pathDirs []string
+	var mounts, pathDirs, hostDirs []string
 	for _, t := range s.Tools {
-		sum, ok := t.SHA256[o.Arch]
+		sum, ok := t.Sum("linux/" + o.Arch)
 		if !ok {
 			return fmt.Errorf("step %q: tool %q has no build for %s, which is what %s machines are", s.Name, t.Name, o.Arch, o.RunsOn)
 		}
@@ -168,6 +171,7 @@ func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
 		mounts = append(mounts, fmt.Sprintf("-v \"%s:/opt/starci/tools/%s:ro\"", dir, t.Name))
 		for _, b := range t.Bin {
 			pathDirs = append(pathDirs, path.Join("/opt/starci/tools", t.Name, fill(b)))
+			hostDirs = append(hostDirs, path.Join(dir, fill(b)))
 		}
 	}
 
@@ -181,10 +185,12 @@ func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
 			"DOCKERFILE")
 	}
 
+	cacheDirs := map[string]string{}
 	for _, name := range sortedKeys(s.Caches) {
 		// The newest cache whose key starts this way.
 		fmt.Fprintf(w, "      - restore_cache:\n          name: %s\n          keys:\n            - starci-cache-%s-\n", q("Cache: "+name), name)
 		mounts = append(mounts, fmt.Sprintf("-v \"$HOME/starci-cache/%s:%s\"", name, s.Caches[name]))
+		cacheDirs[s.Caches[name]] = "$HOME/starci-cache/" + name
 	}
 
 	// CIRCLE_BUILD_NUM is this job's own number.
@@ -194,6 +200,10 @@ func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
 	}
 
 	var lines []string
+	if s.Bare() {
+		// On the machine itself, which is what a bare step asks for.
+		lines = bareRun(s, hostDirs, cacheDirs)
+	}
 	args := []string{"-v \"$PWD:/workspace\"", "-w /workspace"}
 	switch {
 	case len(s.Services) > 0:
@@ -202,7 +212,7 @@ func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
 		args = append(args, "--network none")
 	}
 	args = append(args, mounts...)
-	if len(pathDirs) > 0 {
+	if len(pathDirs) > 0 && !s.Bare() {
 		base := "$image_path"
 		if p, ok := s.Env["PATH"]; ok {
 			base = p
@@ -221,15 +231,17 @@ func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
 		}
 		args = append(args, "-e "+shq(k+"="+s.Env[k]))
 	}
-	run := "docker run --rm \\\n"
-	for _, a := range args {
-		run += "  " + a + " \\\n"
+	if !s.Bare() {
+		run := "docker run --rm \\\n"
+		for _, a := range args {
+			run += "  " + a + " \\\n"
+		}
+		run += "  " + image + " sh -c \"$STARCI_RUN\""
+		lines = append(lines, run)
 	}
-	run += "  " + image + " sh -c \"$STARCI_RUN\""
-	lines = append(lines, run)
 	// The command travels in an environment variable, so that nothing in it
 	// needs escaping for the shell that starts the container.
-	circleRun(w, s.Name, map[string]string{"STARCI_RUN": s.Run}, lines...)
+	circleRun(w, s.Name, map[string]string{"STARCI_RUN": s.Command()}, lines...)
 	if len(s.Services) > 0 {
 		// Whatever became of the step. The machine is thrown away after the
 		// job, so this is tidiness, and the same as the other targets.

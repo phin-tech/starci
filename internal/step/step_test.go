@@ -83,7 +83,7 @@ func TestStepSeesOnlyItsInputs(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"src/a.txt": "a", "docs/readme.md": "readme", "secret.txt": "s"})
-	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	cfg := Config{Machine: "test", StateDir: t.TempDir()}
 
 	got := run(t, cfg, r, sha, plan.Step{
 		Name:   "look",
@@ -101,7 +101,7 @@ func TestStepSeesOnlyItsInputs(t *testing.T) {
 func TestPassIsReusedUntilAnInputChanges(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
-	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	cfg := Config{Machine: "test", StateDir: t.TempDir()}
 	s := plan.Step{Name: "read", Inputs: []string{"src"}, Run: "cat src/a.txt", Cache: true}
 
 	first := r.commit(map[string]string{"src/a.txt": "one\n", "README.md": "v1"})
@@ -143,7 +143,7 @@ func TestCacheFalseAlwaysRuns(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
-	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	cfg := Config{Machine: "test", StateDir: t.TempDir()}
 	s := plan.Step{Name: "live", Run: "true", Cache: false}
 	run(t, cfg, r, sha, s)
 	if got := run(t, cfg, r, sha, s); got.Cached {
@@ -155,7 +155,7 @@ func TestNetworkFalseLeavesOnlyLoopback(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
-	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	cfg := Config{Machine: "test", StateDir: t.TempDir()}
 	// With no network a container has the loopback interface and no other.
 	s := plan.Step{Name: "sealed", Run: `test "$(ls /sys/class/net)" = lo`, Cache: true}
 	if got := run(t, cfg, r, sha, s); got.Status != "failed" {
@@ -171,7 +171,7 @@ func TestAPassWithTheNetworkIsNotReusedWithout(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
-	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	cfg := Config{Machine: "test", StateDir: t.TempDir()}
 	s := plan.Step{Name: "read", Run: "cat a.txt", Cache: true}
 	run(t, cfg, r, sha, s)
 	s.Offline = true
@@ -187,7 +187,7 @@ func TestFailuresAreReportedAndNeverReused(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
-	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	cfg := Config{Machine: "test", StateDir: t.TempDir()}
 	s := plan.Step{Name: "broken", Run: "echo about to fail; exit 7", Cache: true}
 
 	for attempt := 1; attempt <= 2; attempt++ {
@@ -208,7 +208,7 @@ func TestStepsThatCannotStartFailClearly(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
-	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	cfg := Config{Machine: "test", StateDir: t.TempDir()}
 
 	cases := []struct {
 		name string
@@ -235,7 +235,7 @@ func TestCacheMountPersistsBetweenRuns(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
-	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	cfg := Config{Machine: "test", StateDir: t.TempDir()}
 	name := "test" + strings.ReplaceAll(filepath.Base(t.TempDir()), "_", "")
 	t.Cleanup(func() { _ = exec.Command("docker", "volume", "rm", "-f", "starci-cache-"+name).Run() })
 
@@ -254,7 +254,7 @@ func TestCancelStopsTheContainer(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
-	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	cfg := Config{Machine: "test", StateDir: t.TempDir()}
 
 	// Something only this step's command holds, to know its container by:
 	// other steps may be running on this machine, and they are not ours.
@@ -284,7 +284,7 @@ func TestCancelStopsTheContainer(t *testing.T) {
 func TestInputPatterns(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
-	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	cfg := Config{Machine: "test", StateDir: t.TempDir()}
 	s := plan.Step{
 		Name:   "list",
 		Inputs: []string{"src/**/*.py", "tests/test_*.py", "pyproject.toml"},
@@ -335,7 +335,7 @@ func TestPatternStarStaysInOneDirectory(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"src/top.py": "a", "src/sub/inner.py": "b"})
-	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	cfg := Config{Machine: "test", StateDir: t.TempDir()}
 	got := run(t, cfg, r, sha, plan.Step{Name: "list", Inputs: []string{"src/*.py"}, Run: "find . -type f | sort"})
 	if strings.TrimSpace(got.Output) != "./src/top.py" {
 		t.Errorf("src/*.py gave the step:\n%s\nwant only ./src/top.py", got.Output)
@@ -347,7 +347,7 @@ func TestPackagesAreInstalledOnce(t *testing.T) {
 	const base = "debian:12-slim"
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
-	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	cfg := Config{Machine: "test", StateDir: t.TempDir()}
 	s := plan.Step{Name: "use", Image: base, Packages: []string{"jq"}, Run: `echo '{"a": 7}' | jq .a`}
 
 	first := run(t, cfg, r, sha, s)
@@ -384,7 +384,7 @@ func TestPackagesNeedApt(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
-	cfg := Config{Worker: "test", StateDir: t.TempDir()}
+	cfg := Config{Machine: "test", StateDir: t.TempDir()}
 	got := run(t, cfg, r, sha, plan.Step{Name: "use", Image: testImage, Packages: []string{"jq"}, Run: "jq --version"})
 	if got.Status != "failed" || !strings.Contains(got.Detail, "has no apt-get") {
 		t.Fatalf("result = %+v, want a clear refusal on an image without apt", got)
@@ -429,15 +429,15 @@ func TestAPassOnOneMachineIsReusedOnAnother(t *testing.T) {
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "hello\n"})
 	shared := &memStore{}
-	one := Config{Worker: "one", StateDir: t.TempDir(), Shared: shared}
-	two := Config{Worker: "two", StateDir: t.TempDir(), Shared: shared}
+	one := Config{Machine: "one", StateDir: t.TempDir(), Shared: shared}
+	two := Config{Machine: "two", StateDir: t.TempDir(), Shared: shared}
 	s := plan.Step{Name: "read", Run: "cat a.txt", Cache: true}
 
-	if got := run(t, one, r, sha, s); got.Cached || got.Worker != "one" {
+	if got := run(t, one, r, sha, s); got.Cached || got.Machine != "one" {
 		t.Fatalf("on the first machine = %+v, want a fresh run there", got)
 	}
 	got := run(t, two, r, sha, s)
-	if !got.Cached || got.Worker != "one" || got.Output != "hello\n" {
+	if !got.Cached || got.Machine != "one" || got.Output != "hello\n" {
 		t.Errorf("on the second machine = %+v, want the first machine's pass, output included", got)
 	}
 
@@ -449,7 +449,7 @@ func TestAPassOnOneMachineIsReusedOnAnother(t *testing.T) {
 	}
 
 	// A machine with no shared store knows nothing about it.
-	alone := Config{Worker: "three", StateDir: t.TempDir()}
+	alone := Config{Machine: "three", StateDir: t.TempDir()}
 	if got := run(t, alone, r, sha, s); got.Cached {
 		t.Error("a machine without the shared store reused a result it could not have seen")
 	}
@@ -460,7 +460,7 @@ func TestAnUnreachableSharedStoreCostsOnlyARerun(t *testing.T) {
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
 	shared := &memStore{down: true}
-	cfg := Config{Worker: "one", StateDir: t.TempDir(), Shared: shared}
+	cfg := Config{Machine: "one", StateDir: t.TempDir(), Shared: shared}
 	s := plan.Step{Name: "read", Run: "cat a.txt", Cache: true}
 
 	var logged []string
@@ -478,12 +478,12 @@ func TestAnUnreachableSharedStoreCostsOnlyARerun(t *testing.T) {
 	}
 }
 
-// The question a worker asks of a commit, asked of a checkout: needs git and
+// The question a machine asks of a commit, asked of a checkout: needs git and
 // nothing else.
 func TestMissingInputsNamesWhatSelectsNothing(t *testing.T) {
 	r := newRepo(t)
 	r.commit(map[string]string{"src/a.go": "a", "docs/guide/intro.md": "i", "Makefile": "m"})
-	// On disk but never added: not in any commit a worker would build.
+	// On disk but never added: not in any commit a machine would build.
 	if err := os.WriteFile(filepath.Join(r.dir, "untracked.txt"), []byte("u"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -525,7 +525,7 @@ func web(name, delay string) plan.Service {
 }
 
 // leftovers lists what steps with services have left on this machine for the
-// worker called name.
+// machine called name.
 func leftovers(t *testing.T, name string) string {
 	t.Helper()
 	owned := "label=" + ownerLabel + "=" + name
@@ -538,7 +538,7 @@ func TestAStepReachesItsServicesByName(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
-	cfg := Config{Worker: "test-" + t.Name(), StateDir: t.TempDir()}
+	cfg := Config{Machine: "test-" + t.Name(), StateDir: t.TempDir()}
 	s := plan.Step{
 		Name: "ask", Run: "nc -w 2 one 8080 </dev/null && nc -w 2 two 8080 </dev/null",
 		// One of them is slow to start: the step waits for it.
@@ -548,7 +548,7 @@ func TestAStepReachesItsServicesByName(t *testing.T) {
 	if got.Status != "passed" || got.Output != "one\ntwo\n" {
 		t.Fatalf("result = %+v, want a pass that printed each service's name", got)
 	}
-	if left := leftovers(t, cfg.Worker); left != "" {
+	if left := leftovers(t, cfg.Machine); left != "" {
 		t.Errorf("services or their network outlived the step: %s", left)
 	}
 }
@@ -557,7 +557,7 @@ func TestAStepWithoutTheNetworkStillReachesItsServices(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
-	cfg := Config{Worker: "test-" + t.Name(), StateDir: t.TempDir()}
+	cfg := Config{Machine: "test-" + t.Name(), StateDir: t.TempDir()}
 	s := plan.Step{
 		Name: "sealed", Offline: true, Services: []plan.Service{web("one", "0")},
 		// The service answers, and there is no way out: no default route.
@@ -576,7 +576,7 @@ func TestAServiceIsPartOfWhatAPassMeans(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
-	cfg := Config{Worker: "test-" + t.Name(), StateDir: t.TempDir()}
+	cfg := Config{Machine: "test-" + t.Name(), StateDir: t.TempDir()}
 	s := plan.Step{Name: "read", Run: "cat a.txt", Cache: true}
 	run(t, cfg, r, sha, s)
 	s.Services = []plan.Service{web("one", "0")}
@@ -596,7 +596,7 @@ func TestAServiceThatFailsFailsTheStepAndSaysWhy(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
-	cfg := Config{Worker: "test-" + t.Name(), StateDir: t.TempDir()}
+	cfg := Config{Machine: "test-" + t.Name(), StateDir: t.TempDir()}
 
 	dead := plan.Service{Name: "dead", Image: testImage, Args: []string{"sh", "-c", "echo no licence; exit 1"}, Ready: "true"}
 	got := run(t, cfg, r, sha, plan.Step{Name: "a", Run: "true", Services: []plan.Service{dead}})
@@ -625,7 +625,7 @@ func TestAServiceThatFailsFailsTheStepAndSaysWhy(t *testing.T) {
 	if got.Status != "failed" || !strings.Contains(got.Detail, `service "gone"`) {
 		t.Errorf("a service whose image does not exist: %+v", got)
 	}
-	if left := leftovers(t, cfg.Worker); left != "" {
+	if left := leftovers(t, cfg.Machine); left != "" {
 		t.Errorf("failed services were left behind: %s", left)
 	}
 }
@@ -645,7 +645,7 @@ CMD ["sh", "-c", "sleep 2; exec nc -lk -p 8080 -e hostname"]
 	}
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
-	cfg := Config{Worker: "test-" + t.Name(), StateDir: t.TempDir()}
+	cfg := Config{Machine: "test-" + t.Name(), StateDir: t.TempDir()}
 	s := plan.Step{Name: "ask", Run: "nc -w 2 slow 8080 </dev/null", Services: []plan.Service{{Name: "slow", Image: healthy}}}
 	if got := run(t, cfg, r, sha, s); got.Status != "passed" || got.Output != "slow\n" {
 		t.Fatalf("the step did not wait for the image's health check: %+v", got)
@@ -656,7 +656,7 @@ func TestAServiceIsGivenItsFilesAndTheStepIsNot(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a", "db/init.sql": "one", "db/conf/app.conf": "x=1"})
-	cfg := Config{Worker: "test-" + t.Name(), StateDir: t.TempDir()}
+	cfg := Config{Machine: "test-" + t.Name(), StateDir: t.TempDir()}
 	// A service that answers with what it was given: one file and one
 	// directory, each where it asked for them.
 	teller := plan.Service{
@@ -696,7 +696,7 @@ func TestAServiceMayAskForLongerOrShorter(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
-	cfg := Config{Worker: "test-" + t.Name(), StateDir: t.TempDir()}
+	cfg := Config{Machine: "test-" + t.Name(), StateDir: t.TempDir()}
 	never := plan.Service{Name: "never", Image: testImage, Args: []string{"sleep", "600"}, Ready: "false", ReadyWithin: 1}
 	began := time.Now()
 	got := run(t, cfg, r, sha, plan.Step{Name: "a", Run: "true", Services: []plan.Service{never}})
@@ -709,7 +709,7 @@ func TestCancelStopsTheServices(t *testing.T) {
 	needDocker(t)
 	r := newRepo(t)
 	sha := r.commit(map[string]string{"a.txt": "a"})
-	cfg := Config{Worker: "test-" + t.Name(), StateDir: t.TempDir()}
+	cfg := Config{Machine: "test-" + t.Name(), StateDir: t.TempDir()}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	up := make(chan struct{})
@@ -723,26 +723,26 @@ func TestCancelStopsTheServices(t *testing.T) {
 		})
 	}()
 	<-up
-	if leftovers(t, cfg.Worker) == "" {
-		t.Fatal("nothing carries this worker's label while its step runs")
+	if leftovers(t, cfg.Machine) == "" {
+		t.Fatal("nothing carries this machine's label while its step runs")
 	}
 	cancel()
 	if got := <-done; got.Status != "failed" || got.Detail != "cancelled" {
 		t.Errorf("result = %+v, want a cancelled failure", got)
 	}
-	if left := leftovers(t, cfg.Worker); left != "" {
+	if left := leftovers(t, cfg.Machine); left != "" {
 		t.Errorf("services or their network are still there after cancel: %s", left)
 	}
 }
 
 func TestSweepRemovesWhatAKilledWorkerLeft(t *testing.T) {
 	needDocker(t)
-	// What a worker killed partway through a step leaves: nothing ran stop.
+	// What a machine killed partway through a step leaves: nothing ran stop.
 	mine, other := "test-"+t.Name(), "test-"+t.Name()+"-other"
 	var stops []func()
-	for _, worker := range []string{mine, other} {
+	for _, machine := range []string{mine, other} {
 		s := plan.Step{Services: []plan.Service{web("one", "0")}}
-		_, stop, err := startServices(context.Background(), "starci-sweep-"+worker, worker, s, nil)
+		_, stop, err := startServices(context.Background(), "starci-sweep-"+machine, machine, s, nil)
 		stops = append(stops, stop)
 		if err != nil {
 			t.Fatal(err)
@@ -756,9 +756,9 @@ func TestSweepRemovesWhatAKilledWorkerLeft(t *testing.T) {
 
 	Sweep(mine)
 	if left := leftovers(t, mine); left != "" {
-		t.Errorf("after a sweep this worker still has: %s", left)
+		t.Errorf("after a sweep this machine still has: %s", left)
 	}
 	if leftovers(t, other) == "" {
-		t.Error("a sweep for one worker removed another's services")
+		t.Error("a sweep for one machine removed another's services")
 	}
 }

@@ -1,19 +1,12 @@
 // Command starci plans and runs a repository's Starlark CI script.
 //
 //	starci plan     evaluate a script and print the plan; runs nothing
-//	starci run      execute a commit of a local checkout: on Hatchet's workers,
-//	                or with --local on this machine with nothing but Docker
-//	starci worker   execute steps on this machine
-//	starci serve    be the address a forge delivers to, passing deliveries on
-//	starci hooks    have Hatchet itself be that address
-//	starci compile  write a basic script out for GitHub Actions or CircleCI
+//	starci run      execute a commit of a checkout on this machine, with Docker
+//	                for steps in an image
+//	starci compile  write a basic script out for GitHub Actions or CircleCI, or
+//	                as an executable
 //	starci validate check that a script's inputs select files and that the
 //	                tools it pins download as pinned; runs nothing
-//	starci workers  list the workers Hatchet knows, and what they offer
-//	starci shun     stop giving a worker new steps; unshun reverses it
-//
-// Everything but plan, validate, compile and run --local reaches Hatchet
-// through the HATCHET_CLIENT_* variables.
 package main
 
 import (
@@ -22,7 +15,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -38,30 +30,23 @@ import (
 	"git.phin.tech/sam/starci/internal/ciinfo"
 	"git.phin.tech/sam/starci/internal/compile"
 	"git.phin.tech/sam/starci/internal/engine"
-	onhatchet "git.phin.tech/sam/starci/internal/engine/hatchet"
 	"git.phin.tech/sam/starci/internal/engine/local"
-	"git.phin.tech/sam/starci/internal/forge"
 	"git.phin.tech/sam/starci/internal/plan"
 	"git.phin.tech/sam/starci/internal/step"
 	s3store "git.phin.tech/sam/starci/internal/store/s3"
 	"git.phin.tech/sam/starci/internal/tracing"
-	"git.phin.tech/sam/starci/internal/trigger"
 )
 
 const usage = `usage:
   starci plan   [--file .ci.star] [--repo owner/name] [--sha SHA] [--ref REF] [--changed a,b,c]
-  starci run    CHECKOUT --clone-url URL [--sha SHA] [--ref BRANCH] [--file FILE] [--repo owner/name]
-  starci run    CHECKOUT --local [-v] [--slots N] [--sha SHA] [--file FILE]
-  starci worker
-  starci serve
-  starci hooks add forgejo|github
+  starci run    CHECKOUT [-v] [--slots N] [--bare[=false]] [--bare-image IMAGE] [--sha SHA] [--file FILE] [--clone-url URL]
   starci compile [--target github|circleci|binary] [-o FILE --freeze --base STARCI] [--file .ci.star] [--runs-on NAME] [--arch amd64] [--offline] [--check FILE]
-  starci validate [--file .ci.star] [--arch amd64,arm64]
-  starci workers
-  starci shun WORKER
-  starci unshun WORKER`
+  starci validate [--file .ci.star] [--arch amd64,arm64]`
 
 func main() {
+	// Before anything else, even a script this executable carries: a
+	// watchdog over a bare step is this executable run again.
+	step.Watchdog()
 	// An executable written by `starci compile --target binary` carries a
 	// script and does nothing but run it, in the checkout it is pointed at.
 	if b, err := bundle.Self(); err != nil {
@@ -72,7 +57,7 @@ func main() {
 		if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
 			dir, rest = rest[0], rest[1:]
 		}
-		if err := runCmd(append([]string{dir, "--local"}, rest...)); err != nil {
+		if err := runCmd(append([]string{dir}, rest...)); err != nil {
 			die("starci: " + err.Error())
 		}
 		return
@@ -86,23 +71,10 @@ func main() {
 		err = planCmd(os.Args[2:])
 	case "run":
 		err = runCmd(os.Args[2:])
-	case "worker":
-		err = workerCmd()
 	case "compile":
 		err = compileCmd(os.Args[2:])
 	case "validate":
 		err = validateCmd(os.Args[2:])
-	case "serve":
-		err = serveCmd()
-	case "hooks":
-		err = hooksCmd(os.Args[2:])
-	case "workers":
-		err = workersCmd()
-	case "shun", "unshun":
-		if len(os.Args) != 3 {
-			die(usage)
-		}
-		err = shunCmd(os.Args[2], os.Args[1] == "shun")
 	default:
 		die(usage)
 	}
@@ -161,17 +133,22 @@ func evalFile(file string, c plan.Context) (*plan.Plan, error) {
 
 func runCmd(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	localRun := fs.Bool("local", false, "run the steps on this machine with Docker, without Hatchet")
-	cloneURL := fs.String("clone-url", "", "URL workers fetch the commit from (with --local, defaults to the checkout)")
+	// Every run is on this machine; --local is what that was asked for with
+	// when there was another kind, and is still accepted.
+	fs.Bool("local", true, "accepted, and means nothing: every run is on this machine")
+	cloneURL := fs.String("clone-url", "", "URL the commit is fetched from (default: the checkout)")
+	var bare optionalBool
+	fs.Var(&bare, "bare", "run bare steps, or with --bare=false refuse them (default: STARCI_BARE, else yes but for a pull request from a fork)")
+	bareImage := fs.String("bare-image", os.Getenv("STARCI_BARE_IMAGE"), "run bare steps in this image instead of on the machine, each in a container of its own (default: STARCI_BARE_IMAGE)")
 	sha := fs.String("sha", "HEAD", "commit to build")
-	ref := fs.String("ref", "", "branch this run is for; a newer run for the same branch cancels it (default: the checked-out branch when building HEAD)")
+	ref := fs.String("ref", "", "branch this run is for (default: the checked-out branch when building HEAD)")
 	file := fs.String("file", "", "CI script (default: .ci.star in the checkout)")
 	repo := fs.String("repo", "", "owner/name, for display (default: from the clone URL)")
 	event := fs.String("event", "", "why the run starts, to try what a script does for it: push, tag, pull_request, schedule or manual (default: what the CI tool this is running in says, or manual)")
 	tag := fs.String("tag", "", "the tag, for --event tag")
 	scheduleName := fs.String("schedule", "", "the schedule, for --event schedule")
-	slots := fs.Int("slots", 4, "with --local, how many steps to run at once")
-	verbose := fs.Bool("v", false, "with --local, print each step's output as it runs")
+	slots := fs.Int("slots", 4, "how many steps to run at once")
+	verbose := fs.Bool("v", false, "print each step's output as it runs")
 	// The checkout comes first on the command line, before the flags.
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		die(usage)
@@ -180,11 +157,8 @@ func runCmd(args []string) error {
 	fs.Parse(args[1:])
 
 	if *cloneURL == "" {
-		if !*localRun {
-			die(usage)
-		}
 		// The checkout is a perfectly good place to fetch a commit from. Only
-		// what is committed is built, the same as on a worker.
+		// what is committed is built, the same as on a machine.
 		abs, err := filepath.Abs(dir)
 		if err != nil {
 			return err
@@ -294,7 +268,7 @@ func runCmd(args []string) error {
 		fmt.Printf("%s @ %.8s: advanced script, steps are decided as it runs\n", c.Repo, c.SHA)
 	}
 
-	run := engine.Run{Mode: mode, Plan: p, Context: c, CloneURL: *cloneURL, Supersedes: trigger.Supersedes(c)}
+	run := engine.Run{Mode: mode, Plan: p, Context: c, CloneURL: *cloneURL}
 	if mode == plan.Advanced {
 		run.Filename, run.Source = filepath.Base(*file), src
 	}
@@ -311,12 +285,7 @@ func runCmd(args []string) error {
 	}
 	defer flush()
 
-	var eng engine.Engine
-	if *localRun {
-		eng, err = localEngine(*slots, *verbose)
-	} else {
-		eng, err = onhatchet.New(onhatchet.Options{})
-	}
+	eng, err := localEngine(*slots, *verbose, c, bare, *bareImage)
 	if err != nil {
 		return err
 	}
@@ -324,17 +293,6 @@ func runCmd(args []string) error {
 	// not left to be discovered.
 	for _, lost := range eng.Can().Missing(run) {
 		fmt.Println("note: " + lost)
-	}
-	// A step nobody can take waits in silence until the engine gives up on
-	// it. Say so now, while the cause is still obvious.
-	if fleet, ok := eng.(engine.Fleet); ok && p != nil {
-		if workers, werr := fleet.Workers(ctx); werr == nil {
-			for _, s := range p.Steps {
-				if !engine.CanTake(workers, s) {
-					fmt.Printf("warning: no connected worker can take step %q (needs %s); it will wait for one\n", s.Name, engine.Placement(s))
-				}
-			}
-		}
 	}
 
 	started := time.Now()
@@ -346,8 +304,8 @@ func runCmd(args []string) error {
 	fmt.Println()
 	for _, r := range result.Steps {
 		where := ""
-		if r.Worker != "" {
-			where = " on " + r.Worker
+		if r.Machine != "" {
+			where = " on " + r.Machine
 		}
 		note := fmt.Sprintf("%.1fs%s", r.Seconds, where)
 		if r.Cached {
@@ -378,10 +336,11 @@ func runCmd(args []string) error {
 	return nil
 }
 
-// localEngine is this machine, with nothing but Docker: the same script, the
-// same sandbox and the same result cache as a worker, and no queue, no other
-// machines, and nothing to resume from if this process is stopped.
-func localEngine(slots int, verbose bool) (engine.Engine, error) {
+// localEngine is this machine, with Docker for steps in an image: no queue,
+// no other machines, and nothing to resume from if this process is stopped.
+//
+// Bare steps run here unless bareHere says otherwise.
+func localEngine(slots int, verbose bool, c plan.Context, bare optionalBool, bareImage string) (engine.Engine, error) {
 	// Named, because with a shared store this machine's results are seen
 	// from others.
 	host, _ := os.Hostname()
@@ -392,6 +351,10 @@ func localEngine(slots int, verbose bool) (engine.Engine, error) {
 	if err != nil {
 		return nil, err
 	}
+	if cfg.Bare, err = bareHere(os.Getenv, c, bare); err != nil {
+		return nil, err
+	}
+	cfg.BareImage = bareImage
 	eng := &local.Engine{Config: cfg, Slots: slots}
 	if verbose {
 		var mu sync.Mutex
@@ -404,73 +367,6 @@ func localEngine(slots int, verbose bool) (engine.Engine, error) {
 	return eng, nil
 }
 
-// workerCmd is configured by environment, since it normally runs as a service:
-//
-//	STARCI_WORKER_NAME  name recorded in results (default: hostname)
-//	STARCI_STATE        where results and tools are kept (default: ~/.cache/starci)
-//	STARCI_STORE        a result store shared with other machines (see machineConfig)
-//	STARCI_SLOTS        steps to run at once (default: 4)
-//	STARCI_LABELS       what this machine offers, as k=v,k=v (e.g. gpu=true)
-//	STARCI_DASHBOARD    Hatchet's dashboard, as a person reaches it; statuses then link to the run
-//	STARCI_TRACES       true to send Hatchet a trace of where each step's time went
-//	OTEL_EXPORTER_OTLP_ENDPOINT (and the other standard OTEL_EXPORTER_OTLP_*
-//	                    variables) send the same traces to any OpenTelemetry endpoint
-func workerCmd() error {
-	name := os.Getenv("STARCI_WORKER_NAME")
-	if name == "" {
-		name, _ = os.Hostname()
-	}
-	cfg, err := machineConfig(name)
-	if err != nil {
-		return err
-	}
-	slots := 4
-	if v := os.Getenv("STARCI_SLOTS"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 {
-			return fmt.Errorf("STARCI_SLOTS must be a positive number, got %q", v)
-		}
-		slots = n
-	}
-	labels := map[string]string{}
-	for _, pair := range strings.Split(os.Getenv("STARCI_LABELS"), ",") {
-		if pair = strings.TrimSpace(pair); pair == "" {
-			continue
-		}
-		k, v, ok := strings.Cut(pair, "=")
-		if !ok || k == "" {
-			return fmt.Errorf("STARCI_LABELS entries must look like key=value, got %q", pair)
-		}
-		labels[k] = v
-	}
-
-	forges, secrets, err := forgesFromEnv()
-	if err != nil {
-		return err
-	}
-	// A worker given a forge's webhook secret also acts on its deliveries:
-	// it can check them, and it has the token to fetch the script.
-	reception := &onhatchet.Reception{Hooks: map[string]trigger.Hook{}, AllowForks: os.Getenv("STARCI_ALLOW_FORK_PULL_REQUESTS") == "true"}
-	for forgeName, f := range forges {
-		if len(secrets[forgeName]) > 0 {
-			reception.Hooks[forgeName] = trigger.Hook{Forge: f, Secret: secrets[forgeName]}
-		}
-	}
-
-	eng, err := onhatchet.New(onhatchet.Options{Machine: cfg, Post: reporter(forges), Reception: reception, Slots: slots, Labels: labels, Dashboard: os.Getenv("STARCI_DASHBOARD"), Traces: os.Getenv("STARCI_TRACES") == "true"})
-	if err != nil {
-		return err
-	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	_, flush, err := tracing.Export(ctx)
-	if err != nil {
-		return fmt.Errorf("setting up traces: %w", err)
-	}
-	defer flush()
-	return engine.Host(eng).Work(ctx)
-}
-
 // machineConfig is what this machine brings to running steps, from the
 // environment: where it keeps its state, and the store it shares with others.
 //
@@ -479,22 +375,13 @@ func workerCmd() error {
 //	              s3://bucket/prefix?endpoint=host, with credentials in the
 //	              usual AWS_* variables. Optional.
 func machineConfig(name string) (step.Config, error) {
-	cfg := step.Config{Worker: name, StateDir: os.Getenv("STARCI_STATE")}
+	cfg := step.Config{Machine: name, StateDir: os.Getenv("STARCI_STATE")}
 	if cfg.StateDir == "" {
 		var err error
 		if cfg.StateDir, err = step.DefaultStateDir(); err != nil {
 			return cfg, err
 		}
 	}
-	forges, _, err := forgesFromEnv()
-	if err != nil {
-		return cfg, err
-	}
-	var all []forge.Forge
-	for _, f := range forges {
-		all = append(all, f)
-	}
-	cfg.GitEnv = forge.GitEnv(all...)
 	if location := os.Getenv("STARCI_STORE"); location != "" {
 		store, err := s3store.Open(location)
 		if err != nil {
@@ -510,6 +397,50 @@ func machineConfig(name string) (step.Config, error) {
 	return cfg, nil
 }
 
+// bareHere says whether `starci run` runs bare steps: steps that name no
+// image and run as this machine's own processes, as its user. --bare decides
+// when it is given, and STARCI_BARE when it is set. Otherwise they run, this
+// being the person's own machine and checkout, except for a pull request
+// from a fork: that is someone else's code, and runs bare only on a machine
+// thrown away after.
+func bareHere(getenv func(string) string, c plan.Context, flag optionalBool) (bool, error) {
+	if flag.set {
+		return flag.value, nil
+	}
+	switch v := getenv("STARCI_BARE"); v {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	case "":
+	default:
+		return false, fmt.Errorf("STARCI_BARE must be true or false, got %q", v)
+	}
+	if c.PR == nil || !c.PR.Fork {
+		return true, nil
+	}
+	return ciinfo.Disposable(getenv), nil
+}
+
+// optionalBool is a flag that may be given as --name, --name=false, or not at
+// all, and says which.
+type optionalBool struct{ set, value bool }
+
+func (b *optionalBool) String() string {
+	if !b.set {
+		return ""
+	}
+	return strconv.FormatBool(b.value)
+}
+
+func (b *optionalBool) Set(v string) error {
+	parsed, err := strconv.ParseBool(v)
+	b.set, b.value = true, parsed
+	return err
+}
+
+func (b *optionalBool) IsBoolFlag() bool { return true }
+
 func sortedKeys(m map[string]string) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -517,199 +448,6 @@ func sortedKeys(m map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
-}
-
-func workersCmd() error {
-	eng, err := onhatchet.New(onhatchet.Options{})
-	if err != nil {
-		return err
-	}
-	workers, err := engine.Fleet(eng).Workers(context.Background())
-	if err != nil {
-		return err
-	}
-	for _, w := range workers {
-		var labels []string
-		for _, k := range sortedKeys(w.Labels) {
-			labels = append(labels, k+"="+w.Labels[k])
-		}
-		state := "taking work"
-		if w.Shunned {
-			state = "shunned"
-		}
-		fmt.Printf("%-24s %-12s %s\n", w.Name, state, strings.Join(labels, " "))
-	}
-	if len(workers) == 0 {
-		fmt.Println("no workers connected")
-	}
-	return nil
-}
-
-// shunCmd stops (or resumes) new work being given to a worker. Steps it is
-// already running finish; nothing new arrives. For a machine that is
-// misbehaving, or about to be taken down.
-func shunCmd(name string, shun bool) error {
-	eng, err := onhatchet.New(onhatchet.Options{})
-	if err != nil {
-		return err
-	}
-	if err := engine.Fleet(eng).Shun(context.Background(), name, shun); err != nil {
-		return err
-	}
-	if shun {
-		fmt.Printf("%s is shunned: it will finish what it has and get nothing new\n", name)
-	} else {
-		fmt.Printf("%s is taking work again\n", name)
-	}
-	return nil
-}
-
-// forgesFromEnv reads the forges this process can talk to, and the secret
-// each signs its deliveries with.
-//
-//	STARCI_FORGEJO_URL          https://git.example.com
-//	STARCI_FORGEJO_TOKEN_FILE   file holding an access token for it
-//	STARCI_FORGEJO_SECRET_FILE  file holding its webhook secret (serve only)
-//	STARCI_GITHUB_TOKEN_FILE    file holding a GitHub token
-//	STARCI_GITHUB_API           the API's address, for GitHub Enterprise
-//	STARCI_GITHUB_SECRET_FILE   file holding its webhook secret (serve only)
-//
-// Secrets are named by file, not given by value, so that they are never in a
-// process listing or a compose file.
-func forgesFromEnv() (forges map[string]forge.Forge, secrets map[string][]byte, err error) {
-	forges, secrets = map[string]forge.Forge{}, map[string][]byte{}
-	read := func(variable string) (string, error) {
-		path := os.Getenv(variable)
-		if path == "" {
-			return "", nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return "", fmt.Errorf("%s: %w", variable, err)
-		}
-		return strings.TrimSpace(string(data)), nil
-	}
-	if base := os.Getenv("STARCI_FORGEJO_URL"); base != "" {
-		token, err := read("STARCI_FORGEJO_TOKEN_FILE")
-		if err != nil {
-			return nil, nil, err
-		}
-		forges["forgejo"] = forge.Forgejo{BaseURL: base, Token: token}
-		secret, err := read("STARCI_FORGEJO_SECRET_FILE")
-		if err != nil {
-			return nil, nil, err
-		}
-		secrets["forgejo"] = []byte(secret)
-	}
-	token, err := read("STARCI_GITHUB_TOKEN_FILE")
-	if err != nil {
-		return nil, nil, err
-	}
-	if token != "" {
-		// The API's address, for GitHub Enterprise; github.com when unset.
-		forges["github"] = forge.GitHub{Token: token, API: os.Getenv("STARCI_GITHUB_API")}
-		secret, err := read("STARCI_GITHUB_SECRET_FILE")
-		if err != nil {
-			return nil, nil, err
-		}
-		secrets["github"] = []byte(secret)
-	}
-	return forges, secrets, nil
-}
-
-// reporter posts outcomes through whichever of the forges a run names.
-func reporter(forges map[string]forge.Forge) onhatchet.Reporter {
-	if len(forges) == 0 {
-		return nil
-	}
-	return func(ctx context.Context, to trigger.Report, s forge.Status) error {
-		f, ok := forges[to.Forge]
-		if !ok {
-			return fmt.Errorf("this worker has no credentials for %s", to.Forge)
-		}
-		s.Context = to.Context
-		return f.SetStatus(ctx, to.Repo, to.SHA, s)
-	}
-}
-
-// serveCmd is a door: the address a forge delivers webhooks to. It passes
-// each delivery to Hatchet as an event and does nothing else. A worker acts
-// on it. So this holds no access to the forge and can start nothing itself,
-// and anything else that raises the same event can stand in for it; see
-// doors/.
-//
-//	STARCI_LISTEN  address to listen on (default :8080)
-//
-// plus the forges to accept deliveries for, from forgesFromEnv, and Hatchet's
-// HATCHET_CLIENT_* variables. A forge delivers to /hooks/forgejo or
-// /hooks/github. Given a forge's webhook secret, unsigned deliveries are
-// turned away here; without it they are passed on and turned away by the
-// worker.
-func serveCmd() error {
-	forges, secrets, err := forgesFromEnv()
-	if err != nil {
-		return err
-	}
-	if len(forges) == 0 {
-		return errors.New("no forge is configured; set STARCI_FORGEJO_URL or STARCI_GITHUB_TOKEN_FILE")
-	}
-	eng, err := onhatchet.New(onhatchet.Options{})
-	if err != nil {
-		return err
-	}
-
-	logf := func(format string, args ...any) {
-		fmt.Fprintf(os.Stderr, time.Now().UTC().Format(time.RFC3339)+" "+format+"\n", args...)
-	}
-	listen := os.Getenv("STARCI_LISTEN")
-	if listen == "" {
-		listen = ":8080"
-	}
-	mux := http.NewServeMux()
-	mux.Handle("/hooks/", &trigger.Door{Forges: forges, Secrets: secrets, Send: engine.Relay(eng).Relay, Log: logf})
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "ok") })
-
-	var names []string
-	for name := range forges {
-		names = append(names, "/hooks/"+name)
-	}
-	sort.Strings(names)
-	fmt.Fprintf(os.Stderr, "listening on %s for %s\n", listen, strings.Join(names, ", "))
-	server := &http.Server{Addr: listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	return server.ListenAndServe()
-}
-
-// hooksCmd makes Hatchet itself the door for a forge: it registers a webhook
-// with Hatchet, which then receives the forge's deliveries, checks their
-// signatures, and raises the event a worker acts on. Nothing of starci's is
-// in the path.
-//
-//	starci hooks add forgejo|github
-//
-// The forge's webhook secret is read as for a worker, from
-// STARCI_FORGEJO_SECRET_FILE or STARCI_GITHUB_SECRET_FILE.
-func hooksCmd(args []string) error {
-	if len(args) != 2 || args[0] != "add" {
-		return errors.New("usage: starci hooks add forgejo|github")
-	}
-	name := args[1]
-	_, secrets, err := forgesFromEnv()
-	if err != nil {
-		return err
-	}
-	if len(secrets[name]) == 0 {
-		return fmt.Errorf("no webhook secret is configured for %s; the engine needs it to check deliveries", name)
-	}
-	eng, err := onhatchet.New(onhatchet.Options{})
-	if err != nil {
-		return err
-	}
-	path, err := engine.Relay(eng).AcceptWebhooks(context.Background(), name, secrets[name])
-	if err != nil {
-		return err
-	}
-	fmt.Printf("%s now accepts %s deliveries. Point the forge's webhook at:\n\n  <%s address>%s\n\nwith content type application/json and the same secret.\n", eng.Name(), name, eng.Name(), path)
-	return nil
 }
 
 // compileCmd writes a basic script out as another CI system's configuration,
@@ -815,7 +553,7 @@ func compileCmd(args []string) error {
 //	starci compile --target binary -o ci && ./ci [checkout]
 //
 // By default the script travels and is evaluated when the executable runs, so
-// advanced scripts and scripts that read ctx behave as under `run --local`.
+// advanced scripts and scripts that read ctx behave as under `starci run`.
 // With --freeze the plan travels instead, as the other targets' files do.
 func compileBinary(file, output, base string, freeze, offline bool, arch, check string) error {
 	if check != "" {
@@ -964,15 +702,17 @@ func firstDifference(have, want string) string {
 func validateCmd(args []string) error {
 	fs := flag.NewFlagSet("validate", flag.ExitOnError)
 	file := fs.String("file", ".ci.star", "CI script to validate")
-	only := fs.String("arch", "", "architectures to check, comma-separated (default: every one a tool lists)")
+	only := fs.String("arch", "", "platforms to check, comma-separated: amd64, arm64 (Linux), or os/arch such as darwin/arm64 (default: every one a tool lists)")
 	fs.Parse(args)
 
 	var archs []string
 	for _, a := range strings.Split(*only, ",") {
-		if a = strings.TrimSpace(a); a == "amd64" || a == "arm64" {
+		switch a = strings.TrimSpace(a); a {
+		case "":
+		case "amd64", "arm64", "linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64":
 			archs = append(archs, a)
-		} else if a != "" {
-			return fmt.Errorf("unknown architecture %q: amd64 or arm64", a)
+		default:
+			return fmt.Errorf("unknown platform %q: amd64, arm64, or one of linux/amd64, linux/arm64, darwin/amd64, darwin/arm64", a)
 		}
 	}
 	src, err := os.ReadFile(*file)

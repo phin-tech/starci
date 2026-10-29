@@ -47,7 +47,7 @@ func TestARunIsOneTrace(t *testing.T) {
 		{Name: "good", Image: "alpine:3", Run: "true", Inputs: []string{"."}},
 		{Name: "bad", Image: "alpine:3", Run: "exit 2", Inputs: []string{"."}},
 	}}
-	eng := &Engine{Config: step.Config{Worker: "test", StateDir: t.TempDir()}, Slots: 2}
+	eng := &Engine{Config: step.Config{Machine: "test", StateDir: t.TempDir()}, Slots: 2}
 	_, err := eng.Execute(context.Background(), engine.Run{Mode: plan.Basic, Plan: p, CloneURL: dir, Context: plan.Context{Repo: p.Repo, SHA: p.SHA}})
 	if err != nil {
 		t.Fatal(err)
@@ -99,8 +99,8 @@ func TestARunIsOneTrace(t *testing.T) {
 				t.Errorf("%q is not under the run", s.Name)
 			}
 		}
-		if s.Name == "step bad" && (attr(s, "starci.status") != "failed" || attr(s, "starci.worker") != "test") {
-			t.Errorf("the failed step's span says status %q on worker %q", attr(s, "starci.status"), attr(s, "starci.worker"))
+		if s.Name == "step bad" && (attr(s, "starci.status") != "failed" || attr(s, "starci.machine") != "test") {
+			t.Errorf("the failed step's span says status %q on machine %q", attr(s, "starci.status"), attr(s, "starci.machine"))
 		}
 	}
 }

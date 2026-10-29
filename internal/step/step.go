@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"go.opentelemetry.io/otel/trace"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,8 +40,8 @@ const (
 
 // Config is what Run needs to know about the machine it is on.
 type Config struct {
-	// Worker is recorded in results, so a reused pass says where it ran.
-	Worker string
+	// Machine is recorded in results, so a reused pass says where it ran.
+	Machine string
 	// StateDir holds what this machine keeps between steps: its own copy of
 	// passing results, and installed tools.
 	StateDir string
@@ -53,6 +54,14 @@ type Config struct {
 	// passed on any of them is not run again here. Without it, a machine
 	// knows only its own results.
 	Shared Store
+	// Bare lets this machine run bare steps: steps that name no image and
+	// run as its own processes, as its own user, with no container around
+	// them. A machine that has not said so refuses them.
+	Bare bool
+	// BareImage, if set, is an image bare steps run in instead: each in a
+	// container of its own, thrown away after, as if it had named the image.
+	// Bare need not be set for them then.
+	BareImage string
 }
 
 func (c Config) store() Store {
@@ -89,7 +98,19 @@ func phase(ctx context.Context, name string) (done func()) {
 func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log func(string)) plan.Result {
 	started := time.Now()
 	failed := func(format string, args ...any) plan.Result {
-		return plan.Result{Name: s.Name, Status: "failed", Worker: cfg.Worker, Detail: fmt.Sprintf(format, args...)}
+		return plan.Result{Name: s.Name, Status: "failed", Machine: cfg.Machine, Detail: fmt.Sprintf(format, args...)}
+	}
+
+	if s.Bare() && cfg.BareImage != "" {
+		s = inImage(s, cfg.BareImage)
+	}
+	// Said before anything is fetched: no amount of work here changes what
+	// this machine is.
+	if unmet := Unmet(s); unmet != "" {
+		return failed("this machine cannot take the step: %s", unmet)
+	}
+	if s.Bare() && !cfg.Bare {
+		return failed("this machine does not run bare steps here; run with --bare or STARCI_BARE=true to let it")
 	}
 
 	root, err := os.MkdirTemp("", "starci-")
@@ -97,9 +118,17 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 		return failed("%v", err)
 	}
 	defer os.RemoveAll(root)
+	// The commit is kept apart from the workspace, not beside it, so that a
+	// step with no container around it does not find every file one
+	// directory up.
+	gitRoot, err := os.MkdirTemp("", "starci-git-")
+	if err != nil {
+		return failed("%v", err)
+	}
+	defer os.RemoveAll(gitRoot)
 
 	done := phase(ctx, "fetch the commit")
-	co, err := fetch(cloneURL, sha, root, cfg.GitEnv)
+	co, err := fetch(cloneURL, sha, gitRoot, root, cfg.GitEnv)
 	done()
 	if err != nil {
 		return failed("fetch of %s failed: %v", sha, err)
@@ -109,6 +138,9 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	done()
 	if err != nil {
 		return failed("%v", err)
+	}
+	if s.Bare() {
+		return runBare(ctx, cfg, s, co, root, content, started, log)
 	}
 	done = phase(ctx, "find the image")
 	img, err := inspectImage(s.Image)
@@ -149,7 +181,7 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	var tools []installed
 	for _, t := range s.Tools {
 		done := phase(ctx, "install "+t.Name)
-		in, err := install(cfg.StateDir, t, img.arch)
+		in, err := install(cfg.StateDir, t, "linux/"+img.arch)
 		done()
 		if err != nil {
 			return failed("%v", err)
@@ -168,16 +200,8 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	// day, and a key made from it could never be shared or even looked up
 	// without building first.
 	resultKey := key(s, img, content, toolIDs, serviceIDs)
-	results := cfg.store()
-	if s.Cache {
-		done := phase(ctx, "look for an earlier pass")
-		earlier, ok := results.Get(ctx, resultKey)
-		done()
-		if ok {
-			log(fmt.Sprintf("same image, command and inputs as a passing run on %s; not run again", earlier.Worker))
-			earlier.Name, earlier.Cached, earlier.Seconds = s.Name, true, 0
-			return earlier
-		}
+	if earlier, ok := reuse(ctx, cfg, s, resultKey, log); ok {
+		return earlier
 	}
 
 	done = phase(ctx, "check out the inputs")
@@ -220,7 +244,7 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 				return failed("checkout of the files of service %q failed: %v", sv.Name, err)
 			}
 		}
-		up, stop, err := startServices(ctx, container, cfg.Worker, s, given)
+		up, stop, err := startServices(ctx, container, cfg.Machine, s, given)
 		done()
 		// Deferred before the error is looked at: some may have started.
 		defer stop()
@@ -234,7 +258,7 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 		// The network is internal when the step gave up the network, so it
 		// reaches its services and nothing else.
 		// Labelled like them, so that Sweep clears the network's last user too.
-		args = append(args, "--network", up.network, "--label", ownerLabel+"="+cfg.Worker)
+		args = append(args, "--network", up.network, "--label", ownerLabel+"="+cfg.Machine)
 	case s.Offline:
 		args = append(args, "--network", "none")
 	}
@@ -245,27 +269,109 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 		args = append(args, "-e", name+"="+s.Env[name])
 	}
 	args = append(args, toolMounts...)
-	args = append(args, runImage, "sh", "-c", s.Run)
+	args = append(args, runImage)
+	if len(s.Argv) > 0 {
+		args = append(args, s.Argv...)
+	} else {
+		args = append(args, "sh", "-c", s.Run)
+	}
 
 	done = phase(ctx, "run the command")
 	defer done()
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	out, err := cmd.StdoutPipe()
+	ran, err := stream(cmd, log)
 	if err != nil {
-		return failed("%v", err)
-	}
-	cmd.Stderr = cmd.Stdout
-	if err := cmd.Start(); err != nil {
 		return failed("cannot start docker: %v", err)
 	}
-	var tail []string
+	if ctx.Err() != nil {
+		_ = exec.Command("docker", "rm", "-f", container).Run()
+		return failed("cancelled")
+	}
+	if ran.err != nil {
+		// A step that fails against a service often fails because of it.
+		for _, name := range serviceNames(s) {
+			if said := services.tail(name); said != "" {
+				log("the last of what " + name + " said:\n" + said)
+			}
+		}
+	}
+	return finish(ctx, cfg, s, resultKey, started, ran, log)
+}
+
+// reuse returns an earlier pass of the step, if it may have one.
+func reuse(ctx context.Context, cfg Config, s plan.Step, resultKey string, log func(string)) (plan.Result, bool) {
+	if !s.Cache {
+		return plan.Result{}, false
+	}
+	done := phase(ctx, "look for an earlier pass")
+	earlier, ok := cfg.store().Get(ctx, resultKey)
+	done()
+	if !ok {
+		return plan.Result{}, false
+	}
+	log(fmt.Sprintf("same environment, command and inputs as a passing run on %s; not run again", earlier.Machine))
+	earlier.Name, earlier.Cached, earlier.Seconds = s.Name, true, 0
+	return earlier, true
+}
+
+// ran is what became of a command once it had started.
+type ran struct {
+	tail   []string
+	output string
+	// err is how it exited, nil for success.
+	err error
+}
+
+// stream starts cmd, passes each line it prints to log, and waits for it.
+// The error is for a command that could not be started at all.
+func stream(cmd *exec.Cmd, log func(string)) (ran, error) {
+	return streamUntil(cmd, log, nil)
+}
+
+// guard is what watches over a command beyond starting and waiting for it:
+// started is called as soon as it has started, and exited as soon as it has
+// exited, before its output is read to the end.
+type guard struct {
+	started func(log func(string))
+	exited  func()
+}
+
+// streamUntil is stream, with g watching over the command. Whatever the
+// command started that still holds the output open once it has exited is
+// what g.exited is for.
+func streamUntil(cmd *exec.Cmd, log func(string), g *guard) (ran, error) {
+	out, in, err := os.Pipe()
+	if err != nil {
+		return ran{}, err
+	}
+	defer out.Close()
+	cmd.Stdout, cmd.Stderr = in, in
+	err = cmd.Start()
+	// The command has its own copy; with this one closed, the output ends
+	// when the last of the command's processes lets go of it.
+	in.Close()
+	if err != nil {
+		return ran{}, err
+	}
+	if g != nil {
+		g.started(log)
+	}
+	exited := make(chan error, 1)
+	go func() {
+		err := cmd.Wait()
+		if g != nil {
+			g.exited()
+		}
+		exited <- err
+	}()
+	var r ran
 	var output strings.Builder
 	lines := bufio.NewScanner(out)
 	lines.Buffer(make([]byte, 64*1024), 1024*1024)
 	for lines.Scan() {
 		line := lines.Text()
-		if tail = append(tail, line); len(tail) > tailLines {
-			tail = tail[1:]
+		if r.tail = append(r.tail, line); len(r.tail) > tailLines {
+			r.tail = r.tail[1:]
 		}
 		if output.Len()+len(line) < outputLimit {
 			output.WriteString(line)
@@ -273,35 +379,33 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 		}
 		log(line)
 	}
-	runErr := cmd.Wait()
-	if ctx.Err() != nil {
-		_ = exec.Command("docker", "rm", "-f", container).Run()
-		return failed("cancelled")
-	}
+	// A line too long to scan ends the loop early; the rest is still read,
+	// so that the command is never left blocked writing to nobody.
+	_, _ = io.Copy(io.Discard, out)
+	r.err = <-exited
+	r.output = output.String()
+	return r, nil
+}
 
+// finish turns how a command ran into the step's result, and remembers a
+// pass.
+func finish(ctx context.Context, cfg Config, s plan.Step, resultKey string, started time.Time, r ran, log func(string)) plan.Result {
 	seconds := float64(time.Since(started).Round(100*time.Millisecond)) / float64(time.Second)
-	if runErr != nil {
+	if r.err != nil {
 		code := -1
 		var exit *exec.ExitError
-		if errors.As(runErr, &exit) {
+		if errors.As(r.err, &exit) {
 			code = exit.ExitCode()
 		}
-		// A step that fails against a service often fails because of it.
-		for _, name := range serviceNames(s) {
-			if said := services.tail(name); said != "" {
-				log("the last of what " + name + " said:\n" + said)
-			}
-		}
-		r := failed("exit code %d after %.1fs\n%s", code, seconds, strings.Join(tail, "\n"))
-		r.Seconds, r.Output = seconds, output.String()
-		return r
+		return plan.Result{Name: s.Name, Status: "failed", Machine: cfg.Machine, Seconds: seconds, Output: r.output,
+			Detail: fmt.Sprintf("exit code %d after %.1fs\n%s", code, seconds, strings.Join(r.tail, "\n"))}
 	}
 
-	result := plan.Result{Name: s.Name, Status: "passed", Seconds: seconds, Worker: cfg.Worker, Output: output.String()}
+	result := plan.Result{Name: s.Name, Status: "passed", Seconds: seconds, Machine: cfg.Machine, Output: r.output}
 	if s.Cache {
 		// Only passes are remembered. A failure is always worth running again.
 		// Not being able to remember one is worth saying, but the step passed.
-		if err := results.Put(ctx, resultKey, result); err != nil {
+		if err := cfg.store().Put(ctx, resultKey, result); err != nil {
 			log("warning: this result could not be stored, so the step will run again next time: " + err.Error())
 		}
 	}
@@ -319,8 +423,8 @@ type checkout struct {
 	env       []string
 }
 
-func fetch(cloneURL, sha, root string, env []string) (*checkout, error) {
-	co := &checkout{gitDir: filepath.Join(root, "git"), workspace: filepath.Join(root, "workspace"), env: env}
+func fetch(cloneURL, sha, gitRoot, root string, env []string) (*checkout, error) {
+	co := &checkout{gitDir: filepath.Join(gitRoot, "git"), workspace: filepath.Join(root, "workspace"), env: env}
 	if err := os.Mkdir(co.workspace, 0o755); err != nil {
 		return nil, err
 	}
@@ -405,11 +509,11 @@ func (co *checkout) contentID(inputs []string) (string, error) {
 
 // MissingInputs returns those of a step's inputs that select none of the
 // files git tracks in the repository dir is in, asked with the pathspecs a
-// worker uses. A worker refuses such a step, but only once it has been given
+// machine uses. A machine refuses such a step, but only once it has been given
 // it; this is the same question, asked of a checkout before anything runs.
 //
 // It is the tracked files that are asked about, not the directory's contents:
-// a file that was never added is not in the commit a worker builds.
+// a file that was never added is not in the commit a machine builds.
 func MissingInputs(dir string, inputs []string) ([]string, error) {
 	var missing []string
 	for _, in := range inputs {
@@ -454,6 +558,11 @@ func key(s plan.Step, img image, content string, tools [][]string, services [][]
 	// built for several architectures, the id can be the same on all of them,
 	// and a pass on arm64 says nothing about amd64.
 	parts := []any{keyVersion, img.id, img.arch, s.Run, env, content, tools, s.Packages}
+	// A command given as a list is only said when there is one, so that
+	// every other step keeps its key.
+	if len(s.Argv) > 0 {
+		parts = append(parts, "argv", s.Argv)
+	}
 	// A pass with the network says nothing about the same step without it.
 	// Only said when it is off, so that every other step keeps its key.
 	if s.Offline {

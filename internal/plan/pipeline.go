@@ -41,9 +41,10 @@ type Result struct {
 	Status  string  `json:"status"` // passed, failed or skipped
 	Output  string  `json:"output"`
 	Seconds float64 `json:"seconds"`
-	Worker  string  `json:"worker"`
-	Cached  bool    `json:"cached"`
-	Detail  string  `json:"detail"`
+	// Machine is where the step ran.
+	Machine string `json:"machine"`
+	Cached  bool   `json:"cached"`
+	Detail  string `json:"detail"`
 }
 
 func (r Result) ok() bool { return r.Status == "passed" }
@@ -317,7 +318,7 @@ func resultValue(r Result) starlark.Value {
 		"output":  starlark.String(r.Output),
 		"seconds": starlark.Float(r.Seconds),
 		"cached":  starlark.Bool(r.Cached),
-		"worker":  starlark.String(r.Worker),
+		"machine": starlark.String(r.Machine),
 		"detail":  starlark.String(r.Detail),
 	})
 }

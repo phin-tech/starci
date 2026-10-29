@@ -95,11 +95,16 @@ const (
 	OverlapAllow   = "allow"
 )
 
-// Step is one container to run.
+// Step is one command to run, in the environment it names.
 type Step struct {
-	Name  string            `json:"name"`
-	Image string            `json:"image"`
+	Name string `json:"name"`
+	// Image is what the step runs in. Empty makes it a bare step, which runs
+	// as the machine's own processes, in whatever the machine provides.
+	Image string `json:"image"`
+	// Run is a shell command. Argv is a program and its arguments, run
+	// without a shell. A step has one or the other.
 	Run   string            `json:"run"`
+	Argv  []string          `json:"argv,omitempty"`
 	Needs []string          `json:"needs"`
 	Env   map[string]string `json:"env"`
 	// Inputs are the repository paths the step is given, and the only ones it
@@ -107,20 +112,24 @@ type Step struct {
 	// command, env and input contents match an earlier passing run is not run
 	// again. Defaults to the whole repository.
 	Inputs []string `json:"inputs"`
-	// Caches are directories kept between runs on a worker (package manager
-	// caches and the like), as name -> path in the container. They speed a
-	// step up; they are not part of what its result is keyed on.
+	// Caches are directories kept between runs on a machine (package manager
+	// caches and the like), as name -> path in the container. A bare step
+	// has no container to put them in, so for one it is name -> the
+	// environment variable that is set to the directory. They speed a step
+	// up; they are not part of what its result is keyed on.
 	Caches map[string]string `json:"caches"`
 	// Cache is false for a step that must run every time, because it depends
 	// on something outside its inputs (the network, the date).
 	Cache bool `json:"cache"`
-	// Worker restricts the step to workers carrying these labels, for steps
-	// that need particular hardware. Empty means any worker.
-	Worker map[string]string `json:"worker"`
+	// On restricts the step to machines with these properties, for steps
+	// that need particular hardware. A script says it with `on`. The
+	// well-known keys (os, arch) mean the same to every engine; any other is
+	// a label one engine understands. Empty means any machine.
+	On map[string]string `json:"on"`
 	// Prefer names labels the step would like but can do without: a matching
-	// worker is chosen when one is free, any other when not.
+	// machine is chosen when one is free, any other when not.
 	Prefer map[string]string `json:"prefer"`
-	// Avoid keeps the step off workers carrying these labels, for work that
+	// Avoid keeps the step off machines carrying these labels, for work that
 	// must not run in a particular place.
 	Avoid map[string]string `json:"avoid"`
 	// Tools are put on the step's PATH, ahead of what the image has.
@@ -180,25 +189,109 @@ func (s Service) FilePaths() []string {
 // Tool is a program a step wants on its PATH without it being in the image:
 // an archive (or a single binary) to download, pinned by checksum.
 //
-// The checksum is the tool's identity. It is what a worker's copy is stored
+// The checksum is the tool's identity. It is what a machine's copy is stored
 // under and what a step's result is keyed on, so two tools with the same
 // name and different contents are different tools, and "the latest version"
 // cannot be expressed.
 type Tool struct {
 	Name string `json:"name"`
 	// URL is where to download it. "{arch}" is replaced with the name of the
-	// architecture the step's image runs on.
+	// architecture the step runs on, and "{os}" with linux or darwin.
 	URL string `json:"url"`
-	// SHA256 is the checksum of the download for each architecture, keyed by
-	// amd64 or arm64. An architecture not listed is not supported.
+	// SHA256 is the checksum of the download for each platform, keyed by
+	// amd64 or arm64 for Linux, or by os/arch (darwin/arm64) for any. A
+	// platform not listed is not supported.
 	SHA256 map[string]string `json:"sha256"`
 	// ArchNames is how this tool's publisher spells an architecture, where it
 	// differs: {"amd64": "x64", "arm64": "aarch64"}.
 	ArchNames map[string]string `json:"arch_names"`
 	// Bin lists the directories inside the archive to put on PATH, "{arch}"
-	// replaced as in URL. The default is the archive's top level.
+	// and "{os}" replaced as in URL. The default is the archive's top level.
 	Bin []string `json:"bin"`
 }
+
+// Sum is the checksum of a tool's build for a platform, os/arch. A Linux
+// build may be keyed by its architecture alone.
+func (t Tool) Sum(platform string) (string, bool) {
+	if sum, ok := t.SHA256[platform]; ok {
+		return sum, true
+	}
+	if arch, ok := strings.CutPrefix(platform, "linux/"); ok {
+		sum, ok := t.SHA256[arch]
+		return sum, ok
+	}
+	return "", false
+}
+
+// The well-known placement keys. Every engine understands them, and a
+// machine can tell whether it meets them by looking at itself. Any other key
+// is a label that only some engines understand.
+const (
+	// PlaceOS is the machine's operating system, as Go spells it: linux,
+	// darwin. For a step in an image it is still the machine's, not the
+	// image's.
+	PlaceOS = "os"
+	// PlaceArch is the machine's architecture: amd64, arm64.
+	PlaceArch = "arch"
+)
+
+// Bare reports whether a step names no image, and so runs as the machine's
+// own processes.
+func (s Step) Bare() bool { return s.Image == "" }
+
+// Command is the step's command as shell, for places that can only start
+// one through a shell.
+func (s Step) Command() string {
+	if len(s.Argv) == 0 {
+		return s.Run
+	}
+	quoted := make([]string, len(s.Argv))
+	for i, a := range s.Argv {
+		quoted[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
+	}
+	return strings.Join(quoted, " ")
+}
+
+// checkEnvironment holds a step to what its environment allows. Eval and
+// Validate both ask it, so a plan from anywhere meets the same rules.
+func (s Step) checkEnvironment() error {
+	if (s.Run == "") == (len(s.Argv) == 0) {
+		return fmt.Errorf("step %q: run must not be empty, and is either a command or a list of a program and its arguments", s.Name)
+	}
+	for _, a := range s.Argv {
+		if a == "" {
+			return fmt.Errorf("step %q: run must not hold an empty argument", s.Name)
+		}
+	}
+	if !s.Bare() {
+		if strings.ContainsAny(s.Image, " \t\n") {
+			return fmt.Errorf("step %q: image must name an image, got %q", s.Name, s.Image)
+		}
+		for name, dir := range s.Caches {
+			if !path.IsAbs(dir) {
+				return fmt.Errorf("step %q: cache %q needs an absolute path in the container, got %q", s.Name, name, dir)
+			}
+		}
+		return nil
+	}
+	// Without an image there is nothing to install packages into or a
+	// network of its own to put services on, and caches are given in the
+	// environment, there being no container to mount them in.
+	if len(s.Packages) > 0 {
+		return fmt.Errorf("step %q: packages need an image to be installed into; a bare step has none", s.Name)
+	}
+	if len(s.Services) > 0 {
+		return fmt.Errorf("step %q: services need an image; a bare step cannot have them yet", s.Name)
+	}
+	for name, v := range s.Caches {
+		if !envName.MatchString(v) {
+			return fmt.Errorf("step %q: a bare step's cache %q names the environment variable to set to it, got %q", s.Name, name, v)
+		}
+	}
+	return nil
+}
+
+var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // Plan is the evaluated script: steps in the order the script returned them.
 type Plan struct {
@@ -212,8 +305,11 @@ type Plan struct {
 // plans; this is for a plan that arrived as JSON from somewhere else.
 func (p *Plan) Validate() error {
 	for _, s := range p.Steps {
-		if s.Name == "" || s.Image == "" || s.Run == "" {
-			return fmt.Errorf("step %q: name, image and run must not be empty", s.Name)
+		if s.Name == "" {
+			return fmt.Errorf("step %q: name must not be empty", s.Name)
+		}
+		if err := s.checkEnvironment(); err != nil {
+			return err
 		}
 		if len(s.Inputs) == 0 {
 			return fmt.Errorf("step %q: inputs must not be empty", s.Name)
@@ -223,9 +319,9 @@ func (p *Plan) Validate() error {
 				return fmt.Errorf("step %q: input %q must be a path inside the repository", s.Name, in)
 			}
 		}
-		for name, dir := range s.Caches {
-			if !cacheName.MatchString(name) || !path.IsAbs(dir) {
-				return fmt.Errorf("step %q: cache %q -> %q is not a valid name and absolute path", s.Name, name, dir)
+		for name := range s.Caches {
+			if !cacheName.MatchString(name) {
+				return fmt.Errorf("step %q: cache name %q may only use letters, digits, '-' and '_'", s.Name, name)
 			}
 		}
 		for _, t := range s.Tools {
@@ -438,26 +534,53 @@ func (s *stepValue) Truth() starlark.Bool  { return starlark.True }
 func (s *stepValue) Hash() (uint32, error) { return starlark.String(s.Name).Hash() }
 
 func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var name, image, run string
+	var name, image string
+	var run starlark.Value
 	var needs, inputs, tools, packages, services *starlark.List
-	var env, caches, worker, prefer, avoid *starlark.Dict
-	cache, network := true, true
+	var env, caches, on, prefer, avoid *starlark.Dict
+	var cacheArg starlark.Value
+	network := true
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
-		"name", &name, "image", &image, "run", &run, "needs?", &needs, "env?", &env,
-		"inputs?", &inputs, "caches?", &caches, "cache?", &cache,
-		"worker?", &worker, "prefer?", &prefer, "avoid?", &avoid, "tools?", &tools,
+		"name", &name, "run", &run, "image?", &image, "needs?", &needs, "env?", &env,
+		"inputs?", &inputs, "caches?", &caches, "cache?", &cacheArg,
+		"on?", &on, "prefer?", &prefer, "avoid?", &avoid, "tools?", &tools,
 		"packages?", &packages, "network?", &network, "services?", &services); err != nil {
 		return nil, err
 	}
-	if name == "" || image == "" || run == "" {
-		return nil, fmt.Errorf("step: name, image and run must not be empty")
+	if name == "" {
+		return nil, fmt.Errorf("step: name must not be empty")
+	}
+
+	// A bare step ran against whatever the machine had, which starci cannot
+	// know, so a pass of it is not reused unless the script says so.
+	cache := image != ""
+	if cacheArg != nil {
+		b, ok := cacheArg.(starlark.Bool)
+		if !ok {
+			return nil, fmt.Errorf("step %q: cache must be True or False, got %s", name, cacheArg.Type())
+		}
+		cache = bool(b)
 	}
 
 	s := Step{
-		Name: name, Image: image, Run: run, Cache: cache, Offline: !network,
+		Name: name, Image: image, Cache: cache, Offline: !network,
 		Needs: []string{}, Env: map[string]string{}, Inputs: []string{"."}, Caches: map[string]string{},
-		Worker: map[string]string{}, Prefer: map[string]string{}, Avoid: map[string]string{},
+		On: map[string]string{}, Prefer: map[string]string{}, Avoid: map[string]string{},
 		Tools: []Tool{}, Packages: []string{},
+	}
+	switch r := run.(type) {
+	case starlark.String:
+		s.Run = string(r)
+	case *starlark.List:
+		for i := 0; i < r.Len(); i++ {
+			v, ok := r.Index(i).(starlark.String)
+			if !ok {
+				return nil, fmt.Errorf("step %q: run as a list holds a program and its arguments, as strings; got %s", name, r.Index(i).Type())
+			}
+			s.Argv = append(s.Argv, string(v))
+		}
+	default:
+		return nil, fmt.Errorf("step %q: run is a command, or a list of a program and its arguments; got %s", name, run.Type())
 	}
 	if packages != nil {
 		seen := map[string]bool{}
@@ -502,14 +625,15 @@ func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 			s.Services = append(s.Services, sv.Service)
 		}
 	}
-	// A label can be constrained one way per step: Hatchet takes a single
-	// rule per label, and "require gpu, avoid gpu" has no meaning anyway.
+	// A label can be constrained one way per step: "require gpu, avoid gpu"
+	// has no meaning, and an engine that places by label may take a single
+	// rule per label.
 	constrained := map[string]string{}
 	for _, c := range []struct {
 		arg  string
 		from *starlark.Dict
 		into map[string]string
-	}{{"worker", worker, s.Worker}, {"prefer", prefer, s.Prefer}, {"avoid", avoid, s.Avoid}} {
+	}{{"on", on, s.On}, {"prefer", prefer, s.Prefer}, {"avoid", avoid, s.Avoid}} {
 		if c.from == nil {
 			continue
 		}
@@ -543,9 +667,6 @@ func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 			if !cacheName.MatchString(string(k)) {
 				return nil, fmt.Errorf("step %q: cache name %q may only use letters, digits, '-' and '_'", name, string(k))
 			}
-			if !path.IsAbs(string(v)) {
-				return nil, fmt.Errorf("step %q: cache %q needs an absolute path in the container, got %q", name, string(k), string(v))
-			}
 			s.Caches[string(k)] = string(v)
 		}
 	}
@@ -570,6 +691,9 @@ func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 			}
 			s.Env[string(k)] = string(v)
 		}
+	}
+	if err := s.checkEnvironment(); err != nil {
+		return nil, err
 	}
 	return &stepValue{s}, nil
 }
@@ -676,6 +800,7 @@ var (
 	packageName = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]*(:[a-z0-9]+)?(=[A-Za-z0-9.+:~-]+)?$`)
 	sha256Hex   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	archs       = map[string]bool{"amd64": true, "arm64": true}
+	platforms   = map[string]bool{"linux/amd64": true, "linux/arm64": true, "darwin/amd64": true, "darwin/arm64": true}
 )
 
 func toolBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -777,8 +902,8 @@ func (t Tool) validate() error {
 		return fmt.Errorf("tool %q: sha256 must give a checksum for at least one of amd64, arm64", t.Name)
 	}
 	for arch, sum := range t.SHA256 {
-		if !archs[arch] {
-			return fmt.Errorf("tool %q: sha256 is keyed by amd64 or arm64, not %q", t.Name, arch)
+		if !archs[arch] && !platforms[arch] {
+			return fmt.Errorf("tool %q: sha256 is keyed by amd64 or arm64 (for Linux), or by an os/arch such as darwin/arm64; not %q", t.Name, arch)
 		}
 		if !sha256Hex.MatchString(sum) {
 			return fmt.Errorf("tool %q: the %s checksum must be 64 lowercase hex digits", t.Name, arch)

@@ -19,31 +19,25 @@ There are thirty-seven worked examples in [`examples/`](examples/README.md): twe
 
 ## Status
 
-Experimental. Runs execute on this machine or against a throwaway Hatchet;
-nothing is deployed and nothing triggers a run automatically.
+Experimental. Runs execute on the machine `starci run` is on: a laptop, or a
+job in another CI tool, which then does the triggering and the reporting.
 
 - [x] **Planner** — evaluate `.ci.star` into a plan.
-- [x] **Executor** — run a plan's steps as Hatchet tasks, in dependency order,
-      each in a container that sees only the step's inputs.
+- [x] **Executor** — run a plan's steps in dependency order, each in a
+      container that sees only the step's inputs, or [bare](bare.md) on the
+      machine.
 - [x] **Skipping** — reuse an earlier pass when a step's image, command and
       input contents are unchanged.
-- [x] **Trigger and report** — start a run from a push webhook (Forgejo or
-      GitHub) and post the result as a commit status. Tested against stand-in
-      forges; not yet against a real one.
-- [ ] **Deploy** — workers on real machines, with their own Hatchet tenant.
 - [x] **Advanced mode** — a script that runs steps itself, sees their
       results, and branches or loops on them.
+- [x] **Compiling** — write a basic script out as a GitHub Actions or
+      CircleCI workflow, or as an executable that runs it.
 
 Everything is one binary:
 
 | | |
 |---|---|
 | `starci plan` | Evaluate a basic script and print the plan as JSON. Runs nothing. |
-| `starci run --local` | Execute a commit on this machine, with nothing but Docker. |
-| `starci run` | Execute a commit on Hatchet's workers. |
-| `starci worker` | Execute steps on this machine, for Hatchet. |
-| `starci serve` | Be the address a forge delivers webhooks to, relaying them to Hatchet. |
-| `starci hooks add` | Have Hatchet itself be that address. |
-| `starci compile` | Write a basic script out for GitHub Actions or CircleCI. |
+| `starci run` | Execute a commit on this machine, with Docker for steps in an image. |
+| `starci compile` | Write a basic script out for GitHub Actions or CircleCI, or as an executable. |
 | `starci validate` | Check that a script's inputs select files and that the tools it pins download as pinned. Runs nothing. |
-| `starci workers`, `shun`, `unshun` | See the workers, and take one out of rotation. |

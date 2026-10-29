@@ -52,12 +52,11 @@ nav:
   - Home: index.md
   - Using starci:
       - Getting started: getting-started.md
-      - Running on every push: running.md
       - Compiling to a workflow: compiling.md
-      - Workers: workers.md
   - Writing a script:
       - What a script can do: scripts.md
       - Tools and packages: tools.md
+      - Steps without an image: bare.md
       - Inputs, networks and services: inputs.md
       - Examples:
           - examples/README.md
@@ -103,3 +102,5 @@ nav:
   - Internals:
       - How it fits together: architecture.md
       - Development: development.md
+      - Decisions:
+          - starci names no tool: adr/0001-starci-names-no-tool.md

@@ -8,5 +8,5 @@ import (
 )
 
 func TestEngine(t *testing.T) {
-	enginetest.Run(t, &Engine{Config: step.Config{Worker: "test", StateDir: t.TempDir()}, Slots: 4})
+	enginetest.Run(t, &Engine{Config: step.Config{Machine: "test", StateDir: t.TempDir(), Bare: true}, Slots: 4})
 }

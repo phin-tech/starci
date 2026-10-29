@@ -5,9 +5,9 @@
 # already passed with the same inputs.
 #
 # What does not carry over:
-#  - `worker`, `prefer` and `avoid` have no equivalent here and are dropped
-#    (test, benchmark, migrate staging): CircleCI chooses machines by resource
-#    class, not by label. Every job uses medium.
+#  - `on`, `prefer` and `avoid` have no equivalent here and are dropped (test,
+#    benchmark, migrate staging): CircleCI chooses machines by resource class,
+#    not by label. Every job uses medium.
 #  - Passes are remembered in this project's CircleCI cache, which expires.
 #    starci's own store does not.
 

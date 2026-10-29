@@ -6,7 +6,7 @@
 #
 # What does not carry over:
 #  - `prefer` and `avoid` have no equivalent here and are dropped
-#    (integration). `worker` becomes runner labels.
+#    (integration). `on` becomes runner labels.
 #  - Passes are remembered in this repository's Actions cache, which GitHub
 #    scopes by branch and evicts when old. starci's own store has neither
 #    limit.

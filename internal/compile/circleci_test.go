@@ -53,7 +53,7 @@ func TestCircleCIStartsASealedStepWithoutTheNetwork(t *testing.T) {
 func TestCircleCIKeysAPassOnTheExactInputs(t *testing.T) {
 	out := compileCircle(t, script, Options{})
 	wants(t, out,
-		// The files are asked of git with the pathspecs a worker uses...
+		// The files are asked of git with the pathspecs a machine uses...
 		"git ls-files -s -- ':(top,glob)app/**/*.py' ':(top,literal)pyproject.toml' > /tmp/starci-inputs",
 		"git ls-files -s -- ':(top,literal)app' ':(top,literal)tests' > /tmp/starci-inputs",
 		// ...and their listing is what the record of a pass is keyed on.
@@ -90,12 +90,12 @@ func TestCircleCISaysWhatItDrops(t *testing.T) {
 def ci(ctx):
     if ctx.changed_files:
         return []
-    return [step("gpu", image = "alpine:3", run = "true", worker = {"gpu": "true"})]
+    return [step("gpu", image = "alpine:3", run = "true", on = {"gpu": "true"})]
 `, Options{})
 	wants(t, out,
 		"The script reads ctx.changed_files, so its plan depends on the commit.",
 		// The note is wrapped into the header, so only a stretch of it is looked for.
-		"`worker`, `prefer` and `avoid` have no equivalent here",
+		"`on`, `prefer` and `avoid` have no equivalent here",
 		"(gpu)",
 		"    resource_class: medium\n",
 	)

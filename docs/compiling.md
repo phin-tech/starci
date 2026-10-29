@@ -8,11 +8,12 @@ starci compile > .github/workflows/ci.yml
 starci compile --target circleci > .circleci/config.yml
 ```
 
-Each step becomes a job that does what a worker does: checks out only the
+Each step becomes a job that does what a machine does: checks out only the
 step's inputs, downloads its tools and checks their checksums, builds an image
-with its packages, and runs its command in that container. A job that has
+with its packages, and runs its command in that container, or on the runner
+itself for a [bare step](bare.md). A job that has
 already passed with the same inputs skips the work, using the Actions cache as
-the record. `needs` and `worker` carry over, as job dependencies and runner
+the record. `needs` and `on` carry over, as job dependencies and runner
 labels, and so does `network = False`.
 
 A workflow file has to say in advance what happens for every event, so for
@@ -54,13 +55,13 @@ workflow says which apply:
 - A step that is a different command for different events cannot be one job;
   compiling says so and asks for two names.
 - The CircleCI output does not do this yet: it is the plan for a push.
-- `prefer` and `avoid` are dropped. For CircleCI so is `worker`: it chooses
+- `prefer` and `avoid` are dropped. For CircleCI so is `on`: it chooses
   machines by resource class, not by label.
-- A step's services are started by the job itself, the way a worker starts
+- A step's services are started by the job itself, the way a machine starts
   them, and stopped at its end. They are not the CI tool's own `services:`,
   which could not be reached by name from the step's container. A pass is
   keyed on a service's image by name: a tag that moves does not run the job
-  again, as it would on a worker.
+  again, as it would on a machine.
 - Advanced scripts cannot be compiled to a workflow at all, or frozen into an executable: their steps are only known as
   they run.
 
@@ -68,7 +69,7 @@ Every script in `examples/basic` is compiled both ways under
 `examples/basic/compiled`.
 
 The CircleCI output keys a pass on the exact list of files the inputs select,
-asked of git the way a worker asks, where the GitHub output has to make do
+asked of git the way a machine asks, where the GitHub output has to make do
 with globs. It uses the machine executor, since each job starts the step's
 container itself.
 
@@ -84,29 +85,56 @@ starci compile --target binary -o ci
 ```
 
 writes a copy of starci with the script appended, which does what
-`starci run --local` does and nothing else. Anything after the checkout is a
-`run` flag (`-v`, `--event`, `--sha`, `--slots`).
+`starci run` does and nothing else. Anything after the checkout is a `run`
+flag (`-v`, `--event`, `--sha`, `--slots`, `--bare`, `--bare-image`).
 
 By default the script travels and is evaluated when the executable runs, so
 advanced scripts and scripts that read `ctx` work as they do under
-`run --local`. With `--freeze` the plan is evaluated now and travels instead:
+`starci run`. With `--freeze` the plan is evaluated now and travels instead:
 no script is evaluated at run time, advanced scripts are refused, and anything
 decided by `ctx` is fixed at what a push about which nothing is known gives,
 as in the CircleCI output.
 
 What is inside is starci and the script. Tools are still downloaded on first
 use, by checksum, images are pulled by Docker, and the repository is the
-checkout it is run in, so it needs Docker and nothing else. `--base` names the
+checkout it is run in, so it needs Docker and nothing else, and not even Docker
+if every step is [bare](bare.md). `--base` names the
 starci executable to copy, which is how to build for another OS or
 architecture. On macOS the appended copy no longer passes `codesign -v`, though
 it runs; a file that was downloaded may need its quarantine flag cleared.
 
 ## Or run starci inside the CI tool
 
-The other way is a workflow whose one job calls `starci run --local`. The CI
+The other way is a workflow whose one job calls `starci run`. The CI
 tool is then only the trigger. starci reads why the run started from the
 tool's own environment (GitHub, Forgejo and Gitea Actions, and CircleCI are
 recognised) and the script is told exactly what it would be told had starci
 received the event: the tag, the pull request and whether it is from a fork,
 the schedule that fired, the files a push changed. Nothing is approximated,
 and advanced scripts work.
+
+The job runs every step on the runner: steps in an image with the runner's
+Docker, [bare steps](bare.md) on the runner itself. A bare step from a fork's
+pull request runs only where starci can tell the runner is thrown away after
+the job, which on GitHub is a GitHub-hosted runner (`RUNNER_ENVIRONMENT`), and
+`--bare` (or `STARCI_BARE`) overrides that either way. `--bare-image` runs
+bare steps in a container instead, on a runner that is kept or for a fork.
+
+How starci gets onto the runner is up to the workflow: a release download
+pinned by checksum, `go install`, or an executable written by
+`--target binary`. So is keeping passes between runs. A runner starts empty,
+so without one of these every step runs every time:
+
+- keep `STARCI_STATE` between jobs with the CI tool's cache, for example on
+  GitHub:
+
+  ```yaml
+  - uses: actions/cache@v4
+    with:
+      path: ~/.cache/starci
+      key: starci-${{ github.run_id }}
+      restore-keys: starci-
+  ```
+
+- or set `STARCI_STORE` to a bucket, which every machine and every CI tool can
+  share (see [Inputs](inputs.md#sharing-results-between-machines)).

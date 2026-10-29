@@ -20,9 +20,9 @@ def pipeline(ctx):
     if ctx.ref != "main":
         return
 
-    run(sh("deploy", "./scripts/deploy.sh " + ctx.sha, worker = {"site": "office"}))
+    run(sh("deploy", "./scripts/deploy.sh " + ctx.sha, on = {"site": "office"}))
 
     smoke = run(sh("smoke test", "./scripts/smoke.sh"), allow_failure = True)
     if not smoke.ok:
-        run(sh("roll back", "./scripts/rollback.sh", worker = {"site": "office"}))
+        run(sh("roll back", "./scripts/rollback.sh", on = {"site": "office"}))
         fail("deployed " + ctx.sha[:8] + " but the smoke test failed; rolled back")

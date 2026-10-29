@@ -21,21 +21,21 @@ const (
 	// How much of a service's output is shown when it is to blame.
 	serviceTail = "20"
 	// ownerLabel is put on everything made for a step with services, naming
-	// the worker that made it, so that what a worker left behind when it was
+	// the machine that made it, so that what a machine left behind when it was
 	// killed can be found. See Sweep.
-	ownerLabel = "starci.worker"
+	ownerLabel = "starci.machine"
 )
 
-// Sweep removes what an earlier life of this worker left running: a worker
+// Sweep removes what an earlier life of this machine left running: a machine
 // that is killed partway through a step cannot stop that step's services, and
 // unlike the step's own container they never end by themselves. Each also
 // holds a network, of which a machine has only a few dozen to give.
 //
-// It is for a worker to call as it starts, before it takes any work, and only
-// where the name is this worker's alone: it cannot tell a dead worker's
+// It is for a machine to call as it starts, before it takes any work, and only
+// where the name is this machine's alone: it cannot tell a dead machine's
 // services from those of a live one with the same name.
-func Sweep(worker string) {
-	owned := "label=" + ownerLabel + "=" + worker
+func Sweep(machine string) {
+	owned := "label=" + ownerLabel + "=" + machine
 	if out, err := exec.Command("docker", "ps", "-aq", "--filter", owned).Output(); err == nil {
 		for _, id := range strings.Fields(string(out)) {
 			_ = exec.Command("docker", "rm", "-f", "-v", id).Run()
@@ -65,7 +65,7 @@ type sidecars struct {
 //
 // files says where on this machine each service's files have been checked
 // out, by service name.
-func startServices(ctx context.Context, base, worker string, s plan.Step, files map[string]string) (up sidecars, stop func(), err error) {
+func startServices(ctx context.Context, base, machine string, s plan.Step, files map[string]string) (up sidecars, stop func(), err error) {
 	up = sidecars{network: base, containers: map[string]string{}}
 	stop = func() {
 		// Not tied to ctx: a cancelled run is exactly when this has to work.
@@ -75,7 +75,7 @@ func startServices(ctx context.Context, base, worker string, s plan.Step, files 
 		_ = exec.Command("docker", "network", "rm", up.network).Run()
 	}
 
-	owner := ownerLabel + "=" + worker
+	owner := ownerLabel + "=" + machine
 	create := []string{"network", "create", "--label", owner}
 	if s.Offline {
 		// A step without the network still reaches its services, and they
