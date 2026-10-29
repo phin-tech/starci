@@ -9,6 +9,21 @@ The engine tests run against the local engine with everything else. An engine
 that needs a service to test against runs its tests when asked, with
 `STARCI_TEST_<NAME>=1`.
 
+The shared store's tests need an S3, and run when `STARCI_TEST_S3` names a
+bucket there; the bucket is made if it is missing. [Floci](https://floci.io), a
+local AWS emulator, is enough:
+
+```sh
+docker run -d --rm --name floci -p 4566:4566 floci/floci
+AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
+STARCI_TEST_S3='s3://starci-test/v1?endpoint=localhost:4566&insecure=1&region=us-east-1' \
+  go test ./internal/store/s3
+```
+
+They store and fetch results and blobs, and run steps on two machines that
+share nothing but the bucket: one keeps an artifact, the other is handed it,
+and a pass on one is reused on the other.
+
 ## This documentation
 
 The pages in `docs/` are built with [Zensical](https://zensical.org/), which
