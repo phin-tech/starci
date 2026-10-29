@@ -22,6 +22,7 @@ The three `pi-gamebook` ones run as they are against that repository.
 | [docs-only](basic/docs-only.ci.star) | Do nothing for a documentation commit. |
 | [events](basic/events.ci.star) | One script for pushes, tags, pull requests, a nightly schedule and manual runs. |
 | [branches](basic/branches.ci.star) | Publish from main only; `cache = False` for steps with effects. |
+| [build-once](basic/build-once.ci.star) | Build a binary once and hand it to the steps that use it. |
 | [matrix](basic/matrix.ci.star) | A matrix is a loop, with exclusions as an `if`. |
 | [monorepo](basic/monorepo.ci.star) | Test only the packages a commit touched. |
 | [polyglot](basic/polyglot.ci.star) | Per-language checks, chosen by which files changed. |
@@ -55,7 +56,9 @@ Gitea read too) and for CircleCI, to see what `starci compile` makes of it:
 its jobs carry conditions and the workflow's `on:` is worked out from the
 script. [services](basic/compiled/github/services.yml) shows a database
 started and stopped by the job itself. Each file's header says what did not
-carry over. Advanced scripts cannot be compiled, so there are none for them.
+carry over. Advanced scripts cannot be compiled, so there are none for them,
+and neither is [build-once](basic/build-once.ci.star) yet: compiling refuses
+a script that hands artifacts on.
 
 `basic/compile.sh` writes them all again; `basic/compile.sh --check` fails if
 any is not what its script compiles to now.
@@ -67,6 +70,7 @@ any is not what its script compiles to now.
 | [fanout](advanced/fanout.pipeline.star) | One step per test file, found by a step. |
 | [shards](advanced/shards.pipeline.star) | Count the tests, then choose how many shards to run. |
 | [affected](advanced/affected.pipeline.star) | Ask the build tool what a commit affects; test that. |
+| [build-once](advanced/build-once.pipeline.star) | Build once, ask the binary what it was built with, test that. |
 | [choose-by-step](advanced/choose-by-step.pipeline.star) | A step decides which heavy checks the commit needs. |
 | [first-failure](advanced/first-failure.pipeline.star) | Cheap checks first, expensive ones only if they pass. |
 | [retry-flaky](advanced/retry-flaky.pipeline.star) | Retry only what failed, and report what passed only on retry. |

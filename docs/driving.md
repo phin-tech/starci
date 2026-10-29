@@ -51,7 +51,10 @@ stdout, carrying the step's number; add it to the results.
 {"step": {"number": 2, "step": {...}}, "context": {...}, "clone_url": "...", "trace": {"traceparent": "..."}}
 ```
 
-`trace` is optional, and places the step's spans in a run's trace. It exits
+`trace` is optional, and places the step's spans in a run's trace. A step
+handed [artifacts](scripts.md#handing-files-on) fetches them from the store,
+so machines that run steps of one run need a shared one (`STARCI_STORE`)
+unless they share a state directory. It exits
 0 whenever it ran the step, passed or failed: a failure is a result. It fails
 only when it could not run the step at all. `--bare`, `--bare-image`,
 `STARCI_STATE` and `STARCI_STORE` mean what they mean to `starci run`.

@@ -58,19 +58,25 @@ an engine yet.
   it, firing schedules, a fleet of machines to list) adds a small optional
   interface for each, asked for with a type assertion, shaped by that engine
   and changed when a second one does not fit. No plugin system and no
-  registry: an engine is a Go package.
+  registry: an engine is a Go package, or something outside the repository
+  that drives `starci next` and `starci step` (`docs/driving.md`). starci
+  loads neither.
 - What a machine is belongs to the engine. One that keeps long-lived
   machines (Hatchet called them workers) keeps its word for them inside its
   package; scripts, results and the CLI say machine.
 
 ### Adding an engine
 
-1. Implement `engine.Engine` in `internal/engine/<name>`.
+1. Implement `engine.Engine` in `internal/engine/<name>`: `Execute` is a
+   loop that asks `Plan.Next` or `NextInPipeline` what is next, runs the
+   steps it is given (through `step.Run`, or `starci step` on another
+   machine), and asks again with their results. `internal/engine/local` is
+   the smallest such loop.
 2. Put it through the shared tests: `enginetest.Run(t, eng)`. They use real
    containers and cover plan order, skipping after a failure, input
    sandboxing, result reuse, steps without the network, services, bare steps,
-   advanced scripts, and whether the engine does what `Can()` claims. An
-   engine is not done until it passes all that apply.
+   artifacts, advanced scripts, and whether the engine does what `Can()`
+   claims. An engine is not done until it passes all that apply.
 3. If the engine needs a service to test against, gate its test behind an
    environment variable (`STARCI_TEST_<NAME>`), and say how to run it in
    `docs/development.md`.
@@ -151,6 +157,26 @@ bare steps for nothing; like services, there is no capability for them.
   `internal/compile`). A change to how a machine runs a bare step needs making
   there too.
 
+### Artifacts
+
+What a step keeps (`plan.Step.Keep`) and is handed (`plan.Step.Artifacts`)
+is stored and fetched by `step.Run`, through the machine's store, so an
+engine that runs steps through `internal/step` has artifacts for nothing,
+and like services there is no capability for them
+(`docs/adr/0002-a-store-of-pointers.md`).
+
+- Steps on different machines reach each other's artifacts only through a
+  shared store (`STARCI_STORE`). An engine whose machines share no state
+  directory needs one, and should refuse a run with artifacts without it.
+- Results and steps carry pointers, never the bytes, so what an engine
+  records stays small.
+- In a basic plan, `Next` puts the real pointer in place of an
+  `artifact(step, path)` placeholder before handing the step out. The step as
+  handed out is what ran, and what its result answers.
+- The compile targets refuse artifacts for now (`refusal` in
+  `internal/compile`); carrying them would mean uploading and fetching them
+  in the generated jobs, and keying a job on what an earlier one kept.
+
 ### Tracing
 
 A run's trace is starci's own (`internal/tracing`), so every engine has one.
@@ -166,6 +192,9 @@ A run's trace is starci's own (`internal/tracing`), so every engine has one.
   there and `tracing.End` records nothing.
 - Spans are exported by the standard `OTEL_EXPORTER_OTLP_*` variables. Do not
   add an engine-specific way to configure where traces go.
+- On the command line, `starci step` takes a step's `trace` (a `Carrier`)
+  with the step; `starci next` does not hand one out yet, and nothing ends
+  the run's trace for a run driven from outside.
 
 ### Candidates, and what is known about them
 
@@ -176,8 +205,8 @@ before relying on it.
 |---|---|---|
 | Lambda | A step is an invocation. | The step's image would be the function's image, or a bare step runs in a default one. Not durable on its own. Placement is architecture and memory; other labels are missing. |
 | DBOS | A library plus Postgres; no server. | Durable scripts map naturally onto its workflows. No label matching, so `on`/`prefer`/`avoid` would become queues at best. No dashboard to link a status to. Confirm cross-process queues, cancellation, and recovery by another machine first. |
-| Temporal | A server and long-lived workers. | Its Go SDK has an OpenTelemetry interceptor that handles propagation and replay; workflow code has strict determinism rules, which the replay section above already demands. |
-| Kubernetes Jobs | A step is a Job. | Not durable on its own: there is no record to resume a script from. Placement maps onto node selectors. Tracing needs nothing but the `Carrier`. |
+| Temporal | A server and long-lived workers. | The workflow would loop over `Next` (an activity, so Starlark never runs under the workflow's own determinism rules), keep results in its history, and run each step as an activity. Its Go SDK has an OpenTelemetry interceptor that handles propagation. History has size limits, which pointers in place of bytes are for. |
+| Kubernetes Jobs | A step is a Job. | Not durable on its own: there is no record to resume a script from unless the results are kept somewhere (ADR 0003, "Later, and how"). Placement maps onto node selectors. Each Job could run `starci step`. Tracing needs nothing but the `Carrier`. |
 
 The local engine is the reference for "an engine with none of the
 capabilities". A new one says in its package comment what it adds.

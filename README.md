@@ -18,7 +18,7 @@ def ci(ctx):
     ]
 ```
 
-There are thirty-seven worked examples in [`examples/`](examples/README.md), in both modes.
+There are thirty-nine worked examples in [`examples/`](examples/README.md), in both modes.
 
 ## Documentation
 
@@ -30,9 +30,10 @@ The documentation is in [`docs/`](docs/index.md), and is built into a site with
 | [Overview and status](docs/index.md) | What works and what does not. |
 | [Getting started](docs/getting-started.md) | Try it against a checkout. |
 | [Compiling to a workflow](docs/compiling.md) | Write a basic script out for GitHub Actions or CircleCI, or run starci inside one. |
+| [Carrying a run out from another tool](docs/driving.md) | `starci next` and `starci step`, for Temporal, a CI job or a shell loop. |
 | [What a script can do](docs/scripts.md) | The language, and basic versus advanced mode. |
 | [Tools and packages](docs/tools.md) | Pinned downloads and system packages for a step. |
 | [Steps without an image](docs/bare.md) | Bare steps, on the machine itself. |
 | [Inputs, networks and services](docs/inputs.md) | What a step sees, skipping, and databases beside a step. |
-| [How it fits together](docs/architecture.md) | Engines and traces. |
-| [Examples](examples/README.md) | Thirty-seven scripts, and what the basic ones compile to. |
+| [How it fits together](docs/architecture.md) | Engines, asking what is next, and traces. |
+| [Examples](examples/README.md) | Thirty-nine scripts, and what the basic ones compile to. |

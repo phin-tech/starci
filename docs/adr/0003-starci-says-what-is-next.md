@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # starci says what is next; an engine runs it

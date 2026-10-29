@@ -3,20 +3,32 @@
 | Package | |
 |---|---|
 | `internal/plan` | The language: evaluating scripts in both modes, and deciding what a run does next. Knows no engine; an engine asks it what is next, given the results so far, and runs what it says. |
-| `internal/step` | Running one step on one machine: fetch, sandbox, container, result cache. Knows no engine either. |
+| `internal/step` | Running one step on one machine: fetch, sandbox, container, result cache, the artifacts it keeps and is handed. Knows no engine either. |
 | `internal/engine` | What starci asks of whatever carries a run out: the `Engine` interface. |
-| `internal/engine/local` | The engine that is this machine: it calls `step` directly, concurrently. |
+| `internal/engine/local` | The engine that is this machine: it asks `plan` what is next and runs each step with `step`, several at once. |
 | `internal/engine/enginetest` | What an engine has to get right, as tests every engine is put through. |
 | `internal/compile` | Writing a basic plan out for GitHub Actions or CircleCI, or as an executable. |
 | `internal/ciinfo` | Reading why a run started from the CI tool starci is running inside. |
-| `internal/store/s3` | The shared result store. |
+| `internal/store/s3` | The shared store, in a bucket: results, and the blobs artifacts are kept as. |
 | `internal/tracing` | A run as an OpenTelemetry trace, whatever the engine. |
 
 ## Engines
 
 starci decides what a run is: which steps, in what order, each given which
 files. Getting those steps onto machines, waiting for them, and surviving a
-machine going away is an engine's job. An engine has to do one thing:
+machine going away is an engine's job.
+
+The two meet at one question: what is next? An engine hands `plan` the
+results so far and is told the steps to run now, each with its number, or that
+the run is over. It runs them, records their results, and asks again. Nothing
+is kept between questions, so whatever keeps the results is the run's record,
+and asking again after a machine is lost picks the run up where it was (see
+the [decision](adr/0003-starci-says-what-is-next.md)). The same question is on
+the command line as `starci next`, with `starci step` to run one step, for an
+engine that is not written in Go ([Carrying a run out from another
+tool](driving.md)).
+
+An engine in Go has to do one thing:
 
 ```go
 type Engine interface {
@@ -45,6 +57,15 @@ func TestEngine(t *testing.T) { enginetest.Run(t, myEngine) }
 An engine with abilities beyond running a run adds a small interface for
 each, asked for with a type assertion.
 
+## The store
+
+Each machine keeps what it needs to remember in its state directory
+(`STARCI_STATE`, by default `~/.cache/starci`): passing results, by a hash of
+everything that decides a step's outcome, and blobs, by the hash of their
+content, which is how the [artifacts](scripts.md#handing-files-on) steps keep
+are held. A result carries a pointer to each artifact, never the bytes.
+`STARCI_STORE` adds a bucket shared with other machines, asked for what a
+machine does not have itself (see the [decision](adr/0002-a-store-of-pointers.md)).
 
 ## Traces
 

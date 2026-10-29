@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # A store of pointers, and edges that are written down
@@ -16,13 +16,18 @@ steps after it be reused.
 
 A step is given another step's files only when the script names them. Nothing
 arrives because of `needs`: what a step sees is what it was handed, as with
-its inputs, and the edge is in the script for a reader and for `starci graph`.
+its inputs, and the edge is in the script for a reader and in the plan as a
+need.
 A basic script names them before anything has run, with a placeholder that
 stands for a step's file and implies the need.
 
 There is always a store: a directory on the machine, or a shared bucket. Only
 starci writes to it, never a step: an image step never sees its credentials,
 and a bare step none of the machine's environment but its PATH.
+
+Built so far: artifacts, kept and handed on through a directory on the
+machine or a bucket. What a step prints is still in its result, up to 64 KB,
+until something needs it out of there.
 
 ## Considered options
 

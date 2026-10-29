@@ -63,6 +63,7 @@ nav:
           - examples/README.md
           - Basic:
               - examples/basic/branches.md
+              - examples/basic/build-once.md
               - examples/basic/changed-files.md
               - examples/basic/changed-files-matrix.md
               - examples/basic/diamond.md
@@ -89,6 +90,7 @@ nav:
               - examples/basic/wrapping-release-actions.md
           - Advanced:
               - examples/advanced/affected.md
+              - examples/advanced/build-once.md
               - examples/advanced/canary.md
               - examples/advanced/choose-by-step.md
               - examples/advanced/coverage-gate.md

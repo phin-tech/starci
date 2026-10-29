@@ -109,6 +109,7 @@ func TestBasicExamplesDoWhatTheySay(t *testing.T) {
 	check("changed-files-matrix, one service and a README", plan("changed-files-matrix.ci.star", Context{ChangedFiles: []string{"services/web/a.ts", "services/search/README.md"}}), "test web")
 	check("changed-files-matrix, shared library", plan("changed-files-matrix.ci.star", exampleContexts["a shared change"]), "test billing, test search, test web")
 	check("changed-files-matrix, proto", plan("changed-files-matrix.ci.star", Context{ChangedFiles: []string{"proto/a.proto"}}), "test billing, test search, test web")
+	check("build-once", plan("build-once.ci.star", exampleContexts["nothing known"]), "build, smoke debian, smoke alpine, end to end")
 	if got := plan("go.ci.star", exampleContexts["nothing known"]); len(got) != 5 {
 		t.Errorf("go: %d steps, want vet, test and three builds", len(got))
 	}
@@ -276,6 +277,15 @@ func TestAdvancedExamples(t *testing.T) {
 			want:     "unit > classify > visual regression+migration dry run",
 		},
 		{file: "choose-by-step.pipeline.star", ctx: branch, want: "unit > classify"},
+		{
+			file: "build-once.pipeline.star",
+			ctx:  branch,
+			outcomes: map[string][]Result{
+				"build":    {{Status: "passed", Artifacts: map[string]Pointer{"out": {Hash: "abc"}}}},
+				"features": {{Status: "passed", Output: "sqlite\npostgres\n"}},
+			},
+			want: "build > features > test sqlite+test postgres",
+		},
 		{
 			file:     "pi-gamebook.pipeline.star",
 			ctx:      branch,

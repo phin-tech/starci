@@ -15,7 +15,7 @@ def ci(ctx):
     ]
 ```
 
-There are thirty-seven worked examples in [`examples/`](examples/README.md): twenty-five basic and twelve advanced.
+There are thirty-nine worked examples in [`examples/`](examples/README.md): twenty-six basic and thirteen advanced.
 
 ## Status
 
@@ -30,6 +30,11 @@ job in another CI tool, which then does the triggering and the reporting.
       input contents are unchanged.
 - [x] **Advanced mode** — a script that runs steps itself, sees their
       results, and branches or loops on them.
+- [x] **Artifacts** — a step keeps files and a later step is handed them,
+      by the hash of their content ([Handing files on](scripts.md#handing-files-on)).
+- [x] **Driving from elsewhere** — `starci next` and `starci step` let
+      another tool carry a run out and resume it ([Carrying a run out from
+      another tool](driving.md)).
 - [x] **Compiling** — write a basic script out as a GitHub Actions or
       CircleCI workflow, or as an executable that runs it.
 
@@ -41,3 +46,5 @@ Everything is one binary:
 | `starci run` | Execute a commit on this machine, with Docker for steps in an image. |
 | `starci compile` | Write a basic script out for GitHub Actions or CircleCI, or as an executable. |
 | `starci validate` | Check that a script's inputs select files and that the tools it pins download as pinned. Runs nothing. |
+| `starci next` | Say what a run does next, given its results so far. Runs nothing. |
+| `starci step` | Run one step that `next` asked for, on this machine, and print its result. |

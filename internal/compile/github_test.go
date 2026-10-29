@@ -170,6 +170,9 @@ func TestExamplesCompile(t *testing.T) {
 				t.Fatal(err)
 			}
 			out, err := GitHub(p, Options{Source: filepath.Base(file), Read: read})
+			if refusedForArtifacts(t, p, err) {
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -245,4 +248,19 @@ func TestAJobStartsItsServicesAndStopsThem(t *testing.T) {
 	if strings.Contains(compileScript(t, script, Options{}), "ervices") {
 		t.Error("a workflow with no services mentions them")
 	}
+}
+
+// refusedForArtifacts reports whether p hands artifacts on, which compiling
+// refuses for now, and fails the test unless it was refused for exactly that.
+func refusedForArtifacts(t *testing.T, p *plan.Plan, err error) bool {
+	t.Helper()
+	for _, s := range p.Steps {
+		if len(s.Keep) > 0 || len(s.Artifacts) > 0 {
+			if err == nil || !strings.Contains(err.Error(), "artifacts are not compiled") {
+				t.Fatalf("a plan with artifacts compiled, or was refused for something else: %v", err)
+			}
+			return true
+		}
+	}
+	return false
 }
