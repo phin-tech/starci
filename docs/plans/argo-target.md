@@ -78,10 +78,29 @@ byte-identical output afterwards (`compile.sh --check`).
   `docs/development.md`, in the way `run_test.go` carries out compiled
   workflows today.
 
-## Open questions, in order
+## Settled
 
-1. `network = False` and `packages`: refuse in v1?
-2. Passes: which option?
-3. Artifacts: v1 or v2?
-4. The init container's image: who publishes it?
-5. Bare steps: refuse or default image?
+1. **`network = False` and `packages`: refused**, with a compile error naming
+   the step. A pod's network policy covers the whole pod, including the init
+   container; installing packages needs root and the network.
+2. **Passes: an in-pod check against `STARCI_STORE`.** The init container
+   hashes the inputs the way a machine does and asks the shared store; a hit
+   marks the task passed without running the command. `STARCI_STORE` must be
+   reachable from the cluster, and the header says so.
+3. **Artifacts: refused in v1**, as for Temporal. v2 decides between Argo's own
+   artifacts and the store.
+4. **The init image is a required flag, `--init-image REF`**, with no default.
+   starci publishes nothing and names no registry (ADR 0001). It needs git,
+   curl/tar, sha256sum and whatever the passes check calls. A Dockerfile under
+   `dev/` can build one.
+5. **Bare steps: `--bare-image REF`** supplies the image they run in, as
+   `starci run`'s flag does; without it a bare step is refused. The pod is the
+   isolation.
+
+## Next
+
+1. Extract the GitHub target's step-side shell into shared functions; the
+   GitHub and CircleCI goldens must not change.
+2. Add `argoWhen` to `probe`, and the Argo target in `internal/compile/argo.go`.
+3. Register it in `cmd/starci/compile.go` (`--init-image`, `--bare-image`).
+4. Goldens, offline schema validation, docs, and a gated kind/k3d run.
