@@ -173,9 +173,13 @@ and like services there is no capability for them
 - In a basic plan, `Next` puts the real pointer in place of an
   `artifact(step, path)` placeholder before handing the step out. The step as
   handed out is what ran, and what its result answers.
-- The compile targets refuse artifacts for now (`refusal` in
-  `internal/compile`); carrying them would mean uploading and fetching them
-  in the generated jobs, and keying a job on what an earlier one kept.
+- The compile targets write the same as shell (`internal/compile/artifacts.go`):
+  a job keeps what it keeps in its record of a pass too, so a skipped job
+  still hands it on, and a job handed something is keyed on `kept_hash` of
+  it. A change to what a machine keeps, or to how an artifact is keyed, needs
+  making there too. `run_test.go` carries compiled workflows out with stand-ins
+  for both CI tools; extend it rather than trusting a workflow that only
+  lints.
 
 ### Tracing
 

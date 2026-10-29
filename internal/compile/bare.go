@@ -48,8 +48,8 @@ func bareRun(s plan.Step, toolDirs []string, caches map[string]string) []string 
 
 // refusal says why a step cannot be compiled, if it cannot.
 func refusal(s plan.Step) error {
-	if len(s.Keep) > 0 || len(s.Artifacts) > 0 {
-		return fmt.Errorf("step %q: artifacts are not compiled to a workflow yet; run the script with starci run, or a compiled executable", s.Name)
+	if err := checkPlaceholders(s); err != nil {
+		return err
 	}
 	return bareRefusal(s)
 }

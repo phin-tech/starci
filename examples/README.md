@@ -56,9 +56,9 @@ Gitea read too) and for CircleCI, to see what `starci compile` makes of it:
 its jobs carry conditions and the workflow's `on:` is worked out from the
 script. [services](basic/compiled/github/services.yml) shows a database
 started and stopped by the job itself. Each file's header says what did not
-carry over. Advanced scripts cannot be compiled, so there are none for them,
-and neither is [build-once](basic/build-once.ci.star) yet: compiling refuses
-a script that hands artifacts on.
+carry over. [build-once](basic/compiled/github/build-once.yml) hands a binary
+from job to job, and still does when the job that built it is skipped.
+Advanced scripts cannot be compiled, so there are none for them.
 
 `basic/compile.sh` writes them all again; `basic/compile.sh --check` fails if
 any is not what its script compiles to now.

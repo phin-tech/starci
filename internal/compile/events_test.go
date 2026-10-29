@@ -152,11 +152,7 @@ func TestEveryBasicExampleCompilesForEvents(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = GitHubEvents(file, src, Options{})
-		if err != nil && strings.Contains(err.Error(), "artifacts are not compiled") {
-			continue
-		}
-		if err != nil {
+		if _, err := GitHubEvents(file, src, Options{}); err != nil {
 			t.Errorf("%s: %v", filepath.Base(file), err)
 		}
 	}

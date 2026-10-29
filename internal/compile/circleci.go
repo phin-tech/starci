@@ -48,6 +48,9 @@ func CircleCI(p *plan.Plan, o Options) (string, error) {
 		notes = append(notes, fmt.Sprintf("`on`, `prefer` and `avoid` have no equivalent here and are dropped (%s): CircleCI chooses machines by resource class, not by label. Every job uses %s.", strings.Join(placed, ", "), o.RunsOn))
 	}
 	notes = append(notes, "Passes are remembered in this project's CircleCI cache, which expires. starci's own store does not.")
+	if keepsArtifacts(p) {
+		notes = append(notes, "Artifacts are handed from job to job through the workflow's workspace. What a job kept is also in its record of a pass, so a job skipped because it passed before still hands it on.")
+	}
 	writeHeader(&w, "starci compile --target circleci", o, notes)
 
 	w.WriteString("version: 2.1\n\njobs:\n")
@@ -55,7 +58,7 @@ func CircleCI(p *plan.Plan, o Options) (string, error) {
 		if i > 0 {
 			w.WriteString("\n")
 		}
-		if err := circleJob(&w, s, ids[s.Name], o); err != nil {
+		if err := circleJob(&w, s, ids, o); err != nil {
 			return "", err
 		}
 	}
@@ -109,11 +112,22 @@ func gitPathspec(in string) string {
 	return ":(top,literal)" + in
 }
 
-func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
+// circleGiven is where, once the workspace is attached, what a step kept is:
+// under ran/ if its job ran, under hit/ if it passed before and was skipped.
+func circleGiven(ids map[string]string, from string) string {
+	return fmt.Sprintf("\"$(d=/tmp/starci-given/%s; [ -e $d/ran/.starci-kept ] && echo $d/ran || echo $d/hit)\"", ids[from])
+}
+
+func circleJob(w *strings.Builder, s plan.Step, ids map[string]string, o Options) error {
+	id := ids[s.Name]
 	if err := refusal(s); err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "  %s:\n    machine:\n      image: ubuntu-2404:current\n    resource_class: %s\n    steps:\n      - checkout\n", id, o.RunsOn)
+	if len(s.Artifacts) > 0 {
+		// What the jobs before it kept, each under its own job's id.
+		w.WriteString("      - attach_workspace:\n          at: /tmp/starci-given\n")
+	}
 
 	// Taken out of the checkout while the whole of it is still there.
 	given := "\"$HOME/starci-services\""
@@ -140,9 +154,29 @@ func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
 		}
 		// The same question a machine asks git: which files, with which
 		// contents, do these inputs select at this commit?
-		circleRun(w, "Identify the inputs", nil, "git ls-files -s -- "+strings.Join(specs, " ")+" > /tmp/starci-inputs")
+		identify := []string{"git ls-files -s -- " + strings.Join(specs, " ") + " > /tmp/starci-inputs"}
+		// Handed an artifact, it is keyed on the artifact's content.
+		if len(s.Artifacts) > 0 {
+			identify = append(identify, keptHash)
+			for _, at := range artifactPaths(s) {
+				p := s.Artifacts[at]
+				identify = append(identify, fmt.Sprintf("echo \"artifact %s $(kept_hash %s/%s)\" >> /tmp/starci-inputs", shq(at), circleGiven(ids, p.From), shq(p.Path)))
+			}
+		}
+		circleRun(w, "Identify the inputs", nil, identify...)
 		passKey = fmt.Sprintf("starci-passed-%s-%s-{{ checksum \"/tmp/starci-inputs\" }}", id, stepKey(s, o.Arch))
 		fmt.Fprintf(w, "      - restore_cache:\n          name: Has this already passed with these inputs?\n          keys:\n            - %s\n", passKey)
+		if len(s.Keep) > 0 {
+			// Handed on before stopping, from the record of the earlier
+			// pass. A job that runs hands on what it keeps under ran/
+			// instead, so that no file is in the workspace twice.
+			circleRun(w, "What it kept when it passed before", nil,
+				fmt.Sprintf("mkdir -p /tmp/starci-out/%s/hit", id),
+				"if [ -e ~/starci-passed/at ]; then",
+				fmt.Sprintf("  cp -R ~/starci-kept/. /tmp/starci-out/%s/hit/ && touch /tmp/starci-out/%s/hit/.starci-kept", id, id),
+				"fi")
+			fmt.Fprintf(w, "      - persist_to_workspace:\n          root: /tmp/starci-out\n          paths:\n            - %s/hit\n", id)
+		}
 		circleRun(w, "Stop here if it has", nil,
 			"if [ -e ~/starci-passed/at ]; then",
 			"  echo \"Passed before with the same inputs, on $(cat ~/starci-passed/at). Nothing to do.\"",
@@ -191,6 +225,10 @@ func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
 		fmt.Fprintf(w, "      - restore_cache:\n          name: %s\n          keys:\n            - starci-cache-%s-\n", q("Cache: "+name), name)
 		mounts = append(mounts, fmt.Sprintf("-v \"$HOME/starci-cache/%s:%s\"", name, s.Caches[name]))
 		cacheDirs[s.Caches[name]] = "$HOME/starci-cache/" + name
+	}
+
+	if len(s.Artifacts) > 0 {
+		circleRun(w, "Put the artifacts in place", nil, placeLines(s, func(from string) string { return circleGiven(ids, from) })...)
 	}
 
 	// CIRCLE_BUILD_NUM is this job's own number.
@@ -242,6 +280,12 @@ func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
 	// The command travels in an environment variable, so that nothing in it
 	// needs escaping for the shell that starts the container.
 	circleRun(w, s.Name, map[string]string{"STARCI_RUN": s.Command()}, lines...)
+	if len(s.Keep) > 0 {
+		lines := keepLines(s, "~/starci-kept", fmt.Sprintf("/tmp/starci-out/%s/ran", id))
+		lines = append(lines, fmt.Sprintf("touch /tmp/starci-out/%s/ran/.starci-kept", id))
+		circleRun(w, "Keep "+strings.Join(s.Keep, ", "), nil, lines...)
+		fmt.Fprintf(w, "      - persist_to_workspace:\n          root: /tmp/starci-out\n          paths:\n            - %s/ran\n", id)
+	}
 	if len(s.Services) > 0 {
 		// Whatever became of the step. The machine is thrown away after the
 		// job, so this is tidiness, and the same as the other targets.
@@ -256,7 +300,11 @@ func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
 	}
 	if s.Cache {
 		circleRun(w, "Remember this pass", nil, "mkdir -p ~/starci-passed && date > ~/starci-passed/at")
-		fmt.Fprintf(w, "      - save_cache:\n          key: %s\n          paths:\n            - ~/starci-passed\n", passKey)
+		kept := ""
+		if len(s.Keep) > 0 {
+			kept = "\n            - ~/starci-kept"
+		}
+		fmt.Fprintf(w, "      - save_cache:\n          key: %s\n          paths:\n            - ~/starci-passed%s\n", passKey, kept)
 	}
 	return nil
 }

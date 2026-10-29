@@ -3,8 +3,7 @@
 
 A basic example's page has tabs for the script, what it compiles to for GitHub
 Actions and what it compiles to for CircleCI; an advanced one has the script
-alone, since advanced scripts cannot be compiled, and so does a basic one that
-hands artifacts on, which is not compiled yet. Run by dev/docs.sh after
+alone, since advanced scripts cannot be compiled. Run by dev/docs.sh after
 examples/ has been copied into docs/, and not kept in git.
 """
 import json
@@ -86,10 +85,7 @@ for mode, glob, tail in (("basic", "*.ci.star", ".ci.star"), ("advanced", "*.pip
         name = script.name.removesuffix(tail)
         src = script.read_text()
         tabs = [("Script", fenced("python", src))]
-        # A basic script that hands artifacts on is not compiled yet, and has
-        # no compiled files (examples/basic/compile.sh).
-        compiled = mode == "basic" and (ex / "basic" / "compiled" / "github" / f"{name}.yml").exists()
-        if compiled:
+        if mode == "basic":
             for label, target in (("GitHub Actions", "github"), ("CircleCI", "circleci")):
                 tabs.append((label, fenced("yaml", (ex / "basic" / "compiled" / target / f"{name}.yml").read_text())))
         body = [f"# {name}", ""]
@@ -116,13 +112,11 @@ for mode, glob, tail in (("basic", "*.ci.star", ".ci.star"), ("advanced", "*.pip
             body += [f'=== "{label}"', "", indent(content), ""]
         body += ["---", ""]
         dl = [f"[{script.name}]({script.name})"]
-        if compiled:
+        if mode == "basic":
             dl += [f"[GitHub Actions](compiled/github/{name}.yml)", f"[CircleCI](compiled/circleci/{name}.yml)"]
         body.append("Download: " + ", ".join(dl))
         if mode == "advanced":
             body += ["", "An advanced script is only known as it runs, so it cannot be compiled."]
-        elif not compiled:
-            body += ["", "A script that hands artifacts on is not compiled to a workflow yet; `starci run` and a compiled executable run it."]
         (ex / mode / f"{name}.md").write_text("\n".join(body) + "\n")
         pages += 1
         if f"examples/{mode}/{name}.md" not in nav:

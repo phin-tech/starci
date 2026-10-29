@@ -16,6 +16,15 @@ already passed with the same inputs skips the work, using the Actions cache as
 the record. `needs` and `on` carry over, as job dependencies and runner
 labels, and so does `network = False`.
 
+[Artifacts](scripts.md#handing-files-on) carry over too. A job that keeps
+something hands it on through the CI tool's own way of moving files between
+the jobs of a run (Actions artifacts, packed with tar so that executable files
+stay executable, or CircleCI's workspace), and keeps it in its record of a pass
+as well, so that a job skipped because it passed before still hands on what it
+kept then. A job handed something is keyed on a hash of its content, worked out
+the same way a machine does: if the job before it runs again and makes the
+same files, it is skipped.
+
 A workflow file has to say in advance what happens for every event, so for
 GitHub the script is asked once for each kind: a push to the default branch,
 a push to another branch, a tag, a pull request, a pull request from a fork,
@@ -62,8 +71,6 @@ workflow says which apply:
   which could not be reached by name from the step's container. A pass is
   keyed on a service's image by name: a tag that moves does not run the job
   again, as it would on a machine.
-- A step that keeps or is handed [artifacts](scripts.md#handing-files-on) is
-  refused for now; an executable carries them.
 - Advanced scripts cannot be compiled to a workflow at all, or frozen into an executable: their steps are only known as
   they run.
 
@@ -77,7 +84,11 @@ container itself.
 
 The GitHub output has been linted and one of its jobs run by hand; the
 CircleCI output is accepted by CircleCI's own validator and one of its jobs
-has been run by hand. Neither has been run on the service it is for.
+has been run by hand. Neither has been run on the service it is for. The
+tests carry out workflows of bare steps that hand artifacts on with stand-ins
+for both tools (a job's shell run as it is, checkout, cache, artifacts and
+workspace done with directories), twice, so that the second time jobs are
+skipped by the passes of the first.
 
 ## Or an executable
 

@@ -7,9 +7,7 @@
 #   examples/basic/compile.sh --check
 #
 # Uses `starci` from PATH, or STARCI if set. --offline: the examples name
-# tools that need not be downloaded just to show what comes out. A script
-# that hands artifacts on is refused by both targets for now, and has no
-# compiled files.
+# tools that need not be downloaded just to show what comes out.
 set -eu
 
 starci=${STARCI:-starci}
@@ -19,28 +17,9 @@ cd "$here"
 check=
 [ "${1:-}" = "--check" ] && check=1
 
-# refused says whether a script is one compiling refuses for now.
-refused() {
-	! "$starci" compile --offline --target github --file "$1" >/dev/null 2>&1 &&
-		"$starci" compile --offline --target github --file "$1" 2>&1 | grep -q "artifacts are not compiled"
-}
-
 status=0
 for script in *.ci.star; do
 	name=${script%.ci.star}
-	if refused "$script"; then
-		for target in github circleci; do
-			if [ -e "compiled/$target/$name.yml" ]; then
-				if [ -n "$check" ]; then
-					echo "stale: compiled/$target/$name.yml, for a script compiling refuses" >&2
-					status=1
-				else
-					rm "compiled/$target/$name.yml"
-				fi
-			fi
-		done
-		continue
-	fi
 	for target in github circleci; do
 		out=compiled/$target/$name.yml
 		if [ -n "$check" ]; then

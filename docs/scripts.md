@@ -61,7 +61,7 @@ it is keyed on that hash: if `build` runs again and makes the same binary,
 inputs gave it, and a step that passes without making a path it keeps fails.
 Shared between machines through the same store as results
 ([Sharing results between machines](inputs.md#sharing-results-between-machines)).
-Compiled workflows do not carry artifacts yet.
+Compiled workflows carry them too ([Compiling](compiling.md)).
 
 ## Two modes
 

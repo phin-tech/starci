@@ -63,6 +63,10 @@ func GitHub(p *plan.Plan, o Options) (string, error) {
 	}
 
 	ids := jobIDs(p.Steps)
+	byName := map[string]plan.Step{}
+	for _, s := range p.Steps {
+		byName[s.Name] = s
+	}
 	var w strings.Builder
 	header(&w, p, o)
 	on := o.on
@@ -74,7 +78,7 @@ func GitHub(p *plan.Plan, o Options) (string, error) {
 		if i > 0 {
 			w.WriteString("\n")
 		}
-		if err := job(&w, s, ids, o); err != nil {
+		if err := job(&w, s, ids, byName, o); err != nil {
 			return "", err
 		}
 	}
@@ -93,6 +97,9 @@ func header(w *strings.Builder, p *plan.Plan, o Options) {
 		notes = append(notes, fmt.Sprintf("`prefer` and `avoid` have no equivalent here and are dropped (%s). `on` becomes runner labels.", strings.Join(unplaceable, ", ")))
 	}
 	notes = append(notes, "Passes are remembered in this repository's Actions cache, which GitHub scopes by branch and evicts when old. starci's own store has neither limit.")
+	if keepsArtifacts(p) {
+		notes = append(notes, "Artifacts are handed from job to job as Actions artifacts of the run, packed with tar so that executable files stay executable, and expire with them. What a job kept is also in its record of a pass, so a job skipped because it passed before still hands it on.")
+	}
 	writeHeader(w, "starci compile", o, notes)
 }
 
@@ -145,7 +152,7 @@ func jobIDs(steps []plan.Step) map[string]string {
 	return ids
 }
 
-func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) error {
+func job(w *strings.Builder, s plan.Step, ids map[string]string, byName map[string]plan.Step, o Options) error {
 	if err := refusal(s); err != nil {
 		return err
 	}
@@ -180,6 +187,14 @@ func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) erro
 	case cond != "":
 		fmt.Fprintf(w, "    if: ${{ %s }}\n", cond)
 	}
+	// The hash of each path it keeps, for the jobs it is handed to to be
+	// keyed on.
+	if len(s.Keep) > 0 {
+		w.WriteString("    outputs:\n")
+		for i := range s.Keep {
+			fmt.Fprintf(w, "      kept-%d: ${{ steps.kept.outputs.kept-%d }}\n", i+1, i+1)
+		}
+	}
 	w.WriteString("    steps:\n")
 
 	// Only the inputs are checked out, which is as close as a workflow gets
@@ -201,8 +216,39 @@ func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) erro
 	skip := ""
 	if s.Cache {
 		skip = "        if: steps.passed.outputs.cache-hit != 'true'\n"
-		fmt.Fprintf(w, "      - name: Has this already passed with these inputs?\n        id: passed\n        uses: actions/cache@v4\n        with:\n          path: ${{ runner.temp }}/starci-passed\n          key: starci-passed-%s-%s-${{ hashFiles(%s) }}\n",
-			id, stepKey(s, o.Arch), strings.Join(hashGlobs(append(append([]string{}, s.Inputs...), serviceFiles(s)...)), ", "))
+		// What it keeps is part of its record of a pass, so that it is
+		// handed on even when the job is skipped.
+		paths := "${{ runner.temp }}/starci-passed"
+		if len(s.Keep) > 0 {
+			paths = "|\n            ${{ runner.temp }}/starci-passed\n            ${{ runner.temp }}/starci-kept"
+		}
+		// Handed an artifact, it is keyed on the artifact's content.
+		handed := ""
+		for _, at := range artifactPaths(s) {
+			p := s.Artifacts[at]
+			handed += fmt.Sprintf("-${{ needs.%s.outputs.kept-%d }}", ids[p.From], keptIndex(byName[p.From], p.Path))
+		}
+		fmt.Fprintf(w, "      - name: Has this already passed with these inputs?\n        id: passed\n        uses: actions/cache@v4\n        with:\n          path: %s\n          key: starci-passed-%s-%s-${{ hashFiles(%s) }}%s\n",
+			paths, id, stepKey(s, o.Arch), strings.Join(hashGlobs(append(append([]string{}, s.Inputs...), serviceFiles(s)...)), ", "), handed)
+	}
+
+	if len(s.Artifacts) > 0 {
+		for _, from := range handedFrom(s) {
+			fmt.Fprintf(w, "      - name: %s\n%s        uses: actions/download-artifact@v4\n        with:\n          name: starci-%s\n          path: ${{ runner.temp }}/starci-given/%s\n",
+				q("Artifacts of "+from), skip, ids[from], ids[from])
+		}
+		lines := []string{}
+		for _, from := range handedFrom(s) {
+			dir := "\"$RUNNER_TEMP/starci-given/" + ids[from] + "\""
+			lines = append(lines, fmt.Sprintf("mkdir -p %s/files && tar -xf %s/kept.tar -C %s/files", dir, dir, dir))
+		}
+		lines = append(lines, placeLines(s, func(from string) string {
+			return "\"$RUNNER_TEMP/starci-given/" + ids[from] + "/files\""
+		})...)
+		fmt.Fprintf(w, "      - name: Put the artifacts in place\n%s        run: |\n", skip)
+		for _, l := range lines {
+			fmt.Fprintf(w, "          %s\n", l)
+		}
 	}
 
 	var mounts, pathDirs, hostDirs []string
@@ -278,9 +324,7 @@ func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) erro
 				fmt.Fprintf(w, "          %s\n", part)
 			}
 		}
-		if s.Cache {
-			fmt.Fprintf(w, "      - name: Remember this pass\n%s        run: mkdir -p \"$RUNNER_TEMP/starci-passed\" && date > \"$RUNNER_TEMP/starci-passed/at\"\n", skip)
-		}
+		keepSteps(w, s, id, skip)
 		return nil
 	}
 	var args []string
@@ -316,6 +360,9 @@ func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) erro
 		fmt.Fprintf(w, "            %s \\\n", a)
 	}
 	fmt.Fprintf(w, "            %s sh -c \"$STARCI_RUN\"\n", image)
+	if len(s.Keep) > 0 {
+		keepCopy(w, s, skip)
+	}
 
 	if len(s.Services) > 0 {
 		// Whatever became of the step: a runner that is kept would otherwise
@@ -329,10 +376,46 @@ func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) erro
 			fmt.Fprintf(w, "          %s\n", l)
 		}
 	}
+	rememberAndHandOn(w, s, id, skip)
+	return nil
+}
+
+// keepSteps end the job of a bare step: keep what it keeps, remember the
+// pass, and hand on what it kept.
+func keepSteps(w *strings.Builder, s plan.Step, id, skip string) {
+	if len(s.Keep) > 0 {
+		keepCopy(w, s, skip)
+	}
+	rememberAndHandOn(w, s, id, skip)
+}
+
+// keepCopy copies what the step keeps out of the workspace, once it has
+// passed, into what the record of a pass is made of.
+func keepCopy(w *strings.Builder, s plan.Step, skip string) {
+	fmt.Fprintf(w, "      - name: %s\n%s        run: |\n", q("Keep "+strings.Join(s.Keep, ", ")), skip)
+	for _, l := range keepLines(s, "\"$RUNNER_TEMP/starci-kept\"") {
+		fmt.Fprintf(w, "          %s\n", l)
+	}
+}
+
+// rememberAndHandOn records the pass, and hands on what the step kept,
+// whether it kept it now or the record of an earlier pass brought it back.
+func rememberAndHandOn(w *strings.Builder, s plan.Step, id, skip string) {
 	if s.Cache {
 		fmt.Fprintf(w, "      - name: Remember this pass\n%s        run: mkdir -p \"$RUNNER_TEMP/starci-passed\" && date > \"$RUNNER_TEMP/starci-passed/at\"\n", skip)
 	}
-	return nil
+	if len(s.Keep) == 0 {
+		return
+	}
+	w.WriteString("      - name: The hash of what it kept\n        id: kept\n        run: |\n")
+	fmt.Fprintf(w, "          %s\n", keptHash)
+	w.WriteString("          cd \"$RUNNER_TEMP/starci-kept\"\n")
+	for i, k := range s.Keep {
+		fmt.Fprintf(w, "          echo \"kept-%d=$(kept_hash %s)\" >> \"$GITHUB_OUTPUT\"\n", i+1, shq(k))
+	}
+	// Packed, because an Actions artifact does not keep a file executable.
+	w.WriteString("          mkdir -p \"$RUNNER_TEMP/starci-hand-on\" && tar -cf \"$RUNNER_TEMP/starci-hand-on/kept.tar\" .\n")
+	fmt.Fprintf(w, "      - name: Hand on what it kept\n        uses: actions/upload-artifact@v4\n        with:\n          name: starci-%s\n          path: ${{ runner.temp }}/starci-hand-on/kept.tar\n", id)
 }
 
 func serviceNames(s plan.Step) []string {
@@ -445,6 +528,19 @@ func stepKey(s plan.Step, arch string) string {
 		env = append(env, [2]string{k, s.Env[k]})
 	}
 	parts := []any{s.Image, arch, s.Run, env, tools, s.Packages, s.Inputs}
+	// What it keeps and is handed, only when it does, so that every other
+	// step keeps its key. What it is handed is named here by the step and
+	// path it comes from; its content is added to the key where it is known.
+	if len(s.Keep) > 0 {
+		parts = append(parts, "keep", s.Keep)
+	}
+	if len(s.Artifacts) > 0 {
+		var handed [][3]string
+		for _, at := range artifactPaths(s) {
+			handed = append(handed, [3]string{at, s.Artifacts[at].From, s.Artifacts[at].Path})
+		}
+		parts = append(parts, "artifacts", handed)
+	}
 	// Only said when there is one, so that every other step keeps its key.
 	if len(s.Argv) > 0 {
 		parts = append(parts, "argv", s.Argv)
