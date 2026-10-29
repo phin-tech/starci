@@ -196,12 +196,7 @@ func circleJob(w *strings.Builder, s plan.Step, ids map[string]string, o Options
 		}
 		fill := func(v string) string { return strings.ReplaceAll(v, "{arch}", arch) }
 		dir := "$HOME/starci-tools/" + t.Name
-		download := "/tmp/" + t.Name + ".download"
-		circleRun(w, "Tool: "+t.Name, nil,
-			fmt.Sprintf("mkdir -p \"%s\"", dir),
-			fmt.Sprintf("curl -fsSL %s -o %s", shq(fill(t.URL)), download),
-			fmt.Sprintf("echo \"%s  %s\" | sha256sum -c -", sum, download),
-			unpackCommand(fill(t.URL), download, dir, t.Name))
+		circleRun(w, "Tool: "+t.Name, nil, toolInstall(t, sum, arch, "/tmp/"+t.Name+".download", dir)...)
 		mounts = append(mounts, fmt.Sprintf("-v \"%s:/opt/starci/tools/%s:ro\"", dir, t.Name))
 		for _, b := range t.Bin {
 			pathDirs = append(pathDirs, path.Join("/opt/starci/tools", t.Name, fill(b)))

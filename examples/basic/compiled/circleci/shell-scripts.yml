@@ -40,7 +40,7 @@ jobs:
           name: "Tool: shellcheck"
           command: |
             mkdir -p "$HOME/starci-tools/shellcheck"
-            curl -fsSL 'https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz' -o /tmp/shellcheck.download
+            curl -fsSL 'https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz' -o "/tmp/shellcheck.download"
             echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  /tmp/shellcheck.download" | sha256sum -c -
             tar -xf "/tmp/shellcheck.download" -C "$HOME/starci-tools/shellcheck"
       - run:
@@ -95,7 +95,7 @@ jobs:
           name: "Tool: jq"
           command: |
             mkdir -p "$HOME/starci-tools/jq"
-            curl -fsSL 'https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-linux-amd64' -o /tmp/jq.download
+            curl -fsSL 'https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-linux-amd64' -o "/tmp/jq.download"
             echo "020468de7539ce70ef1bceaf7cde2e8c4f2ca6c3afb84642aabc5c97d9fc2a0d  /tmp/jq.download" | sha256sum -c -
             install -m 755 "/tmp/jq.download" "$HOME/starci-tools/jq/jq"
       - run:

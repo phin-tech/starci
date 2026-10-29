@@ -264,10 +264,9 @@ func job(w *strings.Builder, s plan.Step, ids map[string]string, byName map[stri
 		fill := func(v string) string { return strings.ReplaceAll(v, "{arch}", arch) }
 		dir := "$RUNNER_TEMP/starci-tools/" + t.Name
 		fmt.Fprintf(w, "      - name: %s\n%s        run: |\n", q("Tool: "+t.Name), skip)
-		fmt.Fprintf(w, "          mkdir -p \"%s\"\n", dir)
-		fmt.Fprintf(w, "          curl -fsSL %s -o \"$RUNNER_TEMP/%s.download\"\n", shq(fill(t.URL)), t.Name)
-		fmt.Fprintf(w, "          echo \"%s  $RUNNER_TEMP/%s.download\" | sha256sum -c -\n", sum, t.Name)
-		fmt.Fprintf(w, "          %s\n", unpackCommand(fill(t.URL), "$RUNNER_TEMP/"+t.Name+".download", dir, t.Name))
+		for _, l := range toolInstall(t, sum, arch, "$RUNNER_TEMP/"+t.Name+".download", dir) {
+			fmt.Fprintf(w, "          %s\n", l)
+		}
 		mounts = append(mounts, fmt.Sprintf("-v \"%s:/opt/starci/tools/%s:ro\"", dir, t.Name))
 		for _, b := range t.Bin {
 			pathDirs = append(pathDirs, path.Join("/opt/starci/tools", t.Name, fill(b)))

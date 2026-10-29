@@ -40,7 +40,7 @@ jobs:
           name: "Tool: uv"
           command: |
             mkdir -p "$HOME/starci-tools/uv"
-            curl -fsSL 'https://github.com/astral-sh/uv/releases/download/0.12.1/uv-x86_64-unknown-linux-gnu.tar.gz' -o /tmp/uv.download
+            curl -fsSL 'https://github.com/astral-sh/uv/releases/download/0.12.1/uv-x86_64-unknown-linux-gnu.tar.gz' -o "/tmp/uv.download"
             echo "90b2f223fb69d19db49e117da601f64978593417988530aa733d456141b4bcbb  /tmp/uv.download" | sha256sum -c -
             tar -xf "/tmp/uv.download" -C "$HOME/starci-tools/uv"
       - run:
@@ -111,7 +111,7 @@ jobs:
           name: "Tool: uv"
           command: |
             mkdir -p "$HOME/starci-tools/uv"
-            curl -fsSL 'https://github.com/astral-sh/uv/releases/download/0.12.1/uv-x86_64-unknown-linux-gnu.tar.gz' -o /tmp/uv.download
+            curl -fsSL 'https://github.com/astral-sh/uv/releases/download/0.12.1/uv-x86_64-unknown-linux-gnu.tar.gz' -o "/tmp/uv.download"
             echo "90b2f223fb69d19db49e117da601f64978593417988530aa733d456141b4bcbb  /tmp/uv.download" | sha256sum -c -
             tar -xf "/tmp/uv.download" -C "$HOME/starci-tools/uv"
       - run:
@@ -182,7 +182,7 @@ jobs:
           name: "Tool: uv"
           command: |
             mkdir -p "$HOME/starci-tools/uv"
-            curl -fsSL 'https://github.com/astral-sh/uv/releases/download/0.12.1/uv-x86_64-unknown-linux-gnu.tar.gz' -o /tmp/uv.download
+            curl -fsSL 'https://github.com/astral-sh/uv/releases/download/0.12.1/uv-x86_64-unknown-linux-gnu.tar.gz' -o "/tmp/uv.download"
             echo "90b2f223fb69d19db49e117da601f64978593417988530aa733d456141b4bcbb  /tmp/uv.download" | sha256sum -c -
             tar -xf "/tmp/uv.download" -C "$HOME/starci-tools/uv"
       - run:
@@ -253,7 +253,7 @@ jobs:
           name: "Tool: uv"
           command: |
             mkdir -p "$HOME/starci-tools/uv"
-            curl -fsSL 'https://github.com/astral-sh/uv/releases/download/0.12.1/uv-x86_64-unknown-linux-gnu.tar.gz' -o /tmp/uv.download
+            curl -fsSL 'https://github.com/astral-sh/uv/releases/download/0.12.1/uv-x86_64-unknown-linux-gnu.tar.gz' -o "/tmp/uv.download"
             echo "90b2f223fb69d19db49e117da601f64978593417988530aa733d456141b4bcbb  /tmp/uv.download" | sha256sum -c -
             tar -xf "/tmp/uv.download" -C "$HOME/starci-tools/uv"
       - run:

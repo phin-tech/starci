@@ -40,7 +40,7 @@ jobs:
           name: "Tool: bun"
           command: |
             mkdir -p "$HOME/starci-tools/bun"
-            curl -fsSL 'https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip' -o /tmp/bun.download
+            curl -fsSL 'https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip' -o "/tmp/bun.download"
             echo "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f  /tmp/bun.download" | sha256sum -c -
             unzip -q "/tmp/bun.download" -d "$HOME/starci-tools/bun"
       - restore_cache:
@@ -105,7 +105,7 @@ jobs:
           name: "Tool: bun"
           command: |
             mkdir -p "$HOME/starci-tools/bun"
-            curl -fsSL 'https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip' -o /tmp/bun.download
+            curl -fsSL 'https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip' -o "/tmp/bun.download"
             echo "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f  /tmp/bun.download" | sha256sum -c -
             unzip -q "/tmp/bun.download" -d "$HOME/starci-tools/bun"
       - restore_cache:

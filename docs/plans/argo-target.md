@@ -19,15 +19,18 @@ or Kubernetes that have not been checked against its documentation.
 - Registered in the `targets` table in `cmd/starci/compile.go`; one file
   (`-o FILE` or stdout), `--check FILE`.
 
-## Reuse, and what has to be extracted first
+## Reuse
 
-The GitHub target's step-side shell lives inside `job()` mixed with GitHub
-actions (checkout, cache). Before an Argo target can share it, pull out as
-plain functions returning shell lines: sparse checkout of the inputs
-(`gitPathspec`, `sparsePattern`), the checksummed tool download
-(`unpackCommand` and the code around it), `startServices`/`stopServices`,
-`keepLines`/`placeLines`, `bareRun`. GitHub and CircleCI must compile to
-byte-identical output afterwards (`compile.sh --check`).
+Less was tangled in `job()` than feared. Already plain functions and usable as
+they are: `gitPathspec`/`sparsePattern` (inputs), `unpackCommand`, `jobIDs`,
+`keepLines`/`placeLines`, `commitNote`/`wrap`/`q`/`shq`. The one piece that was
+inline in both the GitHub and CircleCI targets, the tool download, is now
+`toolInstall` (`internal/compile/tools.go`); the init container uses it.
+
+Not reusable, because they are Docker: `startServices`/`stopServices` (services
+here are native sidecars) and the `docker run` assembly. `bareRun` is shell for
+a CI machine's own processes; a bare step here runs in `--bare-image`, where
+the pod is the isolation, so the command runs directly.
 
 ## Per-feature mapping (propose; each may become a v1 refusal)
 
@@ -99,8 +102,8 @@ byte-identical output afterwards (`compile.sh --check`).
 
 ## Next
 
-1. Extract the GitHub target's step-side shell into shared functions; the
-   GitHub and CircleCI goldens must not change.
+1. ~~Extract the tool download~~ (done: `toolInstall`; the GitHub goldens are
+   unchanged, the CircleCI ones now quote the download path).
 2. Add `argoWhen` to `probe`, and the Argo target in `internal/compile/argo.go`.
 3. Register it in `cmd/starci/compile.go` (`--init-image`, `--bare-image`).
 4. Goldens, offline schema validation, docs, and a gated kind/k3d run.

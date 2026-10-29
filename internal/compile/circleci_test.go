@@ -32,7 +32,7 @@ func TestCircleCIStepsBecomeJobs(t *testing.T) {
 		// The job starts the step's container itself, which needs a machine.
 		"  lint:\n    machine:\n      image: ubuntu-2404:current\n    resource_class: medium\n    steps:\n      - checkout\n",
 		"git sparse-checkout set --no-cone '/app/**/*.py' '/pyproject.toml'",
-		"curl -fsSL 'https://example.com/uv-x86_64.tar.gz' -o /tmp/uv.download",
+		`curl -fsSL 'https://example.com/uv-x86_64.tar.gz' -o "/tmp/uv.download"`,
 		`echo "`+sum+`  /tmp/uv.download" | sha256sum -c -`,
 		`-e "PATH=/opt/starci/tools/uv/uv-x86_64:$image_path"`,
 		"starci-env-api-tests sh -c \"$STARCI_RUN\"",

@@ -40,7 +40,7 @@ jobs:
           name: "Tool: go"
           command: |
             mkdir -p "$HOME/starci-tools/go"
-            curl -fsSL 'https://go.dev/dl/go1.26.5.linux-amd64.tar.gz' -o /tmp/go.download
+            curl -fsSL 'https://go.dev/dl/go1.26.5.linux-amd64.tar.gz' -o "/tmp/go.download"
             echo "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053  /tmp/go.download" | sha256sum -c -
             tar -xf "/tmp/go.download" -C "$HOME/starci-tools/go"
       - run:
@@ -122,7 +122,7 @@ jobs:
           name: "Tool: go"
           command: |
             mkdir -p "$HOME/starci-tools/go"
-            curl -fsSL 'https://go.dev/dl/go1.26.5.linux-amd64.tar.gz' -o /tmp/go.download
+            curl -fsSL 'https://go.dev/dl/go1.26.5.linux-amd64.tar.gz' -o "/tmp/go.download"
             echo "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053  /tmp/go.download" | sha256sum -c -
             tar -xf "/tmp/go.download" -C "$HOME/starci-tools/go"
       - run:
@@ -204,7 +204,7 @@ jobs:
           name: "Tool: go"
           command: |
             mkdir -p "$HOME/starci-tools/go"
-            curl -fsSL 'https://go.dev/dl/go1.26.5.linux-amd64.tar.gz' -o /tmp/go.download
+            curl -fsSL 'https://go.dev/dl/go1.26.5.linux-amd64.tar.gz' -o "/tmp/go.download"
             echo "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053  /tmp/go.download" | sha256sum -c -
             tar -xf "/tmp/go.download" -C "$HOME/starci-tools/go"
       - run:
@@ -288,7 +288,7 @@ jobs:
           name: "Tool: go"
           command: |
             mkdir -p "$HOME/starci-tools/go"
-            curl -fsSL 'https://go.dev/dl/go1.26.5.linux-amd64.tar.gz' -o /tmp/go.download
+            curl -fsSL 'https://go.dev/dl/go1.26.5.linux-amd64.tar.gz' -o "/tmp/go.download"
             echo "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053  /tmp/go.download" | sha256sum -c -
             tar -xf "/tmp/go.download" -C "$HOME/starci-tools/go"
       - run:
@@ -372,7 +372,7 @@ jobs:
           name: "Tool: go"
           command: |
             mkdir -p "$HOME/starci-tools/go"
-            curl -fsSL 'https://go.dev/dl/go1.26.5.linux-amd64.tar.gz' -o /tmp/go.download
+            curl -fsSL 'https://go.dev/dl/go1.26.5.linux-amd64.tar.gz' -o "/tmp/go.download"
             echo "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053  /tmp/go.download" | sha256sum -c -
             tar -xf "/tmp/go.download" -C "$HOME/starci-tools/go"
       - run:
