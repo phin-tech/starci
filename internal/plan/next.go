@@ -132,14 +132,6 @@ func (p *Plan) Next(results []Result) (Decision, error) {
 	for _, layer := range p.Layers() {
 		for _, s := range layer {
 			asked := Asked{Number: number[s.Name], Step: s}
-			r, ok, err := ans.take(asked)
-			if err != nil {
-				return ended(d, err), nil
-			}
-			if ok {
-				byName[s.Name] = r
-				continue
-			}
 			var blocked []string
 			waiting := false
 			for _, n := range s.Needs {
@@ -151,12 +143,34 @@ func (p *Plan) Next(results []Result) (Decision, error) {
 					blocked = append(blocked, n)
 				}
 			}
-			switch {
-			case len(blocked) > 0:
+			if len(blocked) > 0 {
+				// Decided here every time; one handed back is the same.
+				_, _, _ = ans.take(asked)
 				byName[s.Name] = asked.Answer(Result{Status: "skipped", Detail: "needs " + strings.Join(blocked, ", ")})
-			case !waiting:
-				d.Run = append(d.Run, asked)
+				continue
 			}
+			if waiting {
+				// Nothing it needs has finished, so nothing can answer it;
+				// a result that does is caught as one never asked for.
+				continue
+			}
+			// Handed what the steps it needs kept, now that they have. The
+			// step as resolved is what ran, and what its result answers.
+			resolved, err := resolve(s, byName)
+			if err != nil {
+				byName[s.Name] = asked.Answer(Result{Status: "skipped", Detail: err.Error()})
+				continue
+			}
+			asked.Step = resolved
+			r, ok, err := ans.take(asked)
+			if err != nil {
+				return ended(d, err), nil
+			}
+			if ok {
+				byName[s.Name] = r
+				continue
+			}
+			d.Run = append(d.Run, asked)
 		}
 	}
 	if err := ans.untaken(); err != nil {

@@ -121,3 +121,38 @@ func (s *Store) Check(ctx context.Context) error {
 	}
 	return nil
 }
+
+// Blobs are kept beside results, under blobs/, by the hash of their content.
+// They can be large, so they get longer than a result does.
+const blobTimeout = 10 * time.Minute
+
+func (s *Store) blob(hash string) string {
+	name := "blobs/" + hash[:2] + "/" + hash
+	if s.prefix != "" {
+		name = s.prefix + "/" + name
+	}
+	return name
+}
+
+// PutBlob stores file under hash, unless it is there already: a hash names
+// one content, so there is nothing to replace.
+func (s *Store) PutBlob(ctx context.Context, hash, file string) error {
+	ctx, cancel := context.WithTimeout(ctx, blobTimeout)
+	defer cancel()
+	if _, err := s.client.StatObject(ctx, s.bucket, s.blob(hash), minio.StatObjectOptions{}); err == nil {
+		return nil
+	}
+	if _, err := s.client.FPutObject(ctx, s.bucket, s.blob(hash), file, minio.PutObjectOptions{ContentType: "application/octet-stream"}); err != nil {
+		return fmt.Errorf("shared store: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetBlob(ctx context.Context, hash, file string) error {
+	ctx, cancel := context.WithTimeout(ctx, blobTimeout)
+	defer cancel()
+	if err := s.client.FGetObject(ctx, s.bucket, s.blob(hash), file, minio.GetObjectOptions{}); err != nil {
+		return fmt.Errorf("shared store: %w", err)
+	}
+	return nil
+}

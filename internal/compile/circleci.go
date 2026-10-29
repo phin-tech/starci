@@ -110,7 +110,7 @@ func gitPathspec(in string) string {
 }
 
 func circleJob(w *strings.Builder, s plan.Step, id string, o Options) error {
-	if err := bareRefusal(s); err != nil {
+	if err := refusal(s); err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "  %s:\n    machine:\n      image: ubuntu-2404:current\n    resource_class: %s\n    steps:\n      - checkout\n", id, o.RunsOn)

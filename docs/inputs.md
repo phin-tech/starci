@@ -148,6 +148,9 @@ does not have. The store is checked when a machine or a local run starts, so a
 wrong address or credential is an error then, not steps quietly running again.
 If it becomes unreachable later, steps run and their results are kept locally.
 
+What steps [keep](scripts.md#handing-files-on) is stored there too, under
+`blobs/`, so a step on one machine can be handed what a step on another kept.
+
 Results are keyed on the architecture as well as the image, so a pass on an
 arm64 laptop is never taken as a pass on an amd64 server.
 

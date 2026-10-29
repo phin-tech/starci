@@ -62,6 +62,8 @@ workflow says which apply:
   which could not be reached by name from the step's container. A pass is
   keyed on a service's image by name: a tag that moves does not run the job
   again, as it would on a machine.
+- A step that keeps or is handed [artifacts](scripts.md#handing-files-on) is
+  refused for now; an executable carries them.
 - Advanced scripts cannot be compiled to a workflow at all, or frozen into an executable: their steps are only known as
   they run.
 

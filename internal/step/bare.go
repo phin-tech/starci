@@ -78,6 +78,9 @@ func runBare(ctx context.Context, cfg Config, s plan.Step, co *checkout, root, c
 	if err != nil {
 		return failed("checkout failed: %v", err)
 	}
+	if err := giveArtifacts(ctx, cfg, s, co.workspace); err != nil {
+		return failed("%v", err)
+	}
 
 	home, tmp := filepath.Join(root, "home"), filepath.Join(root, "tmp")
 	for _, d := range []string{home, tmp} {
@@ -140,7 +143,7 @@ func runBare(ctx context.Context, cfg Config, s plan.Step, co *checkout, root, c
 	if ctx.Err() != nil {
 		return failed("cancelled")
 	}
-	return finish(ctx, cfg, s, resultKey, started, ran, log)
+	return finish(ctx, cfg, s, resultKey, started, ran, co.workspace, log)
 }
 
 // bareKey is key for a bare step, which a script asks to be reused with
@@ -159,6 +162,7 @@ func bareKey(s plan.Step, platform, content string, tools [][]string) string {
 	if s.Offline {
 		parts = append(parts, "offline")
 	}
+	parts = append(parts, artifactKey(s)...)
 	material, _ := json.Marshal(parts)
 	sum := sha256.Sum256(material)
 	return hex.EncodeToString(sum[:])

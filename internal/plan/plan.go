@@ -147,6 +147,12 @@ type Step struct {
 	// Absent from a plan that has none, so that a plan written before the
 	// field existed is unchanged.
 	Services []Service `json:"services,omitempty"`
+	// Keep are paths in the workspace kept when the step passes, as
+	// artifacts a later step can be handed.
+	Keep []string `json:"keep,omitempty"`
+	// Artifacts are written into the workspace before the step runs: a path
+	// there, and what to put at it.
+	Artifacts map[string]Pointer `json:"artifacts,omitempty"`
 }
 
 // Service is a container a step wants running beside it for as long as it
@@ -536,15 +542,16 @@ func (s *stepValue) Hash() (uint32, error) { return starlark.String(s.Name).Hash
 func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var name, image string
 	var run starlark.Value
-	var needs, inputs, tools, packages, services *starlark.List
-	var env, caches, on, prefer, avoid *starlark.Dict
+	var needs, inputs, tools, packages, services, keep *starlark.List
+	var env, caches, on, prefer, avoid, artifacts *starlark.Dict
 	var cacheArg starlark.Value
 	network := true
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
 		"name", &name, "run", &run, "image?", &image, "needs?", &needs, "env?", &env,
 		"inputs?", &inputs, "caches?", &caches, "cache?", &cacheArg,
 		"on?", &on, "prefer?", &prefer, "avoid?", &avoid, "tools?", &tools,
-		"packages?", &packages, "network?", &network, "services?", &services); err != nil {
+		"packages?", &packages, "network?", &network, "services?", &services,
+		"keep?", &keep, "artifacts?", &artifacts); err != nil {
 		return nil, err
 	}
 	if name == "" {
@@ -691,6 +698,9 @@ func stepBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 			}
 			s.Env[string(k)] = string(v)
 		}
+	}
+	if err := stepArtifacts(&s, keep, artifacts); err != nil {
+		return nil, err
 	}
 	if err := s.checkEnvironment(); err != nil {
 		return nil, err
@@ -991,6 +1001,10 @@ func validate(steps []Step) error {
 				return fmt.Errorf("step %q needs %q, which ci(ctx) did not return", s.Name, n)
 			}
 		}
+	}
+
+	if err := checkArtifacts(steps); err != nil {
+		return err
 	}
 
 	const (

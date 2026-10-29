@@ -2,7 +2,8 @@
 
 | | |
 |---|---|
-| `step(name, run, image = "", needs = [], env = {}, inputs = ["."], caches = {}, cache = True, on = {}, prefer = {}, avoid = {}, tools = [], packages = [], network = True, services = [])` | Declare a step. `run` is a shell command, or a list of a program and its arguments run without a shell. A step with no `image` is a [bare step](bare.md). Returns a handle usable in another step's `needs`. |
+| `step(name, run, image = "", needs = [], env = {}, inputs = ["."], caches = {}, cache = True, on = {}, prefer = {}, avoid = {}, tools = [], packages = [], network = True, services = [], keep = [], artifacts = {})` | Declare a step. `run` is a shell command, or a list of a program and its arguments run without a shell. A step with no `image` is a [bare step](bare.md). `keep` and `artifacts` hand files from one step to another: see [Handing files on](#handing-files-on). Returns a handle usable in another step's `needs`. |
+| `artifact(step, path)` | In `ci(ctx)`, what `step` will keep at `path`, for another step's `artifacts`. |
 | `service(name, image, env = {}, args = [], ready = "", ready_within = 120, files = {})` | Declare a container to run beside a step, for its `services`. |
 | `ctx.repo`, `ctx.sha`, `ctx.ref` | What is being built. `ref` is the branch. |
 | `ctx.event` | Why the run started: `"push"`, `"tag"`, `"pull_request"`, `"schedule"` or `"manual"`. |
@@ -24,6 +25,43 @@ Nothing else. A script cannot read files, reach the network, read the clock or
 and inputs always give the same plan, so a plan can be computed in one place
 and executed in another, and a script from any repository is safe to evaluate.
 
+
+## Handing files on
+
+A step sees its inputs and nothing else, so what one step builds reaches
+another only when the script says so. `keep` names paths in the workspace to
+keep when the step passes; `artifacts` puts what another step kept at a path
+in this one's workspace, before it runs:
+
+```python
+def ci(ctx):
+    build = step("build", image = "golang:1.23", run = "go build -o out/app .", keep = ["out/app"])
+    return [
+        build,
+        step("smoke", image = "debian:12", run = "./app --version",
+             artifacts = {"app": artifact(build, "out/app")}),
+    ]
+```
+
+In `ci(ctx)`, `artifact(build, "out/app")` stands for what `build` will keep,
+and makes `smoke` need `build`. In `pipeline(ctx)`, a result carries what its
+step kept, and that is what is handed on:
+
+```python
+def pipeline(ctx):
+    build = run(step("build", image = "golang:1.23", run = "go build -o out/app .", keep = ["out/app"]))
+    run(step("smoke", image = "debian:12", run = "./app --version",
+             artifacts = {"app": build.artifacts["out/app"]}))
+```
+
+A kept path can be a file or a directory; executable files stay executable.
+What is kept goes in the store by the hash of its content, and a step handed
+it is keyed on that hash: if `build` runs again and makes the same binary,
+`smoke` is not run again. An artifact may not land on a file the step's
+inputs gave it, and a step that passes without making a path it keeps fails.
+Shared between machines through the same store as results
+([Sharing results between machines](inputs.md#sharing-results-between-machines)).
+Compiled workflows do not carry artifacts yet.
 
 ## Two modes
 
@@ -54,7 +92,7 @@ def pipeline(ctx):
 |---|---|
 | `run(step, allow_failure = False)` | Run one step and return its result. |
 | `parallel(steps, allow_failure = False)` | Run several together; results come back in the same order. |
-| `result.ok`, `.status`, `.output`, `.name`, `.number`, `.seconds`, `.cached`, `.machine`, `.detail` | What a result carries. `output` is what the step printed, up to 64 KB. `number` is which step of the run it was, counted in the order the script asked: two steps may share a name, never a number. |
+| `result.ok`, `.status`, `.output`, `.name`, `.number`, `.seconds`, `.cached`, `.machine`, `.detail`, `.artifacts` | What a result carries. `output` is what the step printed, up to 64 KB. `artifacts` is what the step kept, by path, for another step's `artifacts`. `number` is which step of the run it was, counted in the order the script asked: two steps may share a name, never a number. |
 | `fail(message)` | End the run as failed. |
 
 A step that fails ends the run, unless `allow_failure` hands the script the

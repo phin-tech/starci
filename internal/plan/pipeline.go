@@ -48,6 +48,8 @@ type Result struct {
 	Machine string `json:"machine"`
 	Cached  bool   `json:"cached"`
 	Detail  string `json:"detail"`
+	// Artifacts are what the step kept, by the path it kept them at.
+	Artifacts map[string]Pointer `json:"artifacts,omitempty"`
 }
 
 func (r Result) ok() bool { return r.Status == "passed" }
@@ -121,6 +123,7 @@ func predeclared() starlark.StringDict {
 		"step":     starlark.NewBuiltin("step", stepBuiltin),
 		"tool":     starlark.NewBuiltin("tool", toolBuiltin),
 		"service":  starlark.NewBuiltin("service", serviceBuiltin),
+		"artifact": starlark.NewBuiltin("artifact", artifactBuiltin),
 		"run":      starlark.NewBuiltin("run", runBuiltin),
 		"parallel": starlark.NewBuiltin("parallel", parallelBuiltin),
 		"schedule": starlark.NewBuiltin("schedule", scheduleBuiltin),
@@ -290,14 +293,15 @@ func execute(thread *starlark.Thread, fn string, steps []Step, allowFailure bool
 
 func resultValue(r Result) starlark.Value {
 	return starlarkstruct.FromStringDict(starlark.String("result"), starlark.StringDict{
-		"number":  starlark.MakeInt(r.Number),
-		"name":    starlark.String(r.Name),
-		"ok":      starlark.Bool(r.ok()),
-		"status":  starlark.String(r.Status),
-		"output":  starlark.String(r.Output),
-		"seconds": starlark.Float(r.Seconds),
-		"cached":  starlark.Bool(r.Cached),
-		"machine": starlark.String(r.Machine),
-		"detail":  starlark.String(r.Detail),
+		"number":    starlark.MakeInt(r.Number),
+		"name":      starlark.String(r.Name),
+		"ok":        starlark.Bool(r.ok()),
+		"status":    starlark.String(r.Status),
+		"output":    starlark.String(r.Output),
+		"seconds":   starlark.Float(r.Seconds),
+		"cached":    starlark.Bool(r.Cached),
+		"machine":   starlark.String(r.Machine),
+		"detail":    starlark.String(r.Detail),
+		"artifacts": artifactsValue(r.Artifacts),
 	})
 }

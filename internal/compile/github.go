@@ -146,7 +146,7 @@ func jobIDs(steps []plan.Step) map[string]string {
 }
 
 func job(w *strings.Builder, s plan.Step, ids map[string]string, o Options) error {
-	if err := bareRefusal(s); err != nil {
+	if err := refusal(s); err != nil {
 		return err
 	}
 	id := ids[s.Name]

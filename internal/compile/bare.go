@@ -46,6 +46,14 @@ func bareRun(s plan.Step, toolDirs []string, caches map[string]string) []string 
 	return append(lines, run+`  /bin/sh -c "$STARCI_RUN"`)
 }
 
+// refusal says why a step cannot be compiled, if it cannot.
+func refusal(s plan.Step) error {
+	if len(s.Keep) > 0 || len(s.Artifacts) > 0 {
+		return fmt.Errorf("step %q: artifacts are not compiled to a workflow yet; run the script with starci run, or a compiled executable", s.Name)
+	}
+	return bareRefusal(s)
+}
+
 // bareRefusal says why a bare step cannot be compiled, if it cannot.
 func bareRefusal(s plan.Step) error {
 	if s.Bare() && s.Offline {

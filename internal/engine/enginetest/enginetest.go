@@ -43,6 +43,7 @@ func Run(t *testing.T, eng engine.Engine) {
 	t.Run("a step that gave up the network has none", func(t *testing.T) { offline(t, eng, repo) })
 	t.Run("a step reaches the services it asked for, and they end with it", func(t *testing.T) { services(t, eng, repo) })
 	t.Run("a bare step runs on a machine that runs them", func(t *testing.T) { bare(t, eng, repo) })
+	t.Run("a step is handed what another kept, in either kind of script", func(t *testing.T) { artifacts(t, eng, repo) })
 	t.Run("an advanced script acts on what its steps return", func(t *testing.T) { advanced(t, eng, repo) })
 	t.Run("an advanced script that fails says why", func(t *testing.T) { advancedFailure(t, eng, repo) })
 	t.Run("what the engine says it can do, it does", func(t *testing.T) { claims(t, eng, repo) })
@@ -162,6 +163,27 @@ def ci(ctx):
 	}
 	if d := step(result, "after bad").Detail; !strings.Contains(d, "bad") {
 		t.Errorf("the skipped step's detail is %q; want it to name what it was waiting on", d)
+	}
+}
+
+func artifacts(t *testing.T, eng engine.Engine, r repo) {
+	build := "mkdir -p out && printf '#!/bin/sh\\necho made\\n' > out/app && chmod +x out/app"
+	for _, src := range []string{helpers + `
+def ci(ctx):
+    build = sh("build", "` + build + `", keep = ["out"], cache = False)
+    return [build, sh("use", "test \"$(./bin/app)\" = made", artifacts = {"bin": artifact(build, "out")}, cache = False)]
+`, helpers + `
+def pipeline(ctx):
+    build = run(sh("build", "` + build + `", keep = ["out"], cache = False))
+    run(sh("use", "test \"$(./bin/app)\" = made", artifacts = {"bin": build.artifacts["out"]}, cache = False))
+`} {
+		result := execute(t, eng, r, src)
+		if !result.OK {
+			t.Fatalf("results: %s (%s%s%s)", statuses(result), result.Error, step(result, "build").Detail, step(result, "use").Detail)
+		}
+		if step(result, "build").Artifacts["out"].Hash == "" {
+			t.Errorf("build's result carries no pointer to what it kept: %+v", step(result, "build"))
+		}
 	}
 }
 

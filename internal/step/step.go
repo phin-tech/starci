@@ -210,6 +210,9 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 	if err != nil {
 		return failed("checkout failed: %v", err)
 	}
+	if err := giveArtifacts(ctx, cfg, s, co.workspace); err != nil {
+		return failed("%v", err)
+	}
 
 	runImage := s.Image
 	if len(s.Packages) > 0 {
@@ -295,7 +298,17 @@ func Run(ctx context.Context, cfg Config, cloneURL, sha string, s plan.Step, log
 			}
 		}
 	}
-	return finish(ctx, cfg, s, resultKey, started, ran, log)
+	return finish(ctx, cfg, s, resultKey, started, ran, co.workspace, log)
+}
+
+// giveArtifacts writes the artifacts s is handed into its workspace.
+func giveArtifacts(ctx context.Context, cfg Config, s plan.Step, workspace string) error {
+	if len(s.Artifacts) == 0 {
+		return nil
+	}
+	done := phase(ctx, "fetch the artifacts")
+	defer done()
+	return give(ctx, cfg.blobs(), workspace, s.Artifacts)
 }
 
 // reuse returns an earlier pass of the step, if it may have one.
@@ -389,7 +402,7 @@ func streamUntil(cmd *exec.Cmd, log func(string), g *guard) (ran, error) {
 
 // finish turns how a command ran into the step's result, and remembers a
 // pass.
-func finish(ctx context.Context, cfg Config, s plan.Step, resultKey string, started time.Time, r ran, log func(string)) plan.Result {
+func finish(ctx context.Context, cfg Config, s plan.Step, resultKey string, started time.Time, r ran, workspace string, log func(string)) plan.Result {
 	seconds := float64(time.Since(started).Round(100*time.Millisecond)) / float64(time.Second)
 	if r.err != nil {
 		code := -1
@@ -402,6 +415,16 @@ func finish(ctx context.Context, cfg Config, s plan.Step, resultKey string, star
 	}
 
 	result := plan.Result{Name: s.Name, Status: "passed", Seconds: seconds, Machine: cfg.Machine, Output: r.output}
+	if len(s.Keep) > 0 {
+		done := phase(ctx, "keep the artifacts")
+		kept, err := keep(ctx, cfg.blobs(), workspace, s.Keep)
+		done()
+		if err != nil {
+			result.Status, result.Detail = "failed", err.Error()
+			return result
+		}
+		result.Artifacts = kept
+	}
 	if s.Cache {
 		// Only passes are remembered. A failure is always worth running again.
 		// Not being able to remember one is worth saying, but the step passed.
@@ -572,6 +595,7 @@ func key(s plan.Step, img image, content string, tools [][]string, services [][]
 	if len(services) > 0 {
 		parts = append(parts, "services", services)
 	}
+	parts = append(parts, artifactKey(s)...)
 	material, _ := json.Marshal(parts)
 	sum := sha256.Sum256(material)
 	return hex.EncodeToString(sum[:])

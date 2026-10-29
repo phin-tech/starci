@@ -328,6 +328,11 @@ def ci(ctx):
 	if err != nil {
 		t.Fatalf("drive: %v", err)
 	}
+	// Handing back everything Next said, skipped steps included, is the
+	// same as handing back only what ran.
+	if again, err := p.Next(results); err != nil || !again.Done || again.Error != "" {
+		t.Errorf("given its own results back, Next says %+v, %v", again, err)
+	}
 	if got, want := r.trace(), "ok+bad > after-ok"; got != want {
 		t.Errorf("ran %s, want %s", got, want)
 	}
