@@ -9,9 +9,12 @@
 #     [-p event=push|tag|pull_request|schedule|manual -p ref=BRANCH -p tag=NAME -p fork=true]
 #
 # What does not carry over:
-#  - A step is not skipped because it passed before with the same inputs: every
-#    step runs every time. Remembering passes needs a starci command to ask the
-#    shared store, which does not exist yet.
+#  - A step with cache = True is skipped when it passed before with the same
+#    inputs, if the `store` parameter names a shared store (STARCI_STORE, as
+#    for a machine); without one every step runs every time. The init image
+#    must then hold starci, and the pods need the store's credentials from the
+#    cluster. A pass is keyed on the step's image by name: a tag that moves
+#    does not run it again.
 #  - A step's caches (check, test) are directories of the pod and are gone when
 #    it ends.
 #  - A step that fails fails its pod and is not run again; a pod lost to its
@@ -38,6 +41,8 @@ spec:
         value: ""
       - name: "fork"
         value: "false"
+      - name: "store"
+        value: ""
   templates:
     - name: "ci"
       dag:
@@ -50,6 +55,8 @@ spec:
               volumes:
                 - name: "workspace"
                   emptyDir: {}
+                - name: "starci"
+                  emptyDir: {}
                 - name: "cache-bun"
                   emptyDir: {}
               initContainers:
@@ -65,8 +72,15 @@ spec:
                       git init -q .
                       git remote add origin "$STARCI_CLONE_URL"
                       git sparse-checkout set --no-cone '/bun.lock' '/index.ts' '/omp.ts' '/package.json' '/rules' '/src' '/test' '/tsconfig.json'
-                      git fetch -q --depth 1 origin "$STARCI_SHA"
+                      git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
                       git checkout -q FETCH_HEAD
+                      if [ -n "${STARCI_STORE:-}" ]; then
+                        mkdir -p /opt/starci
+                        cp "$(command -v starci)" /opt/starci/starci
+                        printf '%s' "$STARCI_STEP" | starci pass key > /opt/starci/key
+                        if starci pass get "$(cat /opt/starci/key)"; then touch /opt/starci/hit; chmod -R a+rX /opt/starci; exit 0; fi
+                        chmod -R a+rX /opt/starci
+                      fi
                       rm -rf .git
                       chmod -R a+rwX /workspace
                       chmod -R a+rX /opt/starci/tools 2>/dev/null || true
@@ -75,9 +89,19 @@ spec:
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
+                    - name: "STARCI_STEP"
+                      value: "{\"name\":\"check\",\"image\":\"oven/bun:1\",\"run\":\"bun install --frozen-lockfile && bun run check\",\"needs\":[],\"env\":{},\"inputs\":[\"bun.lock\",\"index.ts\",\"omp.ts\",\"package.json\",\"rules\",\"src\",\"test\",\"tsconfig.json\"],\"caches\":{\"bun\":\"/root/.bun/install/cache\"},\"cache\":true,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
+                    - name: "STARCI_ARCH"
+                      value: "amd64"
+                    - name: "STARCI_STORE"
+                      value: "{{workflow.parameters.store}}"
+                    - name: "STARCI_STATE"
+                      value: "/tmp/starci-state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
+                    - name: "starci"
+                      mountPath: "/opt/starci"
               container:
                 name: "main"
                 image: "oven/bun:1"
@@ -86,12 +110,29 @@ spec:
                   - "sh"
                   - "-c"
                 args:
-                  - "bun install --frozen-lockfile && bun run check"
+                  - |-
+                    if [ -e /opt/starci/hit ]; then echo 'starci: passed before with the same inputs; not run again'; exit 0; fi
+                    (
+                    bun install --frozen-lockfile && bun run check
+                    )
+                    rc=$?
+                    if [ "$rc" -eq 0 ] && [ -e /opt/starci/key ]; then
+                      /opt/starci/starci pass put "$(cat /opt/starci/key)" 'check' || echo 'starci: could not record the pass' >&2
+                    fi
+                    exit $rc
+                env:
+                  - name: "STARCI_STORE"
+                    value: "{{workflow.parameters.store}}"
+                  - name: "STARCI_STATE"
+                    value: "/tmp/starci-state"
                 volumeMounts:
                   - name: "workspace"
                     mountPath: "/workspace"
                   - name: "cache-bun"
                     mountPath: "/root/.bun/install/cache"
+                  - name: "starci"
+                    mountPath: "/opt/starci"
+                    readOnly: true
           - name: "test"
             inline:
               retryStrategy:
@@ -100,6 +141,8 @@ spec:
               volumes:
                 - name: "workspace"
                   emptyDir: {}
+                - name: "starci"
+                  emptyDir: {}
                 - name: "cache-bun"
                   emptyDir: {}
               initContainers:
@@ -115,8 +158,15 @@ spec:
                       git init -q .
                       git remote add origin "$STARCI_CLONE_URL"
                       git sparse-checkout set --no-cone '/bun.lock' '/index.ts' '/omp.ts' '/package.json' '/rules' '/src' '/test' '/tsconfig.json'
-                      git fetch -q --depth 1 origin "$STARCI_SHA"
+                      git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
                       git checkout -q FETCH_HEAD
+                      if [ -n "${STARCI_STORE:-}" ]; then
+                        mkdir -p /opt/starci
+                        cp "$(command -v starci)" /opt/starci/starci
+                        printf '%s' "$STARCI_STEP" | starci pass key > /opt/starci/key
+                        if starci pass get "$(cat /opt/starci/key)"; then touch /opt/starci/hit; chmod -R a+rX /opt/starci; exit 0; fi
+                        chmod -R a+rX /opt/starci
+                      fi
                       rm -rf .git
                       chmod -R a+rwX /workspace
                       chmod -R a+rX /opt/starci/tools 2>/dev/null || true
@@ -125,9 +175,19 @@ spec:
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
+                    - name: "STARCI_STEP"
+                      value: "{\"name\":\"test\",\"image\":\"oven/bun:1\",\"run\":\"bun install --frozen-lockfile && bun test\",\"needs\":[],\"env\":{},\"inputs\":[\"bun.lock\",\"index.ts\",\"omp.ts\",\"package.json\",\"rules\",\"src\",\"test\",\"tsconfig.json\"],\"caches\":{\"bun\":\"/root/.bun/install/cache\"},\"cache\":true,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
+                    - name: "STARCI_ARCH"
+                      value: "amd64"
+                    - name: "STARCI_STORE"
+                      value: "{{workflow.parameters.store}}"
+                    - name: "STARCI_STATE"
+                      value: "/tmp/starci-state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
+                    - name: "starci"
+                      mountPath: "/opt/starci"
               container:
                 name: "main"
                 image: "oven/bun:1"
@@ -136,9 +196,26 @@ spec:
                   - "sh"
                   - "-c"
                 args:
-                  - "bun install --frozen-lockfile && bun test"
+                  - |-
+                    if [ -e /opt/starci/hit ]; then echo 'starci: passed before with the same inputs; not run again'; exit 0; fi
+                    (
+                    bun install --frozen-lockfile && bun test
+                    )
+                    rc=$?
+                    if [ "$rc" -eq 0 ] && [ -e /opt/starci/key ]; then
+                      /opt/starci/starci pass put "$(cat /opt/starci/key)" 'test' || echo 'starci: could not record the pass' >&2
+                    fi
+                    exit $rc
+                env:
+                  - name: "STARCI_STORE"
+                    value: "{{workflow.parameters.store}}"
+                  - name: "STARCI_STATE"
+                    value: "/tmp/starci-state"
                 volumeMounts:
                   - name: "workspace"
                     mountPath: "/workspace"
                   - name: "cache-bun"
                     mountPath: "/root/.bun/install/cache"
+                  - name: "starci"
+                    mountPath: "/opt/starci"
+                    readOnly: true

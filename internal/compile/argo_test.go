@@ -157,3 +157,24 @@ func TestArgoOwnValidatorAcceptsTheExamples(t *testing.T) {
 		t.Fatalf("%v\n%s", err, out)
 	}
 }
+
+func TestArgoRemembersPassesInTheSharedStore(t *testing.T) {
+	out := compileArgo(t, `
+def ci(ctx):
+    return [
+        step("build", image = "alpine:3", run = "make"),
+        step("always", image = "alpine:3", run = "date", cache = False),
+    ]
+`)
+	wants(t, out,
+		`name: "store"`,
+		`starci pass key > /opt/starci/key`,
+		`starci pass get`,
+		`/opt/starci/starci pass put`,
+		`value: "{{workflow.parameters.store}}"`)
+	// Only the step that asks to be reused has any of it.
+	i := strings.Index(out, `- name: "always"`)
+	if i < 0 || strings.Contains(out[i:], "pass put") {
+		t.Errorf("a step with cache = False records passes:\n%s", out[i:])
+	}
+}

@@ -1,6 +1,8 @@
 package compile
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"path"
 	"regexp"
@@ -59,7 +61,7 @@ func Argo(filename string, src []byte, o Options) (string, error) {
 		}
 	}
 	if remembers {
-		notes = append(notes, "A step is not skipped because it passed before with the same inputs: every step runs every time. Remembering passes needs a starci command to ask the shared store, which does not exist yet.")
+		notes = append(notes, "A step with cache = True is skipped when it passed before with the same inputs, if the `store` parameter names a shared store (STARCI_STORE, as for a machine); without one every step runs every time. The init image must then hold starci, and the pods need the store's credentials from the cluster. A pass is keyed on the step's image by name: a tag that moves does not run it again.")
 	}
 	if len(placed) > 0 {
 		notes = append(notes, fmt.Sprintf("A step's caches (%s) are directories of the pod and are gone when it ends.", strings.Join(placed, ", ")))
@@ -98,7 +100,7 @@ func Argo(filename string, src []byte, o Options) (string, error) {
 			{"entrypoint", "ci"},
 			{"arguments", obj{{"parameters", []any{
 				param("clone_url", ""), param("sha", ""),
-				param("event", "push"), param("ref", ""), param("tag", ""), param("schedule", ""), param("fork", "false"),
+				param("event", "push"), param("ref", ""), param("tag", ""), param("schedule", ""), param("fork", "false"), param("store", ""),
 			}}}},
 			{"templates", []any{obj{
 				{"name", "ci"},
@@ -162,7 +164,7 @@ func argoRefusal(s plan.Step, o Options) error {
 			return no(fmt.Sprintf("gives service %q files from the repository: a pod has nowhere to put them yet", sv.Name))
 		}
 	}
-	texts := []string{s.Run, strings.Join(s.Argv, " ")}
+	texts := []string{s.Name, s.Run, strings.Join(s.Argv, " ")}
 	for _, v := range s.Env {
 		texts = append(texts, v)
 	}
@@ -252,8 +254,12 @@ func argoTask(s plan.Step, ids map[string]string, cond string, o Options) (any, 
 	// What the pod holds.
 	volumes := []any{obj{{"name", "workspace"}, {"emptyDir", obj{}}}}
 	mounts := []any{obj{{"name", "workspace"}, {"mountPath", "/workspace"}}}
-	if len(s.Tools) > 0 {
-		volumes = append(volumes, obj{{"name", "tools"}, {"emptyDir", obj{}}})
+	// /opt/starci holds what the init container leaves for the main one: the
+	// tools, and for a step that remembers its passes the key, a mark that it
+	// has passed, and starci to record a new pass with.
+	shared := len(s.Tools) > 0 || s.Cache
+	if shared {
+		volumes = append(volumes, obj{{"name", "starci"}, {"emptyDir", obj{}}})
 	}
 	var cacheMounts []any
 	for _, name := range sortedKeys(s.Caches) {
@@ -273,15 +279,28 @@ func argoTask(s plan.Step, ids map[string]string, cond string, o Options) (any, 
 		script = append(script, "git sparse-checkout set --no-cone "+strings.Join(patterns, " "))
 	}
 	script = append(script,
-		`git fetch -q --depth 1 origin "$STARCI_SHA"`,
-		"git checkout -q FETCH_HEAD",
+		`git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"`,
+		"git checkout -q FETCH_HEAD")
+	if s.Cache {
+		// Has this passed before with these inputs? If so there is nothing
+		// more to set up: the main container sees the mark and ends.
+		script = append(script,
+			`if [ -n "${STARCI_STORE:-}" ]; then`,
+			"  mkdir -p /opt/starci",
+			`  cp "$(command -v starci)" /opt/starci/starci`,
+			`  printf '%s' "$STARCI_STEP" | starci pass key > /opt/starci/key`,
+			`  if starci pass get "$(cat /opt/starci/key)"; then touch /opt/starci/hit; chmod -R a+rX /opt/starci; exit 0; fi`,
+			"  chmod -R a+rX /opt/starci",
+			"fi")
+	}
+	script = append(script,
 		// The commit is out of the step's reach; the step is given its inputs.
 		"rm -rf .git",
 		"chmod -R a+rwX /workspace")
 	var pathDirs []string
 	prepareMounts := []any{obj{{"name", "workspace"}, {"mountPath", "/workspace"}}}
-	if len(s.Tools) > 0 {
-		prepareMounts = append(prepareMounts, obj{{"name", "tools"}, {"mountPath", "/opt/starci/tools"}})
+	if shared {
+		prepareMounts = append(prepareMounts, obj{{"name", "starci"}, {"mountPath", "/opt/starci"}})
 	}
 	for _, t := range s.Tools {
 		sum, ok := t.Sum("linux/" + o.Arch)
@@ -298,15 +317,30 @@ func argoTask(s plan.Step, ids map[string]string, cond string, o Options) (any, 
 		}
 	}
 	script = append(script, "chmod -R a+rX /opt/starci/tools 2>/dev/null || true")
+	prepareEnv := []any{
+		obj{{"name", "STARCI_CLONE_URL"}, {"value", "{{workflow.parameters.clone_url}}"}},
+		obj{{"name", "STARCI_SHA"}, {"value", "{{workflow.parameters.sha}}"}},
+	}
+	storeEnv := []any{
+		obj{{"name", "STARCI_STORE"}, {"value", "{{workflow.parameters.store}}"}},
+		obj{{"name", "STARCI_STATE"}, {"value", "/tmp/starci-state"}},
+	}
+	if s.Cache {
+		embedded := s
+		embedded.Image = image
+		stepJSON, err := jsonText(embedded)
+		if err != nil {
+			return nil, err
+		}
+		prepareEnv = append(prepareEnv, obj{{"name", "STARCI_STEP"}, {"value", stepJSON}}, obj{{"name", "STARCI_ARCH"}, {"value", o.Arch}})
+		prepareEnv = append(prepareEnv, storeEnv...)
+	}
 	inits := []any{obj{
 		{"name", "starci-prepare"},
 		{"image", o.InitImage},
 		{"command", strs([]string{"sh", "-c"})},
 		{"args", strs([]string{strings.Join(script, "\n")})},
-		{"env", []any{
-			obj{{"name", "STARCI_CLONE_URL"}, {"value", "{{workflow.parameters.clone_url}}"}},
-			obj{{"name", "STARCI_SHA"}, {"value", "{{workflow.parameters.sha}}"}},
-		}},
+		{"env", prepareEnv},
 		{"volumeMounts", prepareMounts},
 	}}
 
@@ -359,14 +393,27 @@ func argoTask(s plan.Step, ids map[string]string, cond string, o Options) (any, 
 		}
 		env = append(env, obj{{"name", k}, {"value", s.Env[k]}})
 	}
-	switch {
-	case len(pathDirs) > 0:
+	var setPath string
+	if len(pathDirs) > 0 {
 		base := "$PATH"
 		if p, ok := s.Env["PATH"]; ok {
 			base = shq(p)
 		}
-		line := "PATH=\"" + strings.Join(pathDirs, ":") + ":\"" + base + "; export PATH\n" + execCommand(s)
+		setPath = "PATH=\"" + strings.Join(pathDirs, ":") + ":\"" + base + "; export PATH\n"
+	}
+	switch {
+	case s.Cache:
+		// Ends at once if the init container found a pass; otherwise runs the
+		// step and, if it passed, records that.
+		line := "if [ -e /opt/starci/hit ]; then echo 'starci: passed before with the same inputs; not run again'; exit 0; fi\n" +
+			setPath + "(\n" + execCommand(s) + "\n)\nrc=$?\n" +
+			"if [ \"$rc\" -eq 0 ] && [ -e /opt/starci/key ]; then\n" +
+			"  /opt/starci/starci pass put \"$(cat /opt/starci/key)\" " + shq(s.Name) + " || echo 'starci: could not record the pass' >&2\n" +
+			"fi\nexit $rc"
 		main = append(main, kv{"command", strs([]string{"sh", "-c"})}, kv{"args", strs([]string{line})})
+		env = append(env, storeEnv...)
+	case len(pathDirs) > 0:
+		main = append(main, kv{"command", strs([]string{"sh", "-c"})}, kv{"args", strs([]string{setPath + execCommand(s)})})
 	case len(s.Argv) > 0:
 		main = append(main, kv{"command", strs(s.Argv)})
 	default:
@@ -376,8 +423,8 @@ func argoTask(s plan.Step, ids map[string]string, cond string, o Options) (any, 
 		main = append(main, kv{"env", env})
 	}
 	all := append(append([]any{}, mounts...), cacheMounts...)
-	if len(s.Tools) > 0 {
-		all = append(all, obj{{"name", "tools"}, {"mountPath", "/opt/starci/tools"}, {"readOnly", true}})
+	if shared {
+		all = append(all, obj{{"name", "starci"}, {"mountPath", "/opt/starci"}, {"readOnly", true}})
 	}
 	main = append(main, kv{"volumeMounts", all})
 	tmpl = append(tmpl, kv{"container", main})
@@ -385,12 +432,25 @@ func argoTask(s plan.Step, ids map[string]string, cond string, o Options) (any, 
 	return append(task, kv{"inline", tmpl}), nil
 }
 
-// execCommand is the step's command after PATH has been set up in a shell.
+// execCommand is the step's command, to follow the shell that sets PATH up or
+// to sit in a subshell. A command given as a list is run as the shell's last
+// command, without a shell of its own.
 func execCommand(s plan.Step) string {
 	if len(s.Argv) > 0 {
 		return "exec " + s.Command()
 	}
 	return s.Run
+}
+
+// jsonText is v as JSON, without HTML escaping.
+func jsonText(v any) (string, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(b.String(), "\n"), nil
 }
 
 // argoAffinity says where a step would like to be and must not be: `prefer`

@@ -12,9 +12,12 @@
 #  - The script decides by which files a commit changed. A workflow file
 #    cannot, so it does what the script does when nothing is known about the
 #    changes, on every run.
-#  - A step is not skipped because it passed before with the same inputs: every
-#    step runs every time. Remembering passes needs a starci command to ask the
-#    shared store, which does not exist yet.
+#  - A step with cache = True is skipped when it passed before with the same
+#    inputs, if the `store` parameter names a shared store (STARCI_STORE, as
+#    for a machine); without one every step runs every time. The init image
+#    must then hold starci, and the pods need the store's credentials from the
+#    cluster. A pass is keyed on the step's image by name: a tag that moves
+#    does not run it again.
 #  - A step that fails fails its pod and is not run again; a pod lost to its
 #    node is tried again, twice. Steps that need a failed step are omitted by
 #    Argo, not skipped.
@@ -39,6 +42,8 @@ spec:
         value: ""
       - name: "fork"
         value: "false"
+      - name: "store"
+        value: ""
   templates:
     - name: "ci"
       dag:
@@ -50,6 +55,8 @@ spec:
                 retryPolicy: "OnError"
               volumes:
                 - name: "workspace"
+                  emptyDir: {}
+                - name: "starci"
                   emptyDir: {}
               initContainers:
                 - name: "starci-prepare"
@@ -63,8 +70,15 @@ spec:
                       cd /workspace
                       git init -q .
                       git remote add origin "$STARCI_CLONE_URL"
-                      git fetch -q --depth 1 origin "$STARCI_SHA"
+                      git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
                       git checkout -q FETCH_HEAD
+                      if [ -n "${STARCI_STORE:-}" ]; then
+                        mkdir -p /opt/starci
+                        cp "$(command -v starci)" /opt/starci/starci
+                        printf '%s' "$STARCI_STEP" | starci pass key > /opt/starci/key
+                        if starci pass get "$(cat /opt/starci/key)"; then touch /opt/starci/hit; chmod -R a+rX /opt/starci; exit 0; fi
+                        chmod -R a+rX /opt/starci
+                      fi
                       rm -rf .git
                       chmod -R a+rwX /workspace
                       chmod -R a+rX /opt/starci/tools 2>/dev/null || true
@@ -73,9 +87,19 @@ spec:
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
+                    - name: "STARCI_STEP"
+                      value: "{\"name\":\"test\",\"image\":\"python:3.13-slim\",\"run\":\"pip install -e . && pytest -q\",\"needs\":[],\"env\":{},\"inputs\":[\".\"],\"caches\":{},\"cache\":true,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
+                    - name: "STARCI_ARCH"
+                      value: "amd64"
+                    - name: "STARCI_STORE"
+                      value: "{{workflow.parameters.store}}"
+                    - name: "STARCI_STATE"
+                      value: "/tmp/starci-state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
+                    - name: "starci"
+                      mountPath: "/opt/starci"
               container:
                 name: "main"
                 image: "python:3.13-slim"
@@ -84,7 +108,24 @@ spec:
                   - "sh"
                   - "-c"
                 args:
-                  - "pip install -e . && pytest -q"
+                  - |-
+                    if [ -e /opt/starci/hit ]; then echo 'starci: passed before with the same inputs; not run again'; exit 0; fi
+                    (
+                    pip install -e . && pytest -q
+                    )
+                    rc=$?
+                    if [ "$rc" -eq 0 ] && [ -e /opt/starci/key ]; then
+                      /opt/starci/starci pass put "$(cat /opt/starci/key)" 'test' || echo 'starci: could not record the pass' >&2
+                    fi
+                    exit $rc
+                env:
+                  - name: "STARCI_STORE"
+                    value: "{{workflow.parameters.store}}"
+                  - name: "STARCI_STATE"
+                    value: "/tmp/starci-state"
                 volumeMounts:
                   - name: "workspace"
                     mountPath: "/workspace"
+                  - name: "starci"
+                    mountPath: "/opt/starci"
+                    readOnly: true

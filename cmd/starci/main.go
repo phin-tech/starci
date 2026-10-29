@@ -45,7 +45,8 @@ const usage = `usage:
   starci validate [--file .ci.star] [--arch amd64,arm64]
   starci next   CHECKOUT [--sha SHA] [--file FILE] [--clone-url URL] < what is done so far
   starci step   [--bare[=false]] [--bare-image IMAGE] < a step next asked for
-  starci sweep  [MACHINE]`
+  starci sweep  [MACHINE]
+  starci pass   key [DIR] < step | get KEY | put KEY [NAME]`
 
 func main() {
 	// Before anything else, even a script this executable carries: a
@@ -85,6 +86,8 @@ func main() {
 		err = stepCmd(os.Args[2:])
 	case "sweep":
 		err = sweepCmd(os.Args[2:])
+	case "pass":
+		err = passCmd(os.Args[2:])
 	default:
 		die(usage)
 	}

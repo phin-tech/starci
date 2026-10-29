@@ -9,7 +9,8 @@ container type, so `restartPolicy: Always` and `startupProbe` are accepted;
 `retryPolicy: OnError` exists. Argo's own strict decoder and validator accept
 every file produced. **Not verified:** that a cluster runs it, in particular
 that Argo's executor finishes a pod with a native sidecar still running.
-**Not built:** remembered passes (needs a `starci` command to ask the store),
+Passes work through `starci pass key|get|put` and a `store` parameter (key checked
+locally against a real git remote; the pod wiring not run). **Not built:**
 artifacts, a service's `files`.
 
 ## Decided

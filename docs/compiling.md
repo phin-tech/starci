@@ -104,7 +104,7 @@ a pod that runs in the step's own image, so nothing needs Docker:
 
 - an init container, from `--init-image`, checks out only the step's inputs
   (the commit is out of the step's reach) and fetches its tools by checksum.
-  starci names no image: it needs `git`, `curl`, `tar` and `unzip`, and the
+  starci names no image: it needs `git`, `curl`, `tar` and `unzip` (and starci, for passes), and the
   repository must allow fetching a commit by its hash;
 - a step's [services](scripts.md) are native Kubernetes sidecars (init
   containers that keep running), held to their `ready` command by a startup
@@ -114,6 +114,14 @@ a pod that runs in the step's own image, so nothing needs Docker:
 
 The run's context is the template's parameters: `clone_url` and `sha`, and
 `event`, `ref`, `tag`, `schedule` and `fork` for a script that looks at them.
+The `store` parameter names a shared store (`STARCI_STORE`, an S3; see
+[Inputs](inputs.md#sharing-results-between-machines)): with it, a step with
+`cache = True` is skipped when it passed before with the same inputs, and
+records a pass when it passes, through `starci pass`. The init image then needs
+starci (`dev/argo-init.Dockerfile` builds one), and the pods the store's
+credentials from the cluster. A pass here is keyed on the step's image by
+name, so a tag that moves does not run it again, and is not the same as a
+machine's.
 As for GitHub the script is asked once for each kind of event, and a step that
 only some events plan gets a `when`. A step an event does not plan lets what
 needs it go ahead; a step that fails omits what needs it. A schedule is a
@@ -128,8 +136,8 @@ name. Argo's own types and validator accept every file under
 Refused, with a message naming the step: `network = False` (a pod's network
 policy covers its fetching container too), `packages` (an image cannot be
 built without privilege), `keep` and artifacts, a service's `files`, and any
-command containing `{{`, which Argo would read as its own template. A step is
-not skipped for having passed before, either: every step runs every time.
+command containing `{{`, which Argo would read as its own template. Without
+`store`, every step runs every time.
 
 ## Or a Temporal workflow
 
