@@ -141,6 +141,28 @@ func stepCmd(args []string) error {
 	return writeJSON(job.Step.Answer(result))
 }
 
+// sweepCmd removes what an earlier life of this machine left running: the
+// services of a step whose machine was killed (step.Sweep). A program that
+// keeps machines runs it as each one starts, before it takes work, and only
+// where the name belongs to this machine alone.
+func sweepCmd(args []string) error {
+	fs := flag.NewFlagSet("sweep", flag.ExitOnError)
+	fs.Parse(args)
+	if fs.NArg() > 1 {
+		die(usage)
+	}
+	machine := fs.Arg(0)
+	if machine == "" {
+		// The name `starci step` gives its machine.
+		machine, _ = os.Hostname()
+	}
+	if machine == "" {
+		return errors.New("this machine has no name; give one")
+	}
+	step.Sweep(machine)
+	return nil
+}
+
 func readJSON(r io.Reader, v any, emptyOK bool) error {
 	data, err := io.ReadAll(r)
 	if err != nil {

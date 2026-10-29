@@ -9,6 +9,18 @@ The engine tests run against the local engine with everything else. An engine
 that needs a service to test against runs its tests when asked, with
 `STARCI_TEST_<NAME>=1`.
 
+The Temporal compile target writes a Go module. Building it against the Temporal
+SDK, and running its workflow under the SDK's test environment with a stand-in
+for `starci step`, needs the network to fetch the SDK, and runs when
+`STARCI_TEST_TEMPORAL=1`:
+
+```sh
+STARCI_TEST_TEMPORAL=1 go test ./internal/compile -run TemporalModule
+```
+
+It does not use a Temporal server or a real step. Nothing yet kills a worker
+partway through a step and checks that another resumes the run.
+
 The shared store's tests need an S3, and run when `STARCI_TEST_S3` names a
 bucket there; the bucket is made if it is missing. [Floci](https://floci.io), a
 local AWS emulator, is enough:

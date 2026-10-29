@@ -1,0 +1,102 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"sync"
+	"syscall"
+	"time"
+
+	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/temporal"
+)
+
+// starci is the executable that runs steps: STARCI, else starci on PATH.
+func starci() string {
+	if s := os.Getenv("STARCI"); s != "" {
+		return s
+	}
+	return "starci"
+}
+
+// RunStep runs one step on this machine with `starci step`.
+//
+// That exits 0 whenever it ran the step, passed or failed, so a failed step
+// comes back as a result and is not retried. Only a step starci could not run
+// at all is an error. The step's lines are logged as they come, and the
+// latest is sent with each heartbeat; cancelling the run reaches the step
+// through the heartbeat, and starci takes the step's containers down.
+func RunStep(ctx context.Context, job Job) (Result, error) {
+	in, err := json.Marshal(job)
+	if err != nil {
+		return Result{}, temporal.NewNonRetryableApplicationError("the step cannot be encoded", "BadInput", err)
+	}
+	cmd := exec.CommandContext(ctx, starci(), "step")
+	cmd.Stdin = bytes.NewReader(in)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	// SIGTERM, not a kill: starci removes the step's containers and services
+	// on it.
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = 30 * time.Second
+	lines, err := cmd.StderrPipe()
+	if err != nil {
+		return Result{}, err
+	}
+	if err := cmd.Start(); err != nil {
+		return Result{}, fmt.Errorf("starting %s step: %w", starci(), err)
+	}
+
+	log := activity.GetLogger(ctx)
+	var mu sync.Mutex
+	last := ""
+	read := make(chan struct{})
+	go func() {
+		defer close(read)
+		sc := bufio.NewScanner(lines)
+		sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		for sc.Scan() {
+			log.Info(sc.Text())
+			mu.Lock()
+			last = sc.Text()
+			mu.Unlock()
+		}
+	}()
+
+	beating := make(chan struct{})
+	go func() {
+		t := time.NewTicker(heartbeatTimeout / 3)
+		defer t.Stop()
+		for {
+			select {
+			case <-beating:
+				return
+			case <-t.C:
+				mu.Lock()
+				l := last
+				mu.Unlock()
+				activity.RecordHeartbeat(ctx, l)
+			}
+		}
+	}()
+	defer close(beating)
+
+	<-read
+	werr := cmd.Wait()
+	if ctx.Err() != nil {
+		return Result{}, ctx.Err()
+	}
+	if werr != nil {
+		return Result{}, fmt.Errorf("%s step: %w", starci(), werr)
+	}
+	var r Result
+	if err := json.Unmarshal(out.Bytes(), &r); err != nil {
+		return Result{}, temporal.NewNonRetryableApplicationError("starci step printed no result", "BadResult", err)
+	}
+	return r, nil
+}

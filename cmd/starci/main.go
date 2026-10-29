@@ -30,7 +30,6 @@ import (
 
 	"git.phin.tech/sam/starci/internal/bundle"
 	"git.phin.tech/sam/starci/internal/ciinfo"
-	"git.phin.tech/sam/starci/internal/compile"
 	"git.phin.tech/sam/starci/internal/engine"
 	"git.phin.tech/sam/starci/internal/engine/local"
 	"git.phin.tech/sam/starci/internal/plan"
@@ -42,10 +41,11 @@ import (
 const usage = `usage:
   starci plan   [--file .ci.star] [--repo owner/name] [--sha SHA] [--ref REF] [--changed a,b,c]
   starci run    CHECKOUT [-v] [--slots N] [--bare[=false]] [--bare-image IMAGE] [--sha SHA] [--file FILE] [--clone-url URL]
-  starci compile [--target github|circleci|binary] [-o FILE --freeze --base STARCI] [--file .ci.star] [--runs-on NAME] [--arch amd64] [--offline] [--check FILE]
+  starci compile [--target github|circleci|temporal|binary] [-o FILE|DIR --freeze --base STARCI] [--file .ci.star] [--runs-on NAME] [--arch amd64] [--offline] [--check FILE|DIR]
   starci validate [--file .ci.star] [--arch amd64,arm64]
   starci next   CHECKOUT [--sha SHA] [--file FILE] [--clone-url URL] < what is done so far
-  starci step   [--bare[=false]] [--bare-image IMAGE] < a step next asked for`
+  starci step   [--bare[=false]] [--bare-image IMAGE] < a step next asked for
+  starci sweep  [MACHINE]`
 
 func main() {
 	// Before anything else, even a script this executable carries: a
@@ -83,6 +83,8 @@ func main() {
 		err = nextCmd(os.Args[2:])
 	case "step":
 		err = stepCmd(os.Args[2:])
+	case "sweep":
+		err = sweepCmd(os.Args[2:])
 	default:
 		die(usage)
 	}
@@ -491,103 +493,6 @@ func sortedKeys(m map[string]string) []string {
 	return keys
 }
 
-// compileCmd writes a basic script out as another CI system's configuration,
-// for a repository hosted where starci is not running:
-//
-//	starci compile > .github/workflows/ci.yml
-//	starci compile --target circleci > .circleci/config.yml
-//
-// Forgejo and Gitea Actions read the GitHub file.
-func compileCmd(args []string) error {
-	fs := flag.NewFlagSet("compile", flag.ExitOnError)
-	file := fs.String("file", ".ci.star", "CI script to compile")
-	target := fs.String("target", "github", "what to write: github (also read by Forgejo and Gitea) or circleci")
-	runsOn := fs.String("runs-on", "", "the machines to run on: a runner label for github (default ubuntu-latest), a resource class for circleci (default medium)")
-	arch := fs.String("arch", "amd64", "architecture of those machines: amd64 or arm64")
-	defaultBranch := fs.String("default-branch", "main", "the repository's default branch")
-	offline := fs.Bool("offline", false, "do not download the script's tools to check them first")
-	check := fs.String("check", "", "write nothing: fail unless this file is what would be written")
-	output := fs.String("o", "", "with --target binary, where to write the executable")
-	freeze := fs.Bool("freeze", false, "with --target binary, evaluate the script now and carry the plan, not the script (basic scripts only)")
-	base := fs.String("base", "", "with --target binary, the starci executable to copy (default: this one); use another to build for another OS or architecture")
-	fs.Parse(args)
-
-	if *target == "binary" {
-		return compileBinary(*file, *output, *base, *freeze, *offline, *arch, *check)
-	}
-
-	src, err := os.ReadFile(*file)
-	if err != nil {
-		return err
-	}
-	opts := compile.Options{Source: filepath.Base(*file), RunsOn: *runsOn, Arch: *arch, DefaultBranch: *defaultBranch}
-	var out string
-	switch *target {
-	case "github":
-		// Asked once for each kind of event, so that what the script does
-		// for a tag or a pull request or a schedule is in the workflow too.
-		out, err = compile.GitHubEvents(*file, src, opts)
-	case "circleci":
-		// Compiled for a push about which nothing else is known.
-		p, read, perr := plan.EvalTracked(*file, src, plan.Context{})
-		if perr != nil {
-			return perr
-		}
-		if len(p.Steps) == 0 {
-			return fmt.Errorf("%s plans no steps for a push about which nothing is known; there is nothing to compile", *file)
-		}
-		opts.Read = read
-		out, err = compile.CircleCI(p, opts)
-	default:
-		return fmt.Errorf("unknown target %q: github, circleci or binary", *target)
-	}
-	if err != nil {
-		return err
-	}
-	// A compiled file is a copy, and a copy goes stale the moment the script
-	// is edited without it. This is the question to ask on every push; it
-	// needs no network, so it downloads nothing.
-	if *check != "" {
-		have, err := os.ReadFile(*check)
-		if err != nil {
-			return err
-		}
-		if string(have) == out {
-			fmt.Printf("%s is what %s compiles to\n", *check, *file)
-			return nil
-		}
-		again := "starci compile"
-		fs.Visit(func(f *flag.Flag) {
-			if f.Name != "check" && f.Name != "offline" {
-				again += " --" + f.Name + " " + f.Value.String()
-			}
-		})
-		return fmt.Errorf("%s is not what %s compiles to; %s\nwrite it again with: %s > %s", *check, *file, firstDifference(string(have), out), again, *check)
-	}
-	// What is written is run later, somewhere else. A tool that cannot be
-	// fetched is better found here than in every job that wants it.
-	if !*offline {
-		// Every tool the script declares, not one plan's: a workflow holds
-		// the steps of each kind of event. One with no build for these
-		// machines is left to the compiler, which refuses a step that uses it.
-		declared, err := plan.Tools(*file, src)
-		if err != nil {
-			return err
-		}
-		var tools []plan.Tool
-		for _, t := range declared {
-			if _, ok := t.SHA256[*arch]; ok {
-				tools = append(tools, t)
-			}
-		}
-		if failed := checkTools(os.Stderr, tools, []string{*arch}); failed > 0 {
-			return fmt.Errorf("%d tool download(s) failed the check; nothing was written (--offline skips the check)", failed)
-		}
-	}
-	fmt.Print(out)
-	return nil
-}
-
 // compileBinary writes an executable that carries the script and runs it with
 // Docker, in the checkout it is pointed at:
 //
@@ -630,18 +535,8 @@ func compileBinary(file, output, base string, freeze, offline bool, arch, check 
 		payload.Script, payload.Plan = "", p
 	}
 	if !offline {
-		declared, err := plan.Tools(file, src)
-		if err != nil {
+		if err := checkDeclaredTools(file, src, arch); err != nil {
 			return err
-		}
-		var tools []plan.Tool
-		for _, t := range declared {
-			if _, ok := t.SHA256[arch]; ok {
-				tools = append(tools, t)
-			}
-		}
-		if failed := checkTools(os.Stderr, tools, []string{arch}); failed > 0 {
-			return fmt.Errorf("%d tool download(s) failed the check; nothing was written (--offline skips the check)", failed)
 		}
 	}
 	if base == "" {

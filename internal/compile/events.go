@@ -26,6 +26,8 @@ type probe struct {
 	ctx  plan.Context
 	// when is the GitHub expression that is true for this kind of event.
 	when string
+	// goWhen is the same as a Go expression over c, a context.
+	goWhen string
 }
 
 const (
@@ -46,43 +48,62 @@ const (
 
 func probes(def string, schedules []plan.Schedule) []probe {
 	ref := "refs/heads/" + def
+	push := `(c.Event == "" || c.Event == "push")`
 	ps := []probe{
 		{"a push to " + def, plan.Context{Event: plan.EventPush, Ref: def},
-			fmt.Sprintf("(github.event_name == 'push' && github.ref == '%s')", ref)},
+			fmt.Sprintf("(github.event_name == 'push' && github.ref == '%s')", ref),
+			fmt.Sprintf("(%s && c.Ref == %s)", push, q(def))},
 		{"a push to another branch", plan.Context{Event: plan.EventPush, Ref: standInBranch},
-			fmt.Sprintf("(github.event_name == 'push' && github.ref_type == 'branch' && github.ref != '%s')", ref)},
+			fmt.Sprintf("(github.event_name == 'push' && github.ref_type == 'branch' && github.ref != '%s')", ref),
+			fmt.Sprintf("(%s && c.Ref != %s)", push, q(def))},
 		{"a tag", plan.Context{Event: plan.EventTag, Tag: standInTag},
-			"(github.event_name == 'push' && github.ref_type == 'tag')"},
+			"(github.event_name == 'push' && github.ref_type == 'tag')",
+			`c.Event == "tag"`},
 		// From this repository and from a fork are asked about separately:
 		// the difference is who wrote the code, and a script that refuses to
 		// do something for a stranger must still refuse once compiled.
 		{"a pull request", plan.Context{Event: plan.EventPullRequest, Ref: standInBranch, PR: &plan.PullRequest{Number: 1, Base: def, Head: standInBranch}},
-			"(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)"},
+			"(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)",
+			`(c.Event == "pull_request" && !c.fork())`},
 		{"a pull request from a fork", plan.Context{Event: plan.EventPullRequest, Ref: standInBranch, PR: &plan.PullRequest{Number: 1, Base: def, Head: standInBranch, Fork: true}},
-			"(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)"},
+			"(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)",
+			`(c.Event == "pull_request" && c.fork())`},
 	}
 	for _, s := range schedules {
 		ps = append(ps, probe{"the " + s.Name + " schedule", plan.Context{Event: plan.EventSchedule, Ref: def, Schedule: s.Name},
-			fmt.Sprintf("(github.event_name == 'schedule' && github.event.schedule == '%s')", s.Cron)})
+			fmt.Sprintf("(github.event_name == 'schedule' && github.event.schedule == '%s')", s.Cron),
+			fmt.Sprintf(`(c.Event == "schedule" && c.Schedule == %s)`, q(s.Name))})
 	}
-	return append(ps, probe{"a manual run", plan.Context{Event: plan.EventManual, Ref: def}, "github.event_name == 'workflow_dispatch'"})
+	return append(ps, probe{"a manual run", plan.Context{Event: plan.EventManual, Ref: def}, "github.event_name == 'workflow_dispatch'", `c.Event == "manual"`})
 }
 
-// GitHubEvents compiles a basic script to a GitHub Actions workflow that
-// triggers on, and does the right thing for, each kind of event the script
-// plans steps for.
-func GitHubEvents(filename string, src []byte, o Options) (string, error) {
-	if o.DefaultBranch == "" {
-		o.DefaultBranch = "main"
-	}
+// union is a script asked about every kind of event, and what came of it.
+type union struct {
+	all       []probe
+	schedules []plan.Schedule
+	// steps are the steps of every event's plan, merged, in the order they
+	// first appear.
+	steps []plan.Step
+	// seenIn gives, for a step by name, the probes it appears in.
+	seenIn map[string][]int
+	// active says which probes lead to any step at all, and nActive counts them.
+	active  []bool
+	nActive int
+	// read is the fields of ctx the script read.
+	read map[string]bool
+}
+
+// eventUnion asks a basic script what it plans for each kind of event, and
+// merges the answers.
+func eventUnion(filename string, src []byte, o Options) (*union, error) {
 	schedules, err := plan.Schedules(filename, src)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	all := probes(o.DefaultBranch, schedules)
 
 	steps := map[string]plan.Step{}
-	seenIn := map[string][]int{} // step name -> probes it appears in
+	seenIn := map[string][]int{}
 	var order []string
 	read := map[string]bool{}
 	active := make([]bool, len(all))
@@ -90,7 +111,7 @@ func GitHubEvents(filename string, src []byte, o Options) (string, error) {
 	for i, pr := range all {
 		p, fields, err := plan.EvalTracked(filename, src, pr.ctx)
 		if err != nil {
-			return "", fmt.Errorf("for %s: %w", pr.name, err)
+			return nil, fmt.Errorf("for %s: %w", pr.name, err)
 		}
 		for _, f := range fields {
 			read[f] = true
@@ -103,7 +124,7 @@ func GitHubEvents(filename string, src []byte, o Options) (string, error) {
 				a, b := earlier, s
 				a.Needs, b.Needs = nil, nil
 				if !reflect.DeepEqual(a, b) {
-					return "", fmt.Errorf("step %q is not the same for %s as for %s; give the two different names", s.Name, pr.name, all[seenIn[s.Name][0]].name)
+					return nil, fmt.Errorf("step %q is not the same for %s as for %s; give the two different names", s.Name, pr.name, all[seenIn[s.Name][0]].name)
 				}
 				merged := earlier
 				for _, n := range s.Needs {
@@ -120,39 +141,99 @@ func GitHubEvents(filename string, src []byte, o Options) (string, error) {
 		}
 	}
 	if len(order) == 0 {
-		return "", fmt.Errorf("%s plans no steps for any kind of event; there is nothing to compile", filename)
+		return nil, fmt.Errorf("%s plans no steps for any kind of event; there is nothing to compile", filename)
 	}
-
-	// The events that lead to anything at all are the workflow's triggers.
-	nActive := 0
+	u := &union{all: all, schedules: schedules, seenIn: seenIn, active: active, read: read}
 	for _, a := range active {
 		if a {
-			nActive++
+			u.nActive++
 		}
 	}
-	o.conditions = map[string]string{}
-	merged := &plan.Plan{}
 	for _, name := range order {
-		merged.Steps = append(merged.Steps, steps[name])
-		if len(seenIn[name]) == nActive {
-			continue // runs whenever the workflow does
+		u.steps = append(u.steps, steps[name])
+	}
+	return u, nil
+}
+
+// condition says when a step runs, as an expression in whichever language
+// pick gives the probes' conditions in. Both kinds of branch push together are
+// simply "a push to a branch", and both kinds of pull request simply "a pull
+// request"; anyBranchPush and anyPullRequest are those. It is empty for a step
+// that runs whenever the workflow does.
+func (u *union) condition(name string, anyBranchPush, anyPullRequest string, pick func(probe) string) string {
+	in := u.seenIn[name]
+	if len(in) == u.nActive {
+		return ""
+	}
+	var parts []string
+	if contains2(in, pushDefault) && contains2(in, pushOther) {
+		parts = append(parts, anyBranchPush)
+		in = without(in, pushDefault, pushOther)
+	}
+	if contains2(in, pullRequest) && contains2(in, forkPullRequest) {
+		parts = append(parts, anyPullRequest)
+		in = without(in, pullRequest, forkPullRequest)
+	}
+	for _, i := range in {
+		parts = append(parts, pick(u.all[i]))
+	}
+	return strings.Join(parts, " || ")
+}
+
+// notes say what a compiled file could not carry over of what the script read,
+// and for which events it plans nothing.
+func (u *union) notes(def string) []string {
+	var notes []string
+	var fields []string
+	for f := range u.read {
+		fields = append(fields, f)
+	}
+	sort.Strings(fields)
+	for _, f := range fields {
+		switch f {
+		case "changed_files", "changed_dirs":
+			notes = appendOnce(notes, "The script decides by which files a commit changed. A workflow file cannot, so it does what the script does when nothing is known about the changes, on every run.")
+		case "ref":
+			notes = appendOnce(notes, fmt.Sprintf("The script looks at the branch. Whether it is %s carries over; any other rule about branch names does not, and every other branch is treated alike.", def))
+		case "tag":
+			notes = appendOnce(notes, "The script looks at the tag's name. That does not carry over: every tag is treated alike.")
+		case "pr":
+			notes = appendOnce(notes, fmt.Sprintf("The script looks at the pull request. Whether it comes from a fork carries over; any other rule about it does not, and every pull request is treated as one into %s.", def))
 		}
-		var parts []string
-		in := seenIn[name]
-		// Both kinds of branch push together are simply "a push to a branch",
-		// and both kinds of pull request simply "a pull request".
-		if contains2(in, pushDefault) && contains2(in, pushOther) {
-			parts = append(parts, "(github.event_name == 'push' && github.ref_type == 'branch')")
-			in = without(in, pushDefault, pushOther)
+	}
+	return notes
+}
+
+// quiet lists the events the script plans nothing for.
+func (u *union) quiet() []string {
+	var quiet []string
+	for i, a := range u.active {
+		if !a {
+			quiet = append(quiet, u.all[i].name)
 		}
-		if contains2(in, pullRequest) && contains2(in, forkPullRequest) {
-			parts = append(parts, "github.event_name == 'pull_request'")
-			in = without(in, pullRequest, forkPullRequest)
+	}
+	return quiet
+}
+
+// GitHubEvents compiles a basic script to a GitHub Actions workflow that
+// triggers on, and does the right thing for, each kind of event the script
+// plans steps for.
+func GitHubEvents(filename string, src []byte, o Options) (string, error) {
+	if o.DefaultBranch == "" {
+		o.DefaultBranch = "main"
+	}
+	u, err := eventUnion(filename, src, o)
+	if err != nil {
+		return "", err
+	}
+	all, schedules, active := u.all, u.schedules, u.active
+
+	o.conditions = map[string]string{}
+	merged := &plan.Plan{Steps: u.steps}
+	for _, st := range u.steps {
+		if c := u.condition(st.Name, "(github.event_name == 'push' && github.ref_type == 'branch')", "github.event_name == 'pull_request'", func(p probe) string { return p.when }); c != "" {
+			o.conditions[st.Name] = c
 		}
-		for _, i := range in {
-			parts = append(parts, all[i].when)
-		}
-		o.conditions[name] = strings.Join(parts, " || ")
 	}
 
 	var on strings.Builder
@@ -190,23 +271,9 @@ func GitHubEvents(filename string, src []byte, o Options) (string, error) {
 	o.on = on.String()
 
 	// Say what was and was not possible to carry over.
-	var fields []string
-	for f := range read {
-		fields = append(fields, f)
-	}
-	sort.Strings(fields)
 	o.Read = nil
-	for _, f := range fields {
-		switch f {
-		case "changed_files", "changed_dirs":
-			o.notes = appendOnce(o.notes, "The script decides by which files a commit changed. A workflow file cannot, so it does what the script does when nothing is known about the changes, on every run.")
-		case "ref":
-			o.notes = appendOnce(o.notes, fmt.Sprintf("The script looks at the branch. Whether it is %s carries over; any other rule about branch names does not, and every other branch is treated alike.", o.DefaultBranch))
-		case "tag":
-			o.notes = appendOnce(o.notes, "The script looks at the tag's name. That does not carry over: every tag is treated alike.")
-		case "pr":
-			o.notes = appendOnce(o.notes, fmt.Sprintf("The script looks at the pull request. Whether it comes from a fork carries over; any other rule about it does not, and every pull request is treated as one into %s.", o.DefaultBranch))
-		}
+	for _, n := range u.notes(o.DefaultBranch) {
+		o.notes = appendOnce(o.notes, n)
 	}
 	for _, sch := range schedules {
 		if sch.Overlap != plan.OverlapSkip || sch.CatchUp {
@@ -216,13 +283,7 @@ func GitHubEvents(filename string, src []byte, o Options) (string, error) {
 	if len(schedules) > 0 {
 		o.notes = appendOnce(o.notes, "A schedule's runs may overlap here, where starci would skip a firing while the last run is still going; and a missed firing is never made up.")
 	}
-	var quiet []string
-	for i, a := range active {
-		if !a {
-			quiet = append(quiet, all[i].name)
-		}
-	}
-	if len(quiet) > 0 {
+	if quiet := u.quiet(); len(quiet) > 0 {
 		o.notes = append(o.notes, "The script plans nothing for "+join(quiet)+", so the workflow does not run for "+pronoun(len(quiet))+".")
 	}
 

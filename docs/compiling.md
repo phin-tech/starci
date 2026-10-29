@@ -1,7 +1,8 @@
 # Where starci is not running: compiling to a workflow
 
 A basic script can be written out as a GitHub Actions workflow, which Forgejo
-and Gitea Actions read too, or as a CircleCI configuration:
+and Gitea Actions read too, as a CircleCI configuration, or as a Temporal
+workflow:
 
 ```sh
 starci compile > .github/workflows/ci.yml
@@ -89,6 +90,52 @@ tests carry out workflows of bare steps that hand artifacts on with stand-ins
 for both tools (a job's shell run as it is, checkout, cache, artifacts and
 workspace done with directories), twice, so that the second time jobs are
 skipped by the passes of the first.
+
+## Or a Temporal workflow
+
+```sh
+starci compile --target temporal -o ci-workflow
+cd ci-workflow && go mod tidy
+```
+
+writes a small Go module: `plan.go` (the plan, asked once for each kind of
+event as for GitHub), `workflow.go` (`StarciRun`, which runs each step as an
+activity once the steps it needs have passed), `activity.go` and a worker in
+`main.go`. The activity does one thing: it runs `starci step` for the step, so
+services, [bare steps](bare.md), tools and passes are what they are everywhere
+else. A worker is a machine with starci and Docker on it.
+
+```sh
+STARCI_QUEUES=starci go run .      # on each machine; connection from TEMPORAL_*
+temporal workflow start --task-queue starci --type StarciRun --workflow-id RUN \
+  --input "$(starci next . </dev/null | jq -c '{context, clone_url}')"
+```
+
+The input is what `starci next` prints the first time: the run's context and
+clone URL. Which steps run is decided from the context, so a schedule is a
+Temporal Schedule that starts the workflow with `event` set to `schedule` and
+`schedule` to its name.
+
+- A step that ran and failed is a result, never retried; steps that need it are
+  skipped. Only a step starci could not run at all (a lost machine, no Docker)
+  is tried again, three times, before it too is a failed result. The run's
+  output is `{ok, results}`.
+- `on` chooses the task queue: a step that asks for `{"gpu": "a100"}` goes to
+  `starci/gpu=a100`, and a worker takes it by listing that in `STARCI_QUEUES`
+  (comma-separated). `prefer` and `avoid` are dropped.
+- The worker runs `starci sweep` as it starts, removing the services a step of
+  a killed worker left running. It goes by the host name, so run one worker to
+  a host.
+- Cancelling the run signals each `starci step`, which takes its containers
+  down.
+- Steps that are handed [artifacts](scripts.md#handing-files-on) cannot be
+  compiled yet: only `starci next` puts real pointers in place of `artifact()`. A step
+  that keeps files needs `STARCI_STORE` on every worker.
+- Advanced scripts cannot be compiled; something that asks `starci next` can
+  carry them out ([driving](driving.md)).
+- The attempts, the timeouts and the SDK version are starci's choices, written
+  in the files. `--check DIR` compares the directory with what would be
+  written.
 
 ## Or an executable
 

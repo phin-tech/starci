@@ -1,0 +1,156 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/mock"
+	"go.temporal.io/sdk/testsuite"
+)
+
+// run carries out the plan with a stand-in for starci step: fail names the
+// steps that "run and fail", and ran lists what was started.
+func run(t *testing.T, context_ string, fail ...string) (Outcome, []string) {
+	t.Helper()
+	var s testsuite.WorkflowTestSuite
+	env := s.NewTestWorkflowEnvironment()
+	env.RegisterWorkflow(StarciRun)
+	env.RegisterActivity(RunStep)
+	var ran []string
+	env.OnActivity(RunStep, mock.Anything, mock.Anything).Return(func(_ context.Context, job Job) (Result, error) {
+		var a struct {
+			Number int `json:"number"`
+			Step   struct {
+				Name string `json:"name"`
+			} `json:"step"`
+		}
+		if err := json.Unmarshal(job.Step, &a); err != nil {
+			t.Error(err)
+		}
+		ran = append(ran, a.Step.Name)
+		status := "passed"
+		for _, f := range fail {
+			if f == a.Step.Name {
+				status = "failed"
+			}
+		}
+		return Result{Number: a.Number, Name: a.Step.Name, Status: status}, nil
+	})
+	env.ExecuteWorkflow(StarciRun, Input{Context: json.RawMessage(context_), CloneURL: "file:///repo"})
+	if !env.IsWorkflowCompleted() {
+		t.Fatal("the workflow did not complete")
+	}
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	var out Outcome
+	if err := env.GetWorkflowResult(&out); err != nil {
+		t.Fatal(err)
+	}
+	return out, ran
+}
+
+func statuses(o Outcome) map[string]string {
+	m := map[string]string{}
+	for _, r := range o.Results {
+		m[r.Name] = r.Status
+	}
+	return m
+}
+
+func TestAPassingRunRunsEveryStep(t *testing.T) {
+	out, ran := run(t, `{"event":"push","ref":"main","sha":"abc"}`)
+	if !out.OK {
+		t.Fatalf("not ok: %+v", out)
+	}
+	if len(ran) != len(out.Results) || len(ran) == 0 {
+		t.Fatalf("ran %v, results %+v", ran, out.Results)
+	}
+	for _, r := range out.Results {
+		if r.Status != "passed" {
+			t.Errorf("%+v", r)
+		}
+	}
+}
+
+func TestAFailedStepIsAResultAndSkipsWhatNeedsIt(t *testing.T) {
+	first := steps[0].Name
+	out, _ := run(t, `{"event":"push","ref":"main","sha":"abc"}`, first)
+	if out.OK {
+		t.Fatal("a failed step still gave an ok run")
+	}
+	got := statuses(out)
+	if got[first] != "failed" {
+		t.Fatalf("%s = %q", first, got[first])
+	}
+	for _, s := range steps {
+		for _, n := range s.Needs {
+			if n == 0 && got[s.Name] != "skipped" {
+				t.Errorf("%s needs %s and is %q", s.Name, first, got[s.Name])
+			}
+		}
+	}
+}
+
+// stand-in: a script in place of starci, to test what RunStep makes of an
+// exit status and a result.
+func standIn(t *testing.T, script string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "starci")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("STARCI", path)
+}
+
+func runStep(t *testing.T) (Result, error) {
+	t.Helper()
+	var s testsuite.WorkflowTestSuite
+	env := s.NewTestActivityEnvironment()
+	env.RegisterActivity(RunStep)
+	v, err := env.ExecuteActivity(RunStep, Job{Step: json.RawMessage(`{"number":1,"step":{"name":"x"}}`), Context: json.RawMessage(`{}`), CloneURL: "file:///repo"})
+	if err != nil {
+		return Result{}, err
+	}
+	var r Result
+	if err := v.Get(&r); err != nil {
+		return Result{}, err
+	}
+	return r, nil
+}
+
+func TestAStepThatRanAndFailedIsNotAnError(t *testing.T) {
+	standIn(t, `cat >/dev/null; echo "a line" >&2; echo '{"number":1,"name":"x","status":"failed","detail":"exit 1"}'`)
+	r, err := runStep(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != "failed" || r.Detail != "exit 1" {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestAStepStarciCouldNotRunIsAnError(t *testing.T) {
+	standIn(t, `cat >/dev/null; echo "no docker" >&2; exit 1`)
+	if r, err := runStep(t); err == nil {
+		t.Fatalf("got %+v", r)
+	}
+}
+
+func TestStarciGetsTheStepOnStdin(t *testing.T) {
+	standIn(t, `cat > "$0.in"; echo '{"number":1,"name":"x","status":"passed"}'`)
+	if _, err := runStep(t); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(os.Getenv("STARCI") + ".in")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job Job
+	if err := json.Unmarshal(data, &job); err != nil || job.CloneURL != "file:///repo" {
+		t.Fatalf("%s: %v", data, err)
+	}
+}

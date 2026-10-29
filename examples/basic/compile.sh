@@ -1,7 +1,9 @@
 #!/bin/sh
-# Writes every basic example out for GitHub Actions and CircleCI, into
-# compiled/github/ and compiled/circleci/. With --check, writes nothing and
-# fails if any of them is not what its script compiles to now.
+# Writes every basic example out for GitHub Actions, CircleCI and Temporal, into
+# compiled/github/, compiled/circleci/ and compiled/temporal/. With --check,
+# writes nothing and fails if any of them is not what its script compiles to
+# now. A script that hands files from one step to another has no Temporal
+# module yet, and is skipped for it.
 #
 #   examples/basic/compile.sh
 #   examples/basic/compile.sh --check
@@ -32,5 +34,18 @@ for script in *.ci.star; do
 			"$starci" compile --offline --target "$target" --file "$script" >"$out"
 		fi
 	done
+	# A directory, not a file; refused for a script that hands artifacts on.
+	if grep -q 'artifacts *=' "$script"; then
+		continue
+	fi
+	out=compiled/temporal/$name
+	if [ -n "$check" ]; then
+		"$starci" compile --offline --target temporal --file "$script" --check "$out" >/dev/null || {
+			echo "stale: $out" >&2
+			status=1
+		}
+	else
+		"$starci" compile --offline --target temporal --file "$script" -o "$out" 2>/dev/null
+	fi
 done
 exit $status
