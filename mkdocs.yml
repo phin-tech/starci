@@ -53,6 +53,7 @@ nav:
   - Using starci:
       - Getting started: getting-started.md
       - Compiling to a workflow: compiling.md
+      - Carrying a run out from another tool: driving.md
   - Writing a script:
       - What a script can do: scripts.md
       - Tools and packages: tools.md
@@ -104,3 +105,5 @@ nav:
       - Development: development.md
       - Decisions:
           - starci names no tool: adr/0001-starci-names-no-tool.md
+          - A store of pointers: adr/0002-a-store-of-pointers.md
+          - starci says what is next: adr/0003-starci-says-what-is-next.md

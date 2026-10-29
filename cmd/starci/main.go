@@ -7,6 +7,8 @@
 //	                as an executable
 //	starci validate check that a script's inputs select files and that the
 //	                tools it pins download as pinned; runs nothing
+//	starci next     say what a run does next, given its results so far
+//	starci step     run one step that next asked for, on this machine
 package main
 
 import (
@@ -41,7 +43,9 @@ const usage = `usage:
   starci plan   [--file .ci.star] [--repo owner/name] [--sha SHA] [--ref REF] [--changed a,b,c]
   starci run    CHECKOUT [-v] [--slots N] [--bare[=false]] [--bare-image IMAGE] [--sha SHA] [--file FILE] [--clone-url URL]
   starci compile [--target github|circleci|binary] [-o FILE --freeze --base STARCI] [--file .ci.star] [--runs-on NAME] [--arch amd64] [--offline] [--check FILE]
-  starci validate [--file .ci.star] [--arch amd64,arm64]`
+  starci validate [--file .ci.star] [--arch amd64,arm64]
+  starci next   CHECKOUT [--sha SHA] [--file FILE] [--clone-url URL] < what is done so far
+  starci step   [--bare[=false]] [--bare-image IMAGE] < a step next asked for`
 
 func main() {
 	// Before anything else, even a script this executable carries: a
@@ -75,6 +79,10 @@ func main() {
 		err = compileCmd(os.Args[2:])
 	case "validate":
 		err = validateCmd(os.Args[2:])
+	case "next":
+		err = nextCmd(os.Args[2:])
+	case "step":
+		err = stepCmd(os.Args[2:])
 	default:
 		die(usage)
 	}
@@ -136,17 +144,10 @@ func runCmd(args []string) error {
 	// Every run is on this machine; --local is what that was asked for with
 	// when there was another kind, and is still accepted.
 	fs.Bool("local", true, "accepted, and means nothing: every run is on this machine")
-	cloneURL := fs.String("clone-url", "", "URL the commit is fetched from (default: the checkout)")
 	var bare optionalBool
 	fs.Var(&bare, "bare", "run bare steps, or with --bare=false refuse them (default: STARCI_BARE, else yes but for a pull request from a fork)")
 	bareImage := fs.String("bare-image", os.Getenv("STARCI_BARE_IMAGE"), "run bare steps in this image instead of on the machine, each in a container of its own (default: STARCI_BARE_IMAGE)")
-	sha := fs.String("sha", "HEAD", "commit to build")
-	ref := fs.String("ref", "", "branch this run is for (default: the checked-out branch when building HEAD)")
-	file := fs.String("file", "", "CI script (default: .ci.star in the checkout)")
-	repo := fs.String("repo", "", "owner/name, for display (default: from the clone URL)")
-	event := fs.String("event", "", "why the run starts, to try what a script does for it: push, tag, pull_request, schedule or manual (default: what the CI tool this is running in says, or manual)")
-	tag := fs.String("tag", "", "the tag, for --event tag")
-	scheduleName := fs.String("schedule", "", "the schedule, for --event schedule")
+	rf := addRunFlags(fs)
 	slots := fs.Int("slots", 4, "how many steps to run at once")
 	verbose := fs.Bool("v", false, "print each step's output as it runs")
 	// The checkout comes first on the command line, before the flags.
@@ -156,86 +157,12 @@ func runCmd(args []string) error {
 	dir := args[0]
 	fs.Parse(args[1:])
 
-	if *cloneURL == "" {
-		// The checkout is a perfectly good place to fetch a commit from. Only
-		// what is committed is built, the same as on a machine.
-		abs, err := filepath.Abs(dir)
-		if err != nil {
-			return err
-		}
-		*cloneURL = abs
-	}
-
-	git := func(a ...string) (string, error) {
-		out, err := exec.Command("git", append([]string{"-C", dir}, a...)...).Output()
-		return strings.TrimSpace(string(out)), err
-	}
-	commit, err := git("rev-parse", *sha)
-	if err != nil {
-		return fmt.Errorf("%s is not a commit in %s", *sha, dir)
-	}
-	changed, err := git("diff-tree", "--no-commit-id", "--name-only", "-r", commit)
+	co, err := rf.resolve(dir)
 	if err != nil {
 		return err
 	}
-	if *file == "" {
-		*file = filepath.Join(dir, ".ci.star")
-	}
-	if *ref == "" && *sha == "HEAD" {
-		*ref, _ = git("symbolic-ref", "-q", "--short", "HEAD")
-	}
-	if *repo == "" {
-		parts := strings.Split(strings.TrimSuffix(*cloneURL, ".git"), "/")
-		if len(parts) >= 2 {
-			*repo = strings.Join(parts[len(parts)-2:], "/")
-		}
-	}
-
-	var src []byte
-	if embedded != nil {
-		*file, src = embedded.Name, []byte(embedded.Script)
-	} else if src, err = os.ReadFile(*file); err != nil {
-		return err
-	}
-	mode := plan.Basic
-	if !embedded.Frozen() {
-		if mode, err = plan.Mode(*file, src); err != nil {
-			return err
-		}
-	}
-
-	// Started by hand, unless something says otherwise.
-	c := plan.Context{Repo: *repo, SHA: commit, Ref: *ref, ChangedFiles: strings.Fields(changed), Event: plan.EventManual}
-	var schedules []plan.Schedule
-	if !embedded.Frozen() {
-		if schedules, err = plan.Schedules(*file, src); err != nil {
-			return err
-		}
-	}
-	// Inside a CI tool, the tool knows why this run exists. The script is
-	// told what it would have been told had starci received the event.
-	origin := "started by hand"
-	if found, ok := ciinfo.Detect(os.Getenv, os.ReadFile, schedules); ok {
-		origin = "from " + found.Tool
-		d := found.Context
-		c.Event, c.Tag, c.PR, c.Schedule = d.Event, d.Tag, d.PR, d.Schedule
-		if d.Event == plan.EventTag || d.Ref != "" {
-			c.Ref = d.Ref
-		}
-		if *repo == "" && d.Repo != "" {
-			c.Repo = d.Repo
-		}
-		if found.ChangesKnown {
-			c.ChangedFiles = d.ChangedFiles
-		}
-	}
-	if *event != "" {
-		origin = "as asked"
-		if err := applyEvent(&c, *event, *tag, *scheduleName); err != nil {
-			return err
-		}
-	}
-	fmt.Printf("event: %s (%s)\n", describeEvent(c), origin)
+	src, mode, c := co.src, co.mode, co.context
+	fmt.Printf("event: %s (%s)\n", describeEvent(c), co.origin)
 
 	// In basic mode the plan is known now, whichever engine runs it.
 	var p *plan.Plan
@@ -247,7 +174,7 @@ func runCmd(args []string) error {
 			p.Repo, p.SHA, p.Ref = c.Repo, c.SHA, c.Ref
 			err = p.Validate()
 		} else {
-			p, err = plan.Eval(*file, src, c)
+			p, err = plan.Eval(co.file, src, c)
 		}
 		if err != nil {
 			return err
@@ -268,9 +195,9 @@ func runCmd(args []string) error {
 		fmt.Printf("%s @ %.8s: advanced script, steps are decided as it runs\n", c.Repo, c.SHA)
 	}
 
-	run := engine.Run{Mode: mode, Plan: p, Context: c, CloneURL: *cloneURL}
+	run := engine.Run{Mode: mode, Plan: p, Context: c, CloneURL: co.cloneURL}
 	if mode == plan.Advanced {
-		run.Filename, run.Source = filepath.Base(*file), src
+		run.Filename, run.Source = filepath.Base(co.file), src
 	}
 
 	// Ctrl-C stops the run; where the engine can, its steps too.
@@ -334,6 +261,120 @@ func runCmd(args []string) error {
 		os.Exit(1)
 	}
 	return nil
+}
+
+// runFlags are what starci is told about a run of a checkout, by run and
+// next alike.
+type runFlags struct {
+	cloneURL, sha, ref, file, repo, event, tag, scheduleName *string
+}
+
+func addRunFlags(fs *flag.FlagSet) runFlags {
+	var f runFlags
+	f.cloneURL = fs.String("clone-url", "", "URL the commit is fetched from (default: the checkout)")
+	f.sha = fs.String("sha", "HEAD", "commit to build")
+	f.ref = fs.String("ref", "", "branch this run is for (default: the checked-out branch when building HEAD)")
+	f.file = fs.String("file", "", "CI script (default: .ci.star in the checkout)")
+	f.repo = fs.String("repo", "", "owner/name, for display (default: from the clone URL)")
+	f.event = fs.String("event", "", "why the run starts, to try what a script does for it: push, tag, pull_request, schedule or manual (default: what the CI tool this is running in says, or manual)")
+	f.tag = fs.String("tag", "", "the tag, for --event tag")
+	f.scheduleName = fs.String("schedule", "", "the schedule, for --event schedule")
+	return f
+}
+
+// checkout is a run of a commit of a checkout, as worked out before any step
+// runs: the script, and what it is told about the run.
+type checkout struct {
+	file     string
+	src      []byte
+	mode     string
+	context  plan.Context
+	cloneURL string
+	// origin says where the event came from, for telling a person.
+	origin string
+}
+
+func (f runFlags) resolve(dir string) (checkout, error) {
+	if *f.cloneURL == "" {
+		// The checkout is a perfectly good place to fetch a commit from. Only
+		// what is committed is built, the same as on a machine.
+		abs, err := filepath.Abs(dir)
+		if err != nil {
+			return checkout{}, err
+		}
+		*f.cloneURL = abs
+	}
+
+	git := func(a ...string) (string, error) {
+		out, err := exec.Command("git", append([]string{"-C", dir}, a...)...).Output()
+		return strings.TrimSpace(string(out)), err
+	}
+	commit, err := git("rev-parse", *f.sha)
+	if err != nil {
+		return checkout{}, fmt.Errorf("%s is not a commit in %s", *f.sha, dir)
+	}
+	changed, err := git("diff-tree", "--no-commit-id", "--name-only", "-r", commit)
+	if err != nil {
+		return checkout{}, err
+	}
+	if *f.file == "" {
+		*f.file = filepath.Join(dir, ".ci.star")
+	}
+	if *f.ref == "" && *f.sha == "HEAD" {
+		*f.ref, _ = git("symbolic-ref", "-q", "--short", "HEAD")
+	}
+	if *f.repo == "" {
+		parts := strings.Split(strings.TrimSuffix(*f.cloneURL, ".git"), "/")
+		if len(parts) >= 2 {
+			*f.repo = strings.Join(parts[len(parts)-2:], "/")
+		}
+	}
+
+	var src []byte
+	if embedded != nil {
+		*f.file, src = embedded.Name, []byte(embedded.Script)
+	} else if src, err = os.ReadFile(*f.file); err != nil {
+		return checkout{}, err
+	}
+	mode := plan.Basic
+	if !embedded.Frozen() {
+		if mode, err = plan.Mode(*f.file, src); err != nil {
+			return checkout{}, err
+		}
+	}
+
+	// Started by hand, unless something says otherwise.
+	c := plan.Context{Repo: *f.repo, SHA: commit, Ref: *f.ref, ChangedFiles: strings.Fields(changed), Event: plan.EventManual}
+	var schedules []plan.Schedule
+	if !embedded.Frozen() {
+		if schedules, err = plan.Schedules(*f.file, src); err != nil {
+			return checkout{}, err
+		}
+	}
+	// Inside a CI tool, the tool knows why this run exists. The script is
+	// told what it would have been told had starci received the event.
+	origin := "started by hand"
+	if found, ok := ciinfo.Detect(os.Getenv, os.ReadFile, schedules); ok {
+		origin = "from " + found.Tool
+		d := found.Context
+		c.Event, c.Tag, c.PR, c.Schedule = d.Event, d.Tag, d.PR, d.Schedule
+		if d.Event == plan.EventTag || d.Ref != "" {
+			c.Ref = d.Ref
+		}
+		if *f.repo == "" && d.Repo != "" {
+			c.Repo = d.Repo
+		}
+		if found.ChangesKnown {
+			c.ChangedFiles = d.ChangedFiles
+		}
+	}
+	if *f.event != "" {
+		origin = "as asked"
+		if err := applyEvent(&c, *f.event, *f.tag, *f.scheduleName); err != nil {
+			return checkout{}, err
+		}
+	}
+	return checkout{file: *f.file, src: src, mode: mode, context: c, cloneURL: *f.cloneURL, origin: origin}, nil
 }
 
 // localEngine is this machine, with Docker for steps in an image: no queue,
