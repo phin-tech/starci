@@ -29,6 +29,14 @@ type Options struct {
 	Read []string
 	// DefaultBranch is the branch "is this the default branch?" is asked of.
 	DefaultBranch string
+	// Name is what a target that names its output calls it (an Argo
+	// WorkflowTemplate).
+	Name string
+	// InitImage is the image whose container puts a step's inputs and tools in
+	// place before it runs, for a target that runs steps in their own images.
+	InitImage string
+	// BareImage is the image a step without one runs in, for the same.
+	BareImage string
 
 	// The rest are filled in when compiling for several events.
 

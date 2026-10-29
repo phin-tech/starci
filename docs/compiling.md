@@ -1,8 +1,8 @@
 # Where starci is not running: compiling to a workflow
 
 A basic script can be written out as a GitHub Actions workflow, which Forgejo
-and Gitea Actions read too, as a CircleCI configuration, or as a Temporal
-workflow:
+and Gitea Actions read too, as a CircleCI configuration, as an Argo
+WorkflowTemplate, or as a Temporal workflow:
 
 ```sh
 starci compile > .github/workflows/ci.yml
@@ -90,6 +90,46 @@ tests carry out workflows of bare steps that hand artifacts on with stand-ins
 for both tools (a job's shell run as it is, checkout, cache, artifacts and
 workspace done with directories), twice, so that the second time jobs are
 skipped by the passes of the first.
+
+## Or an Argo WorkflowTemplate
+
+```sh
+starci compile --target argo --init-image REGISTRY/init@sha256:... > ci.yaml
+kubectl apply -n ci -f ci.yaml
+argo submit -n ci --from workflowtemplate/starci -p clone_url=URL -p sha=SHA
+```
+
+writes a `WorkflowTemplate` with one DAG and a task for each step. Each task is
+a pod that runs in the step's own image, so nothing needs Docker:
+
+- an init container, from `--init-image`, checks out only the step's inputs
+  (the commit is out of the step's reach) and fetches its tools by checksum.
+  starci names no image: it needs `git`, `curl`, `tar` and `unzip`, and the
+  repository must allow fetching a commit by its hash;
+- a step's [services](scripts.md) are native Kubernetes sidecars (init
+  containers that keep running), held to their `ready` command by a startup
+  probe and reached by name on `127.0.0.1`. That needs Kubernetes 1.29;
+- the command runs in the main container, with the tools in front of the
+  image's `PATH`.
+
+The run's context is the template's parameters: `clone_url` and `sha`, and
+`event`, `ref`, `tag`, `schedule` and `fork` for a script that looks at them.
+As for GitHub the script is asked once for each kind of event, and a step that
+only some events plan gets a `when`. A step an event does not plan lets what
+needs it go ahead; a step that fails omits what needs it. A schedule is a
+`CronWorkflow` you make from the template.
+
+`on` becomes a `nodeSelector` (`os` and `arch` are the nodes' own labels),
+`prefer` and `avoid` node affinity: unlike the other targets, they carry over.
+`--bare-image` is what a step without an image runs in; `--name` the template's
+name. Argo's own types and validator accept every file under
+`examples/basic/compiled/argo`.
+
+Refused, with a message naming the step: `network = False` (a pod's network
+policy covers its fetching container too), `packages` (an image cannot be
+built without privilege), `keep` and artifacts, a service's `files`, and any
+command containing `{{`, which Argo would read as its own template. A step is
+not skipped for having passed before, either: every step runs every time.
 
 ## Or a Temporal workflow
 

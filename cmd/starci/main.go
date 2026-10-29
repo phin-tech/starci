@@ -41,7 +41,7 @@ import (
 const usage = `usage:
   starci plan   [--file .ci.star] [--repo owner/name] [--sha SHA] [--ref REF] [--changed a,b,c]
   starci run    CHECKOUT [-v] [--slots N] [--bare[=false]] [--bare-image IMAGE] [--sha SHA] [--file FILE] [--clone-url URL]
-  starci compile [--target github|circleci|temporal|binary] [-o FILE|DIR --freeze --base STARCI] [--file .ci.star] [--runs-on NAME] [--arch amd64] [--offline] [--check FILE|DIR]
+  starci compile [--target github|circleci|argo|temporal|binary] [--init-image IMAGE --bare-image IMAGE --name NAME] [-o FILE|DIR --freeze --base STARCI] [--file .ci.star] [--runs-on NAME] [--arch amd64] [--offline] [--check FILE|DIR]
   starci validate [--file .ci.star] [--arch amd64,arm64]
   starci next   CHECKOUT [--sha SHA] [--file FILE] [--clone-url URL] < what is done so far
   starci step   [--bare[=false]] [--bare-image IMAGE] < a step next asked for

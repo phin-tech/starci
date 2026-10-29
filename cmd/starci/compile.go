@@ -39,6 +39,15 @@ var targets = map[string]target{
 		out, err := compile.CircleCI(p, o)
 		return map[string]string{"": out}, err
 	},
+	"argo": func(file string, src []byte, o compile.Options) (map[string]string, error) {
+		if mode, err := plan.Mode(file, src); err != nil {
+			return nil, err
+		} else if mode == plan.Advanced {
+			return nil, fmt.Errorf("%s is an advanced script: its steps are only known as it runs, so it cannot be written out as a workflow. Something that asks `starci next` can carry it out (docs/driving.md)", file)
+		}
+		out, err := compile.Argo(file, src, o)
+		return map[string]string{"": out}, err
+	},
 	"temporal": func(file string, src []byte, o compile.Options) (map[string]string, error) {
 		if mode, err := plan.Mode(file, src); err != nil {
 			return nil, err
@@ -54,18 +63,22 @@ var targets = map[string]target{
 //
 //	starci compile > .github/workflows/ci.yml
 //	starci compile --target circleci > .circleci/config.yml
+//	starci compile --target argo --init-image IMAGE > ci.yaml
 //	starci compile --target temporal -o ci-workflow
 //
 // Forgejo and Gitea Actions read the GitHub file.
 func compileCmd(args []string) error {
 	fs := flag.NewFlagSet("compile", flag.ExitOnError)
 	file := fs.String("file", ".ci.star", "CI script to compile")
-	targetName := fs.String("target", "github", "what to write: github (also read by Forgejo and Gitea), circleci, temporal or binary")
+	targetName := fs.String("target", "github", "what to write: github (also read by Forgejo and Gitea), circleci, argo, temporal or binary")
 	runsOn := fs.String("runs-on", "", "the machines to run on: a runner label for github (default ubuntu-latest), a resource class for circleci (default medium)")
 	arch := fs.String("arch", "amd64", "architecture of those machines: amd64 or arm64")
 	defaultBranch := fs.String("default-branch", "main", "the repository's default branch")
 	offline := fs.Bool("offline", false, "do not download the script's tools to check them first")
 	check := fs.String("check", "", "write nothing: fail unless this file (or directory, for a target that writes several) is what would be written")
+	initImage := fs.String("init-image", "", "with --target argo, the image of the container that puts a step's inputs and tools in place (git, curl, tar, unzip); no default")
+	bareImage := fs.String("bare-image", "", "with --target argo, the image a step without one runs in")
+	name := fs.String("name", "", "with --target argo, the WorkflowTemplate's name (default starci)")
 	output := fs.String("o", "", "with --target binary, where to write the executable; with --target temporal, the directory to write the module into")
 	freeze := fs.Bool("freeze", false, "with --target binary, evaluate the script now and carry the plan, not the script (basic scripts only)")
 	base := fs.String("base", "", "with --target binary, the starci executable to copy (default: this one); use another to build for another OS or architecture")
@@ -76,14 +89,14 @@ func compileCmd(args []string) error {
 	}
 	build, ok := targets[*targetName]
 	if !ok {
-		return fmt.Errorf("unknown target %q: github, circleci, temporal or binary", *targetName)
+		return fmt.Errorf("unknown target %q: github, circleci, argo, temporal or binary", *targetName)
 	}
 
 	src, err := os.ReadFile(*file)
 	if err != nil {
 		return err
 	}
-	opts := compile.Options{Source: filepath.Base(*file), RunsOn: *runsOn, Arch: *arch, DefaultBranch: *defaultBranch}
+	opts := compile.Options{Source: filepath.Base(*file), RunsOn: *runsOn, Arch: *arch, DefaultBranch: *defaultBranch, Name: *name, InitImage: *initImage, BareImage: *bareImage}
 	files, err := build(*file, src, opts)
 	if err != nil {
 		return err

@@ -51,6 +51,7 @@ Gitea read too) and for CircleCI, to see what `starci compile` makes of it:
 
 - `basic/compiled/github/<name>.yml`, from `starci compile`
 - `basic/compiled/circleci/<name>.yml`, from `starci compile --target circleci`
+- `basic/compiled/argo/<name>.yml`, from `starci compile --target argo` (the images it names are placeholders)
 - `basic/compiled/temporal/<name>/`, a Go module from `starci compile --target temporal`
 
 [events](basic/compiled/github/events.yml) is the one to read first for GitHub:

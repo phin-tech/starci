@@ -1,7 +1,16 @@
 # Plan: `starci compile --target argo`
 
-**Status:** planned, nothing built. Items marked *verify* are claims about Argo
-or Kubernetes that have not been checked against its documentation.
+**Status:** built (`internal/compile/argo.go`). Checked against Argo v3.7.18's
+source: `depends`/`dependencies` default to "succeeded or skipped", so a step
+this event does not plan (`when` false: Skipped) lets its dependents go ahead
+and a failed one makes them Omitted; `when` takes `{{=expr}}` with
+`workflow.parameters.*`; a template's `initContainers` are the Kubernetes
+container type, so `restartPolicy: Always` and `startupProbe` are accepted;
+`retryPolicy: OnError` exists. Argo's own strict decoder and validator accept
+every file produced. **Not verified:** that a cluster runs it, in particular
+that Argo's executor finishes a pod with a native sidecar still running.
+**Not built:** remembered passes (needs a `starci` command to ask the store),
+artifacts, a service's `files`.
 
 ## Decided
 

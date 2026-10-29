@@ -21,6 +21,17 @@ STARCI_TEST_TEMPORAL=1 go test ./internal/compile -run TemporalModule
 It does not use a Temporal server or a real step. Nothing yet kills a worker
 partway through a step and checks that another resumes the run.
 
+The Argo compile target writes YAML. Argo's own decoder and validator (a small
+Go program built against Argo's module, which is downloaded) check every
+example it can compile, and run when `STARCI_TEST_ARGO=1`:
+
+```sh
+STARCI_TEST_ARGO=1 go test ./internal/compile -run Argo
+```
+
+That shows the files are valid, not that a cluster runs them: nothing yet runs
+one on kind or k3d, where native sidecars with Argo are still unchecked.
+
 The shared store's tests need an S3, and run when `STARCI_TEST_S3` names a
 bucket there; the bucket is made if it is missing. [Floci](https://floci.io), a
 local AWS emulator, is enough:

@@ -28,6 +28,9 @@ type probe struct {
 	when string
 	// goWhen is the same as a Go expression over c, a context.
 	goWhen string
+	// argoWhen is the same as an Argo expression over the workflow's
+	// parameters (event, ref, schedule, fork).
+	argoWhen string
 }
 
 const (
@@ -46,35 +49,45 @@ const (
 	firstSchedule
 )
 
+// argoParam is a workflow parameter in an Argo expression.
+func argoParam(name string) string { return "workflow.parameters." + name }
+
 func probes(def string, schedules []plan.Schedule) []probe {
 	ref := "refs/heads/" + def
 	push := `(c.Event == "" || c.Event == "push")`
+	argoPush := argoParam("event") + " == 'push'"
 	ps := []probe{
 		{"a push to " + def, plan.Context{Event: plan.EventPush, Ref: def},
 			fmt.Sprintf("(github.event_name == 'push' && github.ref == '%s')", ref),
-			fmt.Sprintf("(%s && c.Ref == %s)", push, q(def))},
+			fmt.Sprintf("(%s && c.Ref == %s)", push, q(def)),
+			fmt.Sprintf("(%s && %s == '%s')", argoPush, argoParam("ref"), def)},
 		{"a push to another branch", plan.Context{Event: plan.EventPush, Ref: standInBranch},
 			fmt.Sprintf("(github.event_name == 'push' && github.ref_type == 'branch' && github.ref != '%s')", ref),
-			fmt.Sprintf("(%s && c.Ref != %s)", push, q(def))},
+			fmt.Sprintf("(%s && c.Ref != %s)", push, q(def)),
+			fmt.Sprintf("(%s && %s != '%s')", argoPush, argoParam("ref"), def)},
 		{"a tag", plan.Context{Event: plan.EventTag, Tag: standInTag},
 			"(github.event_name == 'push' && github.ref_type == 'tag')",
-			`c.Event == "tag"`},
+			`c.Event == "tag"`,
+			argoParam("event") + " == 'tag'"},
 		// From this repository and from a fork are asked about separately:
 		// the difference is who wrote the code, and a script that refuses to
 		// do something for a stranger must still refuse once compiled.
 		{"a pull request", plan.Context{Event: plan.EventPullRequest, Ref: standInBranch, PR: &plan.PullRequest{Number: 1, Base: def, Head: standInBranch}},
 			"(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)",
-			`(c.Event == "pull_request" && !c.fork())`},
+			`(c.Event == "pull_request" && !c.fork())`,
+			"(" + argoParam("event") + " == 'pull_request' && " + argoParam("fork") + " == 'false')"},
 		{"a pull request from a fork", plan.Context{Event: plan.EventPullRequest, Ref: standInBranch, PR: &plan.PullRequest{Number: 1, Base: def, Head: standInBranch, Fork: true}},
 			"(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)",
-			`(c.Event == "pull_request" && c.fork())`},
+			`(c.Event == "pull_request" && c.fork())`,
+			"(" + argoParam("event") + " == 'pull_request' && " + argoParam("fork") + " == 'true')"},
 	}
 	for _, s := range schedules {
 		ps = append(ps, probe{"the " + s.Name + " schedule", plan.Context{Event: plan.EventSchedule, Ref: def, Schedule: s.Name},
 			fmt.Sprintf("(github.event_name == 'schedule' && github.event.schedule == '%s')", s.Cron),
-			fmt.Sprintf(`(c.Event == "schedule" && c.Schedule == %s)`, q(s.Name))})
+			fmt.Sprintf(`(c.Event == "schedule" && c.Schedule == %s)`, q(s.Name)),
+			fmt.Sprintf("(%s == 'schedule' && %s == '%s')", argoParam("event"), argoParam("schedule"), strings.ReplaceAll(s.Name, "'", `\'`))})
 	}
-	return append(ps, probe{"a manual run", plan.Context{Event: plan.EventManual, Ref: def}, "github.event_name == 'workflow_dispatch'", `c.Event == "manual"`})
+	return append(ps, probe{"a manual run", plan.Context{Event: plan.EventManual, Ref: def}, "github.event_name == 'workflow_dispatch'", `c.Event == "manual"`, argoParam("event") + " == 'manual'"})
 }
 
 // union is a script asked about every kind of event, and what came of it.

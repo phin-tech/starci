@@ -1,0 +1,36 @@
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/argoproj/argo-workflows/v3/pkg/apis/workflow/v1alpha1"
+	"github.com/argoproj/argo-workflows/v3/workflow/validate"
+	"sigs.k8s.io/yaml"
+)
+
+func main() {
+	failed := 0
+	for _, f := range os.Args[1:] {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			panic(err)
+		}
+		var wt v1alpha1.WorkflowTemplate
+		if err := yaml.UnmarshalStrict(data, &wt); err != nil {
+			fmt.Println(f, "strict decode:", err)
+			failed++
+			continue
+		}
+		get := validate.ValidateOpts{Lint: true}
+		if err := validate.ValidateWorkflowTemplate(nil, nil, &wt, nil, get); err != nil {
+			fmt.Println(f, "validate:", err)
+			failed++
+			continue
+		}
+		fmt.Println(f, "ok")
+	}
+	if failed > 0 {
+		os.Exit(1)
+	}
+}
