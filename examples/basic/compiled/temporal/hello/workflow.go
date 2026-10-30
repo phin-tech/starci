@@ -52,6 +52,9 @@ type Job struct {
 	Step     json.RawMessage `json:"step"`
 	Context  json.RawMessage `json:"context"`
 	CloneURL string          `json:"clone_url"`
+	// Given are the steps it needs that kept something, by name, for
+	// `starci step` to put real pointers in place of artifact().
+	Given map[string]Result `json:"given,omitempty"`
 }
 
 // Result is what `starci step` prints, and what a skipped step is given.
@@ -110,6 +113,7 @@ func StarciRun(ctx workflow.Context, in Input) (Outcome, error) {
 				return
 			}
 			var blocked []string
+			var given map[string]Result
 			for _, n := range s.Needs {
 				var r Result
 				if err := done[n].Get(ctx, &r); err != nil {
@@ -117,6 +121,14 @@ func StarciRun(ctx workflow.Context, in Input) (Outcome, error) {
 				}
 				if r.Status != "passed" && r.Status != absent {
 					blocked = append(blocked, steps[n].Name)
+				}
+				// Its pointers, and nothing of its output: they go into the
+				// run's history with the step.
+				if len(r.Artifacts) > 0 && string(r.Artifacts) != "null" {
+					if given == nil {
+						given = map[string]Result{}
+					}
+					given[r.Name] = Result{Name: r.Name, Status: r.Status, Artifacts: r.Artifacts}
 				}
 			}
 			if len(blocked) > 0 {
@@ -132,7 +144,7 @@ func StarciRun(ctx workflow.Context, in Input) (Outcome, error) {
 				RetryPolicy:         retry,
 			})
 			var r Result
-			err := workflow.ExecuteActivity(actx, RunStep, Job{Step: json.RawMessage(s.asked), Context: in.Context, CloneURL: in.CloneURL}).Get(actx, &r)
+			err := workflow.ExecuteActivity(actx, RunStep, Job{Step: json.RawMessage(s.asked), Context: in.Context, CloneURL: in.CloneURL, Given: given}).Get(actx, &r)
 			if err != nil {
 				if temporal.IsCanceledError(err) || ctx.Err() != nil {
 					settle[i].SetError(err)

@@ -1,8 +1,8 @@
 # Plan: `starci compile --target temporal`
 
-**Status:** v1 is built (`internal/compile/temporal.go`, `starci sweep`). Not
-done: steps handed artifacts (v2: `starci step` resolves placeholders), tracing,
-the real-server test, and the kill-mid-step resume test.
+**Status:** v1 is built (`internal/compile/temporal.go`, `starci sweep`), and
+so are artifacts (`starci step` resolves placeholders from `given`). Not done:
+tracing, the real-server test, and the kill-mid-step resume test.
 
 ## Decisions (agreed)
 

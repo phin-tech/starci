@@ -67,15 +67,16 @@ def ci(ctx):
 	wants(t, plan, "`prefer` and `avoid` are dropped (build)")
 }
 
-func TestTemporalRefusesWhatItCannotResolve(t *testing.T) {
-	_, err := Temporal("ci.star", []byte(`
+// A step handed an artifact travels with its placeholder, for starci step to
+// resolve from what the workflow gives it.
+func TestTemporalHandsOnArtifacts(t *testing.T) {
+	plan := compileTemporal(t, `
 def ci(ctx):
     build = step("build", image = "alpine:3", run = "make", keep = ["out"])
     return [build, step("ship", image = "alpine:3", run = "ls in", artifacts = {"in": artifact(build, "out")})]
-`), Options{})
-	if err == nil || !strings.Contains(err.Error(), `step "ship" is handed artifacts`) {
-		t.Fatalf("error = %v", err)
-	}
+`)["plan.go"]
+	wants(t, plan, `"artifacts":{"in":{"from":"build","path":"out"}}`)
+	wants(t, plan, "Steps that keep files (build) hand them on")
 }
 
 func TestTemporalModuleIsPinned(t *testing.T) {
@@ -98,7 +99,7 @@ func TestEveryBasicExampleCompilesForTemporal(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := Temporal(file, src, Options{}); err != nil && !strings.Contains(err.Error(), "is handed artifacts") {
+		if _, err := Temporal(file, src, Options{}); err != nil {
 			t.Errorf("%s: %v", filepath.Base(file), err)
 		}
 	}
@@ -116,7 +117,9 @@ def ci(ctx):
         step("build", image = "alpine:3", run = "true"),
         step("lint", image = "alpine:3", run = "true", needs = ["build"]),
         step("test", image = "alpine:3", run = "true", needs = ["build"]),
+        step("ship", image = "alpine:3", run = "true", artifacts = {"in": artifact("build", "out")}),
     ]
+    steps[0] = step("build", image = "alpine:3", run = "true", keep = ["out"])
     if ctx.event == "tag":
         steps.append(step("publish", image = "alpine:3", run = "true", needs = ["lint", "test"]))
     return steps

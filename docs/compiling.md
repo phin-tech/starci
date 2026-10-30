@@ -179,9 +179,12 @@ Temporal Schedule that starts the workflow with `event` set to `schedule` and
   a host.
 - Cancelling the run signals each `starci step`, which takes its containers
   down.
-- Steps that are handed [artifacts](scripts.md#handing-files-on) cannot be
-  compiled yet: only `starci next` puts real pointers in place of `artifact()`. A step
-  that keeps files needs `STARCI_STORE` on every worker.
+- [Artifacts](scripts.md#handing-files-on) carry over. A step travels with its
+  `artifact()` placeholders, and the workflow gives `starci step` the pointers
+  of the steps it needs that kept something (never their output, which would
+  fill the run's history); `starci step` puts the pointers in. The files go
+  through a store the workers share: set `STARCI_STORE` on every worker, unless
+  they share a state directory.
 - Advanced scripts cannot be compiled; something that asks `starci next` can
   carry them out ([driving](driving.md)).
 - The attempts, the timeouts and the SDK version are starci's choices, written

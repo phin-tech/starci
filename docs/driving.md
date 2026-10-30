@@ -51,7 +51,11 @@ stdout, carrying the step's number; add it to the results.
 {"step": {"number": 2, "step": {...}}, "context": {...}, "clone_url": "...", "trace": {"traceparent": "..."}}
 ```
 
-`trace` is optional, and places the step's spans in a run's trace. A step
+`trace` is optional, and places the step's spans in a run's trace. So is
+`given`: the results, by step name, of the steps whose artifacts the step is
+handed, for a step that still has `artifact()` placeholders because it was
+not handed out by `next` (a compiled Temporal workflow hands steps out this
+way). `step` puts the real pointers in their place. A step
 handed [artifacts](scripts.md#handing-files-on) fetches them from the store,
 so machines that run steps of one run need a shared one (`STARCI_STORE`)
 unless they share a state directory. It exits

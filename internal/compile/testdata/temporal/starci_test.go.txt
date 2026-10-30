@@ -20,6 +20,7 @@ func run(t *testing.T, context_ string, fail ...string) (Outcome, []string) {
 	env.RegisterWorkflow(StarciRun)
 	env.RegisterActivity(RunStep)
 	var ran []string
+	jobs = map[string]Job{}
 	env.OnActivity(RunStep, mock.Anything, mock.Anything).Return(func(_ context.Context, job Job) (Result, error) {
 		var a struct {
 			Number int `json:"number"`
@@ -31,13 +32,18 @@ func run(t *testing.T, context_ string, fail ...string) (Outcome, []string) {
 			t.Error(err)
 		}
 		ran = append(ran, a.Step.Name)
+		jobs[a.Step.Name] = job
 		status := "passed"
 		for _, f := range fail {
 			if f == a.Step.Name {
 				status = "failed"
 			}
 		}
-		return Result{Number: a.Number, Name: a.Step.Name, Status: status}, nil
+		r := Result{Number: a.Number, Name: a.Step.Name, Status: status, Output: "a lot of output"}
+		if a.Step.Name == "build" {
+			r.Artifacts = json.RawMessage(`{"out":{"hash":"abc","size":3}}`)
+		}
+		return r, nil
 	})
 	env.ExecuteWorkflow(StarciRun, Input{Context: json.RawMessage(context_), CloneURL: "file:///repo"})
 	if !env.IsWorkflowCompleted() {
@@ -51,6 +57,22 @@ func run(t *testing.T, context_ string, fail ...string) (Outcome, []string) {
 		t.Fatal(err)
 	}
 	return out, ran
+}
+
+// jobs are what each step's activity was handed, in the last run.
+var jobs map[string]Job
+
+// A step handed an artifact is given the pointers of the step that kept it,
+// and nothing of that step's output.
+func TestAStepIsGivenWhatTheStepItNeedsKept(t *testing.T) {
+	run(t, `{"event":"push","ref":"main","sha":"abc"}`)
+	given := jobs["ship"].Given["build"]
+	if string(given.Artifacts) != `{"out":{"hash":"abc","size":3}}` || given.Output != "" {
+		t.Fatalf("ship was given %+v", jobs["ship"].Given)
+	}
+	if len(jobs["lint"].Given) != 0 && jobs["lint"].Given["build"].Output != "" {
+		t.Errorf("lint was given %+v", jobs["lint"].Given)
+	}
 }
 
 func statuses(o Outcome) map[string]string {

@@ -52,10 +52,7 @@ for script in *.ci.star; do
 			"$starci" compile --offline --target argo --init-image "$init" --bare-image "$bare" --file "$script" >"$out"
 		fi
 	fi
-	# A directory, not a file; refused for a script that hands artifacts on.
-	if grep -q 'artifacts *=' "$script"; then
-		continue
-	fi
+	# A directory, not a file.
 	out=compiled/temporal/$name
 	if [ -n "$check" ]; then
 		"$starci" compile --offline --target temporal --file "$script" --check "$out" >/dev/null || {

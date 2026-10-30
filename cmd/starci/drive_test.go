@@ -107,3 +107,66 @@ func TestNextAndStepCarryARunOutAndResumeIt(t *testing.T) {
 		t.Errorf("the tests ran as %q, want each once: a, then b on resuming", got)
 	}
 }
+
+// A step that still has artifact() placeholders, as a compiled Temporal
+// workflow hands it out, is resolved by starci step from the results it is
+// given, and fails, saying why, without them.
+func TestStepResolvesWhatItIsHandedFromWhatItIsGiven(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds starci and runs it; skipped with -short")
+	}
+	dir := t.TempDir()
+	starci := filepath.Join(dir, "starci")
+	if out, err := exec.Command("go", "build", "-o", starci, ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	repo := filepath.Join(dir, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "a"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"init", "-q"}, {"add", "-A"}, {"-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"}} {
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	sha, _ := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
+	p, err := plan.Eval("ci.star", []byte(`
+def ci(ctx):
+    build = step("build", run = "mkdir out && echo made > out/f", keep = ["out"])
+    return [build, step("ship", run = "test \"$(cat in/f)\" = made", artifacts = {"in": artifact(build, "out")})]
+`), plan.Context{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := plan.Context{SHA: strings.TrimSpace(string(sha))}
+	run := func(job stepJob) plan.Result {
+		t.Helper()
+		data, _ := json.Marshal(job)
+		cmd := exec.Command(starci, "step", "--bare")
+		cmd.Env = append(os.Environ(), "STARCI_STATE="+filepath.Join(dir, "state"))
+		cmd.Stdin = bytes.NewReader(data)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("starci step: %v", err)
+		}
+		var r plan.Result
+		if err := json.Unmarshal(out, &r); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	built := run(stepJob{Step: plan.Asked{Number: 1, Step: p.Steps[0]}, Context: c, CloneURL: repo})
+	if built.Status != "passed" || built.Artifacts["out"].Hash == "" {
+		t.Fatalf("build: %+v", built)
+	}
+	ship := plan.Asked{Number: 2, Step: p.Steps[1]}
+	if r := run(stepJob{Step: ship, Context: c, CloneURL: repo, Given: map[string]plan.Result{"build": built}}); r.Status != "passed" {
+		t.Errorf("ship, given build's result: %s: %s", r.Status, r.Detail)
+	}
+	if r := run(stepJob{Step: ship, Context: c, CloneURL: repo}); r.Status != "failed" || !strings.Contains(r.Detail, "cannot be handed its artifacts") {
+		t.Errorf("ship, given nothing: %+v", r)
+	}
+}

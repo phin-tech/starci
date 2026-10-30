@@ -86,6 +86,10 @@ type stepJob struct {
 	CloneURL string       `json:"clone_url"`
 	// Trace places the step's spans in a run's trace. Optional.
 	Trace tracing.Carrier `json:"trace,omitzero"`
+	// Given are the results of the steps whose artifacts the step is handed,
+	// by name, for a step that still has artifact() placeholders: one handed
+	// out by something that does not ask next (a compiled Temporal workflow).
+	Given map[string]plan.Result `json:"given,omitempty"`
 }
 
 func stepCmd(args []string) error {
@@ -128,6 +132,12 @@ func stepCmd(args []string) error {
 	defer flush()
 
 	s := job.Step.Step
+	// What the step is handed, now that the steps that kept it have.
+	if resolved, err := plan.Resolve(s, job.Given); err != nil {
+		return writeJSON(job.Step.Answer(plan.Result{Status: "failed", Machine: host, Detail: "the step cannot be handed its artifacts: " + err.Error()}))
+	} else {
+		s = resolved
+	}
 	stepCtx, end := ctx, func(plan.Result) {}
 	if job.Trace.Parent != "" {
 		stepCtx, end = job.Trace.Step(ctx, s.Name)

@@ -164,6 +164,12 @@ func checkArtifacts(steps []Step) error {
 	return nil
 }
 
+// Resolve puts real pointers in place of a step's artifact() placeholders,
+// from the results of the steps they name, by name. It is what Next does
+// before it hands a basic plan's step out, for whatever hands steps out
+// without asking Next (a compiled Temporal workflow).
+func Resolve(s Step, byName map[string]Result) (Step, error) { return resolve(s, byName) }
+
 // resolve puts real pointers in place of a step's placeholders, from the
 // results of the steps it names.
 func resolve(s Step, byName map[string]Result) (Step, error) {

@@ -75,7 +75,7 @@ func Temporal(filename string, src []byte, o Options) (map[string]string, error)
 		notes = append(notes, fmt.Sprintf("`prefer` and `avoid` are dropped (%s): a task queue is offered by a worker or it is not, and cannot be preferred.", strings.Join(placed, ", ")))
 	}
 	if len(keeps) > 0 {
-		notes = append(notes, fmt.Sprintf("Steps that keep files (%s) hand them on only through a store the workers share: set STARCI_STORE on every worker.", strings.Join(keeps, ", ")))
+		notes = append(notes, fmt.Sprintf("Steps that keep files (%s) hand them on through a store the workers share: set STARCI_STORE on every worker, unless they share a state directory.", strings.Join(keeps, ", ")))
 	}
 	if len(u.schedules) > 0 {
 		notes = append(notes, "A schedule is a Temporal Schedule you create: start the workflow with the context's `event` set to schedule and `schedule` to its name. Overlap and catch-up are Temporal's to decide.")
@@ -137,8 +137,10 @@ func Temporal(filename string, src []byte, o Options) (map[string]string, error)
 
 // temporalRefusal says why a step cannot be a Temporal activity, if it cannot.
 func temporalRefusal(s plan.Step) error {
-	if len(s.Artifacts) > 0 {
-		return fmt.Errorf("step %q is handed artifacts, which the Temporal target cannot yet resolve: `starci step` is given steps as they are, and only `starci next` puts real pointers in place of artifact() placeholders", s.Name)
+	// What a step is handed travels as artifact() placeholders, with the
+	// results of the steps that kept it; `starci step` puts the pointers in.
+	if err := checkPlaceholders(s); err != nil {
+		return err
 	}
 	return bareRefusal(s)
 }
