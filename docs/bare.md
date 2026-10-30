@@ -87,6 +87,31 @@ reuse as an image step has them, and needs no agreement from the machine. A
 step that needs the machine itself, `xcodebuild` on a Mac say, should be run
 without it.
 
+## In a virtual machine instead
+
+Docker is not the only boundary to put around a step. Run starci *inside* a
+virtual machine (a Lima or Colima guest, a Tart VM, a Firecracker microVM, a
+cloud instance) and let the machine be the isolation: the steps are bare,
+nothing needs Docker, and a step that goes wrong damages a VM that is thrown
+away, not your laptop. A compiled Go program, an `xcodebuild`, anything the
+VM can run, is a bare step with its toolchain pinned as a [tool](tools.md).
+
+starci does not start the VM or put the checkout in it. Do that however you
+already do, and tell starci the machine is disposable:
+
+```sh
+STARCI_BARE=true starci run /path/to/checkout
+```
+
+`STARCI_BARE=true` is what lets a pull request from a fork run bare, which
+otherwise only a GitHub-hosted runner does. Say it only of a machine that is
+thrown away after, because it is the only thing between that code and
+whatever else the VM holds, such as credentials left in its environment or
+mounted from your own machine.
+
+Steps that name an image still need Docker in the VM. This is documented, not
+yet tried against a particular VM tool.
+
 ## Who agrees to it
 
 A bare step runs as the machine's user with no container around it, so the
