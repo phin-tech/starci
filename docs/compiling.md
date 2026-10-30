@@ -7,9 +7,12 @@ WorkflowTemplate, or as a Temporal workflow:
 ```sh
 starci compile > .github/workflows/ci.yml
 starci compile --target circleci > .circleci/config.yml
+starci compile --target argo --init-image REGISTRY/init@sha256:... > ci.yaml
+starci compile --target temporal -o ci-workflow
 ```
 
-Each step becomes a job that does what a machine does: checks out only the
+Argo and Temporal have sections of their own below. For GitHub and CircleCI,
+each step becomes a job that does what a machine does: checks out only the
 step's inputs, downloads its tools and checks their checksums, builds an image
 with its packages, and runs its command in that container, or on the runner
 itself for a [bare step](bare.md). A job that has
@@ -17,7 +20,7 @@ already passed with the same inputs skips the work, using the Actions cache as
 the record. `needs` and `on` carry over, as job dependencies and runner
 labels, and so does `network = False`.
 
-[Artifacts](scripts.md#handing-files-on) carry over too. A job that keeps
+[Artifacts](scripts.md#handing-files-on) carry over too, for these two. A job that keeps
 something hands it on through the CI tool's own way of moving files between
 the jobs of a run (Actions artifacts, packed with tar so that executable files
 stay executable, or CircleCI's workspace), and keeps it in its record of a pass

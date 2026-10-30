@@ -173,7 +173,10 @@ and like services there is no capability for them
 - In a basic plan, `Next` puts the real pointer in place of an
   `artifact(step, path)` placeholder before handing the step out. The step as
   handed out is what ran, and what its result answers.
-- The compile targets write the same as shell (`internal/compile/artifacts.go`):
+- The Argo target refuses artifacts, and the Temporal target refuses a step
+  that is handed one (`starci step` is given the step as compiled, with its
+  `artifact()` placeholders); see `docs/compiling.md`.
+- The GitHub and CircleCI targets write the same as shell (`internal/compile/artifacts.go`):
   a job keeps what it keeps in its record of a pass too, so a skipped job
   still hands it on, and a job handed something is keyed on `kept_hash` of
   it. A change to what a machine keeps, or to how an artifact is keyed, needs
