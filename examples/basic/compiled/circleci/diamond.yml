@@ -18,38 +18,27 @@ jobs:
     steps:
       - checkout
       - run:
-          name: "Identify the inputs"
+          name: "Tool: node"
           command: |
-            git ls-files -s -- ':(top)' > /tmp/starci-inputs
-      - restore_cache:
-          name: Has this already passed with these inputs?
-          keys:
-            - starci-passed-build-1f97bf004cbb6c20-{{ checksum "/tmp/starci-inputs" }}
-      - run:
-          name: "Stop here if it has"
-          command: |
-            if [ -e ~/starci-passed/at ]; then
-              echo "Passed before with the same inputs, on $(cat ~/starci-passed/at). Nothing to do."
-              circleci-agent step halt
-            fi
+            mkdir -p "$HOME/starci-tools/node"
+            curl -fsSL 'https://nodejs.org/dist/v22.23.4/node-v22.23.4-{os}-x64.tar.gz' -o "/tmp/node.download"
+            echo "b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406  /tmp/node.download" | sha256sum -c -
+            tar -xf "/tmp/node.download" -C "$HOME/starci-tools/node"
       - run:
           name: "build"
           environment:
             STARCI_RUN: |-
               npm ci && npm run build
           command: |
-            docker run --rm \
-              -v "$PWD:/workspace" \
-              -w /workspace \
-              node:22-bookworm-slim sh -c "$STARCI_RUN"
-      - run:
-          name: "Remember this pass"
-          command: |
-            mkdir -p ~/starci-passed && date > ~/starci-passed/at
-      - save_cache:
-          key: starci-passed-build-1f97bf004cbb6c20-{{ checksum "/tmp/starci-inputs" }}
-          paths:
-            - ~/starci-passed
+            starci_root="$(mktemp -d)"
+            mkdir "$starci_root/home" "$starci_root/tmp"
+            env -i \
+              HOME="$starci_root/home" \
+              TMPDIR="$starci_root/tmp" \
+              LANG=C.UTF-8 \
+              STARCI_WORKSPACE="$PWD" \
+              PATH="$HOME/starci-tools/node/node-v22.23.4-{os}-x64/bin:""$PATH" \
+              /bin/sh -c "$STARCI_RUN"
 
   lint:
     machine:
@@ -58,38 +47,27 @@ jobs:
     steps:
       - checkout
       - run:
-          name: "Identify the inputs"
+          name: "Tool: node"
           command: |
-            git ls-files -s -- ':(top)' > /tmp/starci-inputs
-      - restore_cache:
-          name: Has this already passed with these inputs?
-          keys:
-            - starci-passed-lint-d309b4ed71edb687-{{ checksum "/tmp/starci-inputs" }}
-      - run:
-          name: "Stop here if it has"
-          command: |
-            if [ -e ~/starci-passed/at ]; then
-              echo "Passed before with the same inputs, on $(cat ~/starci-passed/at). Nothing to do."
-              circleci-agent step halt
-            fi
+            mkdir -p "$HOME/starci-tools/node"
+            curl -fsSL 'https://nodejs.org/dist/v22.23.4/node-v22.23.4-{os}-x64.tar.gz' -o "/tmp/node.download"
+            echo "b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406  /tmp/node.download" | sha256sum -c -
+            tar -xf "/tmp/node.download" -C "$HOME/starci-tools/node"
       - run:
           name: "lint"
           environment:
             STARCI_RUN: |-
               npm ci && npm run lint
           command: |
-            docker run --rm \
-              -v "$PWD:/workspace" \
-              -w /workspace \
-              node:22-bookworm-slim sh -c "$STARCI_RUN"
-      - run:
-          name: "Remember this pass"
-          command: |
-            mkdir -p ~/starci-passed && date > ~/starci-passed/at
-      - save_cache:
-          key: starci-passed-lint-d309b4ed71edb687-{{ checksum "/tmp/starci-inputs" }}
-          paths:
-            - ~/starci-passed
+            starci_root="$(mktemp -d)"
+            mkdir "$starci_root/home" "$starci_root/tmp"
+            env -i \
+              HOME="$starci_root/home" \
+              TMPDIR="$starci_root/tmp" \
+              LANG=C.UTF-8 \
+              STARCI_WORKSPACE="$PWD" \
+              PATH="$HOME/starci-tools/node/node-v22.23.4-{os}-x64/bin:""$PATH" \
+              /bin/sh -c "$STARCI_RUN"
 
   test:
     machine:
@@ -98,38 +76,27 @@ jobs:
     steps:
       - checkout
       - run:
-          name: "Identify the inputs"
+          name: "Tool: node"
           command: |
-            git ls-files -s -- ':(top)' > /tmp/starci-inputs
-      - restore_cache:
-          name: Has this already passed with these inputs?
-          keys:
-            - starci-passed-test-3dce010675ea0e57-{{ checksum "/tmp/starci-inputs" }}
-      - run:
-          name: "Stop here if it has"
-          command: |
-            if [ -e ~/starci-passed/at ]; then
-              echo "Passed before with the same inputs, on $(cat ~/starci-passed/at). Nothing to do."
-              circleci-agent step halt
-            fi
+            mkdir -p "$HOME/starci-tools/node"
+            curl -fsSL 'https://nodejs.org/dist/v22.23.4/node-v22.23.4-{os}-x64.tar.gz' -o "/tmp/node.download"
+            echo "b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406  /tmp/node.download" | sha256sum -c -
+            tar -xf "/tmp/node.download" -C "$HOME/starci-tools/node"
       - run:
           name: "test"
           environment:
             STARCI_RUN: |-
               npm ci && npm test
           command: |
-            docker run --rm \
-              -v "$PWD:/workspace" \
-              -w /workspace \
-              node:22-bookworm-slim sh -c "$STARCI_RUN"
-      - run:
-          name: "Remember this pass"
-          command: |
-            mkdir -p ~/starci-passed && date > ~/starci-passed/at
-      - save_cache:
-          key: starci-passed-test-3dce010675ea0e57-{{ checksum "/tmp/starci-inputs" }}
-          paths:
-            - ~/starci-passed
+            starci_root="$(mktemp -d)"
+            mkdir "$starci_root/home" "$starci_root/tmp"
+            env -i \
+              HOME="$starci_root/home" \
+              TMPDIR="$starci_root/tmp" \
+              LANG=C.UTF-8 \
+              STARCI_WORKSPACE="$PWD" \
+              PATH="$HOME/starci-tools/node/node-v22.23.4-{os}-x64/bin:""$PATH" \
+              /bin/sh -c "$STARCI_RUN"
 
   package:
     machine:
@@ -138,38 +105,27 @@ jobs:
     steps:
       - checkout
       - run:
-          name: "Identify the inputs"
+          name: "Tool: node"
           command: |
-            git ls-files -s -- ':(top)' > /tmp/starci-inputs
-      - restore_cache:
-          name: Has this already passed with these inputs?
-          keys:
-            - starci-passed-package-33c496384cdf1a14-{{ checksum "/tmp/starci-inputs" }}
-      - run:
-          name: "Stop here if it has"
-          command: |
-            if [ -e ~/starci-passed/at ]; then
-              echo "Passed before with the same inputs, on $(cat ~/starci-passed/at). Nothing to do."
-              circleci-agent step halt
-            fi
+            mkdir -p "$HOME/starci-tools/node"
+            curl -fsSL 'https://nodejs.org/dist/v22.23.4/node-v22.23.4-{os}-x64.tar.gz' -o "/tmp/node.download"
+            echo "b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406  /tmp/node.download" | sha256sum -c -
+            tar -xf "/tmp/node.download" -C "$HOME/starci-tools/node"
       - run:
           name: "package"
           environment:
             STARCI_RUN: |-
               npm ci && npm pack
           command: |
-            docker run --rm \
-              -v "$PWD:/workspace" \
-              -w /workspace \
-              node:22-bookworm-slim sh -c "$STARCI_RUN"
-      - run:
-          name: "Remember this pass"
-          command: |
-            mkdir -p ~/starci-passed && date > ~/starci-passed/at
-      - save_cache:
-          key: starci-passed-package-33c496384cdf1a14-{{ checksum "/tmp/starci-inputs" }}
-          paths:
-            - ~/starci-passed
+            starci_root="$(mktemp -d)"
+            mkdir "$starci_root/home" "$starci_root/tmp"
+            env -i \
+              HOME="$starci_root/home" \
+              TMPDIR="$starci_root/tmp" \
+              LANG=C.UTF-8 \
+              STARCI_WORKSPACE="$PWD" \
+              PATH="$HOME/starci-tools/node/node-v22.23.4-{os}-x64/bin:""$PATH" \
+              /bin/sh -c "$STARCI_RUN"
 
 workflows:
   ci:

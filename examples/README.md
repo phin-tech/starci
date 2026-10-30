@@ -18,7 +18,7 @@ The three `pi-gamebook` ones run as they are against that repository.
 | | |
 |---|---|
 | [hello](basic/hello.ci.star) | The smallest script. |
-| [diamond](basic/diamond.ci.star) | Steps that depend on each other. |
+| [diamond](basic/diamond.ci.star) | Steps that depend on each other, running Node as a pinned tool with no image. |
 | [docs-only](basic/docs-only.ci.star) | Do nothing for a documentation commit. |
 | [events](basic/events.ci.star) | One script for pushes, tags, pull requests, a nightly schedule and manual runs. |
 | [branches](basic/branches.ci.star) | Publish from main only; `cache = False` for steps with effects. |
@@ -34,7 +34,7 @@ The three `pi-gamebook` ones run as they are against that repository.
 | [changed-files-matrix](basic/changed-files-matrix.ci.star) | A job per service that changed, the usual use of a changed-files action. |
 | [python-uv](basic/python-uv.ci.star) | A tool (uv), apt packages, and input patterns. |
 | [services](basic/services.ci.star) | A database beside each test step, its own and ready before the step starts. |
-| [go](basic/go.ci.star) | The Go toolchain as a tool; builds for several platforms. |
+| [go](basic/go.ci.star) | The Go toolchain as a pinned tool, with no image; builds for several platforms. |
 | [rust](basic/rust.ci.star) | Cargo, with its caches kept between runs. |
 | [terraform](basic/terraform.ci.star) | Validate each stack that changed. |
 | [shell-scripts](basic/shell-scripts.ci.star) | Two small tools, one an archive and one a single binary. |

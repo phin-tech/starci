@@ -9,12 +9,6 @@
 #     [-p event=push|tag|pull_request|schedule|manual -p ref=BRANCH -p tag=NAME -p fork=true]
 #
 # What does not carry over:
-#  - A step with cache = True is skipped when it passed before with the same
-#    inputs, if the `store` parameter names a shared store (STARCI_STORE, as
-#    for a machine); without one every step runs every time. The init image
-#    must then hold starci, and the pods need the store's credentials from the
-#    cluster. A pass is keyed on the step's image by name: a tag that moves
-#    does not run it again.
 #  - A step that fails fails its pod and is not run again; a pod lost to its
 #    node is tried again, twice. Steps that need a failed step are omitted by
 #    Argo, not skipped.
@@ -47,6 +41,8 @@ spec:
         tasks:
           - name: "build"
             inline:
+              nodeSelector:
+                kubernetes.io/arch: "amd64"
               retryStrategy:
                 limit: 2
                 retryPolicy: "OnError"
@@ -69,29 +65,18 @@ spec:
                       git remote add origin "$STARCI_CLONE_URL"
                       git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
                       git checkout -q FETCH_HEAD
-                      if [ -n "${STARCI_STORE:-}" ]; then
-                        mkdir -p /opt/starci
-                        cp "$(command -v starci)" /opt/starci/starci
-                        printf '%s' "$STARCI_STEP" | starci pass key > /opt/starci/key
-                        if starci pass get "$(cat /opt/starci/key)"; then touch /opt/starci/hit; chmod -R a+rX /opt/starci; exit 0; fi
-                        chmod -R a+rX /opt/starci
-                      fi
                       rm -rf .git
                       chmod -R a+rwX /workspace
+                      mkdir -p "/opt/starci/tools/node"
+                      curl -fsSL 'https://nodejs.org/dist/v22.23.4/node-v22.23.4-{os}-x64.tar.gz' -o "/tmp/node.download"
+                      echo "b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406  /tmp/node.download" | sha256sum -c -
+                      tar -xf "/tmp/node.download" -C "/opt/starci/tools/node"
                       chmod -R a+rX /opt/starci/tools 2>/dev/null || true
                   env:
                     - name: "STARCI_CLONE_URL"
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
-                    - name: "STARCI_STEP"
-                      value: "{\"name\":\"build\",\"image\":\"node:22-bookworm-slim\",\"run\":\"npm ci && npm run build\",\"needs\":[],\"env\":{},\"inputs\":[\".\"],\"caches\":{},\"cache\":true,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
-                    - name: "STARCI_ARCH"
-                      value: "amd64"
-                    - name: "STARCI_STORE"
-                      value: "{{workflow.parameters.store}}"
-                    - name: "STARCI_STATE"
-                      value: "/tmp/starci-state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
@@ -99,27 +84,15 @@ spec:
                       mountPath: "/opt/starci"
               container:
                 name: "main"
-                image: "node:22-bookworm-slim"
+                image: "registry.example/starci-bare:latest"
                 workingDir: "/workspace"
                 command:
                   - "sh"
                   - "-c"
                 args:
                   - |-
-                    if [ -e /opt/starci/hit ]; then echo 'starci: passed before with the same inputs; not run again'; exit 0; fi
-                    (
+                    PATH="/opt/starci/tools/node/node-v22.23.4-{os}-x64/bin:"$PATH; export PATH
                     npm ci && npm run build
-                    )
-                    rc=$?
-                    if [ "$rc" -eq 0 ] && [ -e /opt/starci/key ]; then
-                      /opt/starci/starci pass put "$(cat /opt/starci/key)" 'build' || echo 'starci: could not record the pass' >&2
-                    fi
-                    exit $rc
-                env:
-                  - name: "STARCI_STORE"
-                    value: "{{workflow.parameters.store}}"
-                  - name: "STARCI_STATE"
-                    value: "/tmp/starci-state"
                 volumeMounts:
                   - name: "workspace"
                     mountPath: "/workspace"
@@ -130,6 +103,8 @@ spec:
             dependencies:
               - "build"
             inline:
+              nodeSelector:
+                kubernetes.io/arch: "amd64"
               retryStrategy:
                 limit: 2
                 retryPolicy: "OnError"
@@ -152,29 +127,18 @@ spec:
                       git remote add origin "$STARCI_CLONE_URL"
                       git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
                       git checkout -q FETCH_HEAD
-                      if [ -n "${STARCI_STORE:-}" ]; then
-                        mkdir -p /opt/starci
-                        cp "$(command -v starci)" /opt/starci/starci
-                        printf '%s' "$STARCI_STEP" | starci pass key > /opt/starci/key
-                        if starci pass get "$(cat /opt/starci/key)"; then touch /opt/starci/hit; chmod -R a+rX /opt/starci; exit 0; fi
-                        chmod -R a+rX /opt/starci
-                      fi
                       rm -rf .git
                       chmod -R a+rwX /workspace
+                      mkdir -p "/opt/starci/tools/node"
+                      curl -fsSL 'https://nodejs.org/dist/v22.23.4/node-v22.23.4-{os}-x64.tar.gz' -o "/tmp/node.download"
+                      echo "b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406  /tmp/node.download" | sha256sum -c -
+                      tar -xf "/tmp/node.download" -C "/opt/starci/tools/node"
                       chmod -R a+rX /opt/starci/tools 2>/dev/null || true
                   env:
                     - name: "STARCI_CLONE_URL"
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
-                    - name: "STARCI_STEP"
-                      value: "{\"name\":\"lint\",\"image\":\"node:22-bookworm-slim\",\"run\":\"npm ci && npm run lint\",\"needs\":[\"build\"],\"env\":{},\"inputs\":[\".\"],\"caches\":{},\"cache\":true,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
-                    - name: "STARCI_ARCH"
-                      value: "amd64"
-                    - name: "STARCI_STORE"
-                      value: "{{workflow.parameters.store}}"
-                    - name: "STARCI_STATE"
-                      value: "/tmp/starci-state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
@@ -182,27 +146,15 @@ spec:
                       mountPath: "/opt/starci"
               container:
                 name: "main"
-                image: "node:22-bookworm-slim"
+                image: "registry.example/starci-bare:latest"
                 workingDir: "/workspace"
                 command:
                   - "sh"
                   - "-c"
                 args:
                   - |-
-                    if [ -e /opt/starci/hit ]; then echo 'starci: passed before with the same inputs; not run again'; exit 0; fi
-                    (
+                    PATH="/opt/starci/tools/node/node-v22.23.4-{os}-x64/bin:"$PATH; export PATH
                     npm ci && npm run lint
-                    )
-                    rc=$?
-                    if [ "$rc" -eq 0 ] && [ -e /opt/starci/key ]; then
-                      /opt/starci/starci pass put "$(cat /opt/starci/key)" 'lint' || echo 'starci: could not record the pass' >&2
-                    fi
-                    exit $rc
-                env:
-                  - name: "STARCI_STORE"
-                    value: "{{workflow.parameters.store}}"
-                  - name: "STARCI_STATE"
-                    value: "/tmp/starci-state"
                 volumeMounts:
                   - name: "workspace"
                     mountPath: "/workspace"
@@ -213,6 +165,8 @@ spec:
             dependencies:
               - "build"
             inline:
+              nodeSelector:
+                kubernetes.io/arch: "amd64"
               retryStrategy:
                 limit: 2
                 retryPolicy: "OnError"
@@ -235,29 +189,18 @@ spec:
                       git remote add origin "$STARCI_CLONE_URL"
                       git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
                       git checkout -q FETCH_HEAD
-                      if [ -n "${STARCI_STORE:-}" ]; then
-                        mkdir -p /opt/starci
-                        cp "$(command -v starci)" /opt/starci/starci
-                        printf '%s' "$STARCI_STEP" | starci pass key > /opt/starci/key
-                        if starci pass get "$(cat /opt/starci/key)"; then touch /opt/starci/hit; chmod -R a+rX /opt/starci; exit 0; fi
-                        chmod -R a+rX /opt/starci
-                      fi
                       rm -rf .git
                       chmod -R a+rwX /workspace
+                      mkdir -p "/opt/starci/tools/node"
+                      curl -fsSL 'https://nodejs.org/dist/v22.23.4/node-v22.23.4-{os}-x64.tar.gz' -o "/tmp/node.download"
+                      echo "b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406  /tmp/node.download" | sha256sum -c -
+                      tar -xf "/tmp/node.download" -C "/opt/starci/tools/node"
                       chmod -R a+rX /opt/starci/tools 2>/dev/null || true
                   env:
                     - name: "STARCI_CLONE_URL"
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
-                    - name: "STARCI_STEP"
-                      value: "{\"name\":\"test\",\"image\":\"node:22-bookworm-slim\",\"run\":\"npm ci && npm test\",\"needs\":[\"build\"],\"env\":{},\"inputs\":[\".\"],\"caches\":{},\"cache\":true,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
-                    - name: "STARCI_ARCH"
-                      value: "amd64"
-                    - name: "STARCI_STORE"
-                      value: "{{workflow.parameters.store}}"
-                    - name: "STARCI_STATE"
-                      value: "/tmp/starci-state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
@@ -265,27 +208,15 @@ spec:
                       mountPath: "/opt/starci"
               container:
                 name: "main"
-                image: "node:22-bookworm-slim"
+                image: "registry.example/starci-bare:latest"
                 workingDir: "/workspace"
                 command:
                   - "sh"
                   - "-c"
                 args:
                   - |-
-                    if [ -e /opt/starci/hit ]; then echo 'starci: passed before with the same inputs; not run again'; exit 0; fi
-                    (
+                    PATH="/opt/starci/tools/node/node-v22.23.4-{os}-x64/bin:"$PATH; export PATH
                     npm ci && npm test
-                    )
-                    rc=$?
-                    if [ "$rc" -eq 0 ] && [ -e /opt/starci/key ]; then
-                      /opt/starci/starci pass put "$(cat /opt/starci/key)" 'test' || echo 'starci: could not record the pass' >&2
-                    fi
-                    exit $rc
-                env:
-                  - name: "STARCI_STORE"
-                    value: "{{workflow.parameters.store}}"
-                  - name: "STARCI_STATE"
-                    value: "/tmp/starci-state"
                 volumeMounts:
                   - name: "workspace"
                     mountPath: "/workspace"
@@ -297,6 +228,8 @@ spec:
               - "lint"
               - "test"
             inline:
+              nodeSelector:
+                kubernetes.io/arch: "amd64"
               retryStrategy:
                 limit: 2
                 retryPolicy: "OnError"
@@ -319,29 +252,18 @@ spec:
                       git remote add origin "$STARCI_CLONE_URL"
                       git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
                       git checkout -q FETCH_HEAD
-                      if [ -n "${STARCI_STORE:-}" ]; then
-                        mkdir -p /opt/starci
-                        cp "$(command -v starci)" /opt/starci/starci
-                        printf '%s' "$STARCI_STEP" | starci pass key > /opt/starci/key
-                        if starci pass get "$(cat /opt/starci/key)"; then touch /opt/starci/hit; chmod -R a+rX /opt/starci; exit 0; fi
-                        chmod -R a+rX /opt/starci
-                      fi
                       rm -rf .git
                       chmod -R a+rwX /workspace
+                      mkdir -p "/opt/starci/tools/node"
+                      curl -fsSL 'https://nodejs.org/dist/v22.23.4/node-v22.23.4-{os}-x64.tar.gz' -o "/tmp/node.download"
+                      echo "b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406  /tmp/node.download" | sha256sum -c -
+                      tar -xf "/tmp/node.download" -C "/opt/starci/tools/node"
                       chmod -R a+rX /opt/starci/tools 2>/dev/null || true
                   env:
                     - name: "STARCI_CLONE_URL"
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
-                    - name: "STARCI_STEP"
-                      value: "{\"name\":\"package\",\"image\":\"node:22-bookworm-slim\",\"run\":\"npm ci && npm pack\",\"needs\":[\"lint\",\"test\"],\"env\":{},\"inputs\":[\".\"],\"caches\":{},\"cache\":true,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
-                    - name: "STARCI_ARCH"
-                      value: "amd64"
-                    - name: "STARCI_STORE"
-                      value: "{{workflow.parameters.store}}"
-                    - name: "STARCI_STATE"
-                      value: "/tmp/starci-state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
@@ -349,27 +271,15 @@ spec:
                       mountPath: "/opt/starci"
               container:
                 name: "main"
-                image: "node:22-bookworm-slim"
+                image: "registry.example/starci-bare:latest"
                 workingDir: "/workspace"
                 command:
                   - "sh"
                   - "-c"
                 args:
                   - |-
-                    if [ -e /opt/starci/hit ]; then echo 'starci: passed before with the same inputs; not run again'; exit 0; fi
-                    (
+                    PATH="/opt/starci/tools/node/node-v22.23.4-{os}-x64/bin:"$PATH; export PATH
                     npm ci && npm pack
-                    )
-                    rc=$?
-                    if [ "$rc" -eq 0 ] && [ -e /opt/starci/key ]; then
-                      /opt/starci/starci pass put "$(cat /opt/starci/key)" 'package' || echo 'starci: could not record the pass' >&2
-                    fi
-                    exit $rc
-                env:
-                  - name: "STARCI_STORE"
-                    value: "{{workflow.parameters.store}}"
-                  - name: "STARCI_STATE"
-                    value: "/tmp/starci-state"
                 volumeMounts:
                   - name: "workspace"
                     mountPath: "/workspace"

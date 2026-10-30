@@ -22,34 +22,12 @@ jobs:
           command: |
             git sparse-checkout set --no-cone '/**/*.go' '/go.mod' '/go.sum'
       - run:
-          name: "Identify the inputs"
-          command: |
-            git ls-files -s -- ':(top,glob)**/*.go' ':(top,literal)go.mod' ':(top,literal)go.sum' > /tmp/starci-inputs
-      - restore_cache:
-          name: Has this already passed with these inputs?
-          keys:
-            - starci-passed-vet-9996d1ce7b10c758-{{ checksum "/tmp/starci-inputs" }}
-      - run:
-          name: "Stop here if it has"
-          command: |
-            if [ -e ~/starci-passed/at ]; then
-              echo "Passed before with the same inputs, on $(cat ~/starci-passed/at). Nothing to do."
-              circleci-agent step halt
-            fi
-      - run:
           name: "Tool: go"
           command: |
             mkdir -p "$HOME/starci-tools/go"
-            curl -fsSL 'https://go.dev/dl/go1.26.5.linux-amd64.tar.gz' -o "/tmp/go.download"
+            curl -fsSL 'https://go.dev/dl/go1.26.5.{os}-amd64.tar.gz' -o "/tmp/go.download"
             echo "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053  /tmp/go.download" | sha256sum -c -
             tar -xf "/tmp/go.download" -C "$HOME/starci-tools/go"
-      - run:
-          name: "Image with ca-certificates"
-          command: |
-            docker build -q -t starci-env-vet - \<<'DOCKERFILE'
-            FROM debian:12-slim
-            RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
-            DOCKERFILE
       - restore_cache:
           name: "Cache: go-build"
           keys:
@@ -64,16 +42,20 @@ jobs:
             STARCI_RUN: |-
               go vet ./...
           command: |
-            image_path=$(docker image inspect starci-env-vet --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^PATH=//p')
-            docker run --rm \
-              -v "$PWD:/workspace" \
-              -w /workspace \
-              -v "$HOME/starci-tools/go:/opt/starci/tools/go:ro" \
-              -v "$HOME/starci-cache/go-build:/root/.cache/go-build" \
-              -v "$HOME/starci-cache/go-mod:/root/go/pkg/mod" \
-              -e "PATH=/opt/starci/tools/go/go/bin:$image_path" \
-              -e 'CGO_ENABLED=0' \
-              starci-env-vet sh -c "$STARCI_RUN"
+            starci_root="$(mktemp -d)"
+            mkdir "$starci_root/home" "$starci_root/tmp"
+            mkdir -p "$HOME/starci-cache/go-build"
+            mkdir -p "$HOME/starci-cache/go-mod"
+            env -i \
+              HOME="$starci_root/home" \
+              TMPDIR="$starci_root/tmp" \
+              LANG=C.UTF-8 \
+              STARCI_WORKSPACE="$PWD" \
+              'CGO_ENABLED=0' \
+              GOCACHE="$HOME/starci-cache/go-build" \
+              GOMODCACHE="$HOME/starci-cache/go-mod" \
+              PATH="$HOME/starci-tools/go/go/bin:""$PATH" \
+              /bin/sh -c "$STARCI_RUN"
       - save_cache:
           name: "Save cache: go-build"
           key: starci-cache-go-build-{{ .Revision }}
@@ -84,14 +66,6 @@ jobs:
           key: starci-cache-go-mod-{{ .Revision }}
           paths:
             - ~/starci-cache/go-mod
-      - run:
-          name: "Remember this pass"
-          command: |
-            mkdir -p ~/starci-passed && date > ~/starci-passed/at
-      - save_cache:
-          key: starci-passed-vet-9996d1ce7b10c758-{{ checksum "/tmp/starci-inputs" }}
-          paths:
-            - ~/starci-passed
 
   test:
     machine:
@@ -104,34 +78,12 @@ jobs:
           command: |
             git sparse-checkout set --no-cone '/**/*.go' '/go.mod' '/go.sum'
       - run:
-          name: "Identify the inputs"
-          command: |
-            git ls-files -s -- ':(top,glob)**/*.go' ':(top,literal)go.mod' ':(top,literal)go.sum' > /tmp/starci-inputs
-      - restore_cache:
-          name: Has this already passed with these inputs?
-          keys:
-            - starci-passed-test-004be1ade613f38d-{{ checksum "/tmp/starci-inputs" }}
-      - run:
-          name: "Stop here if it has"
-          command: |
-            if [ -e ~/starci-passed/at ]; then
-              echo "Passed before with the same inputs, on $(cat ~/starci-passed/at). Nothing to do."
-              circleci-agent step halt
-            fi
-      - run:
           name: "Tool: go"
           command: |
             mkdir -p "$HOME/starci-tools/go"
-            curl -fsSL 'https://go.dev/dl/go1.26.5.linux-amd64.tar.gz' -o "/tmp/go.download"
+            curl -fsSL 'https://go.dev/dl/go1.26.5.{os}-amd64.tar.gz' -o "/tmp/go.download"
             echo "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053  /tmp/go.download" | sha256sum -c -
             tar -xf "/tmp/go.download" -C "$HOME/starci-tools/go"
-      - run:
-          name: "Image with ca-certificates"
-          command: |
-            docker build -q -t starci-env-test - \<<'DOCKERFILE'
-            FROM debian:12-slim
-            RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
-            DOCKERFILE
       - restore_cache:
           name: "Cache: go-build"
           keys:
@@ -146,16 +98,20 @@ jobs:
             STARCI_RUN: |-
               go test ./...
           command: |
-            image_path=$(docker image inspect starci-env-test --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^PATH=//p')
-            docker run --rm \
-              -v "$PWD:/workspace" \
-              -w /workspace \
-              -v "$HOME/starci-tools/go:/opt/starci/tools/go:ro" \
-              -v "$HOME/starci-cache/go-build:/root/.cache/go-build" \
-              -v "$HOME/starci-cache/go-mod:/root/go/pkg/mod" \
-              -e "PATH=/opt/starci/tools/go/go/bin:$image_path" \
-              -e 'CGO_ENABLED=0' \
-              starci-env-test sh -c "$STARCI_RUN"
+            starci_root="$(mktemp -d)"
+            mkdir "$starci_root/home" "$starci_root/tmp"
+            mkdir -p "$HOME/starci-cache/go-build"
+            mkdir -p "$HOME/starci-cache/go-mod"
+            env -i \
+              HOME="$starci_root/home" \
+              TMPDIR="$starci_root/tmp" \
+              LANG=C.UTF-8 \
+              STARCI_WORKSPACE="$PWD" \
+              'CGO_ENABLED=0' \
+              GOCACHE="$HOME/starci-cache/go-build" \
+              GOMODCACHE="$HOME/starci-cache/go-mod" \
+              PATH="$HOME/starci-tools/go/go/bin:""$PATH" \
+              /bin/sh -c "$STARCI_RUN"
       - save_cache:
           name: "Save cache: go-build"
           key: starci-cache-go-build-{{ .Revision }}
@@ -166,14 +122,6 @@ jobs:
           key: starci-cache-go-mod-{{ .Revision }}
           paths:
             - ~/starci-cache/go-mod
-      - run:
-          name: "Remember this pass"
-          command: |
-            mkdir -p ~/starci-passed && date > ~/starci-passed/at
-      - save_cache:
-          key: starci-passed-test-004be1ade613f38d-{{ checksum "/tmp/starci-inputs" }}
-          paths:
-            - ~/starci-passed
 
   build-linux-amd64:
     machine:
@@ -186,34 +134,12 @@ jobs:
           command: |
             git sparse-checkout set --no-cone '/**/*.go' '/go.mod' '/go.sum'
       - run:
-          name: "Identify the inputs"
-          command: |
-            git ls-files -s -- ':(top,glob)**/*.go' ':(top,literal)go.mod' ':(top,literal)go.sum' > /tmp/starci-inputs
-      - restore_cache:
-          name: Has this already passed with these inputs?
-          keys:
-            - starci-passed-build-linux-amd64-a55131b9cd384415-{{ checksum "/tmp/starci-inputs" }}
-      - run:
-          name: "Stop here if it has"
-          command: |
-            if [ -e ~/starci-passed/at ]; then
-              echo "Passed before with the same inputs, on $(cat ~/starci-passed/at). Nothing to do."
-              circleci-agent step halt
-            fi
-      - run:
           name: "Tool: go"
           command: |
             mkdir -p "$HOME/starci-tools/go"
-            curl -fsSL 'https://go.dev/dl/go1.26.5.linux-amd64.tar.gz' -o "/tmp/go.download"
+            curl -fsSL 'https://go.dev/dl/go1.26.5.{os}-amd64.tar.gz' -o "/tmp/go.download"
             echo "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053  /tmp/go.download" | sha256sum -c -
             tar -xf "/tmp/go.download" -C "$HOME/starci-tools/go"
-      - run:
-          name: "Image with ca-certificates"
-          command: |
-            docker build -q -t starci-env-build-linux-amd64 - \<<'DOCKERFILE'
-            FROM debian:12-slim
-            RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
-            DOCKERFILE
       - restore_cache:
           name: "Cache: go-build"
           keys:
@@ -228,18 +154,22 @@ jobs:
             STARCI_RUN: |-
               go build -o /dev/null ./...
           command: |
-            image_path=$(docker image inspect starci-env-build-linux-amd64 --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^PATH=//p')
-            docker run --rm \
-              -v "$PWD:/workspace" \
-              -w /workspace \
-              -v "$HOME/starci-tools/go:/opt/starci/tools/go:ro" \
-              -v "$HOME/starci-cache/go-build:/root/.cache/go-build" \
-              -v "$HOME/starci-cache/go-mod:/root/go/pkg/mod" \
-              -e "PATH=/opt/starci/tools/go/go/bin:$image_path" \
-              -e 'CGO_ENABLED=0' \
-              -e 'GOARCH=amd64' \
-              -e 'GOOS=linux' \
-              starci-env-build-linux-amd64 sh -c "$STARCI_RUN"
+            starci_root="$(mktemp -d)"
+            mkdir "$starci_root/home" "$starci_root/tmp"
+            mkdir -p "$HOME/starci-cache/go-build"
+            mkdir -p "$HOME/starci-cache/go-mod"
+            env -i \
+              HOME="$starci_root/home" \
+              TMPDIR="$starci_root/tmp" \
+              LANG=C.UTF-8 \
+              STARCI_WORKSPACE="$PWD" \
+              'CGO_ENABLED=0' \
+              'GOARCH=amd64' \
+              'GOOS=linux' \
+              GOCACHE="$HOME/starci-cache/go-build" \
+              GOMODCACHE="$HOME/starci-cache/go-mod" \
+              PATH="$HOME/starci-tools/go/go/bin:""$PATH" \
+              /bin/sh -c "$STARCI_RUN"
       - save_cache:
           name: "Save cache: go-build"
           key: starci-cache-go-build-{{ .Revision }}
@@ -250,14 +180,6 @@ jobs:
           key: starci-cache-go-mod-{{ .Revision }}
           paths:
             - ~/starci-cache/go-mod
-      - run:
-          name: "Remember this pass"
-          command: |
-            mkdir -p ~/starci-passed && date > ~/starci-passed/at
-      - save_cache:
-          key: starci-passed-build-linux-amd64-a55131b9cd384415-{{ checksum "/tmp/starci-inputs" }}
-          paths:
-            - ~/starci-passed
 
   build-linux-arm64:
     machine:
@@ -270,34 +192,12 @@ jobs:
           command: |
             git sparse-checkout set --no-cone '/**/*.go' '/go.mod' '/go.sum'
       - run:
-          name: "Identify the inputs"
-          command: |
-            git ls-files -s -- ':(top,glob)**/*.go' ':(top,literal)go.mod' ':(top,literal)go.sum' > /tmp/starci-inputs
-      - restore_cache:
-          name: Has this already passed with these inputs?
-          keys:
-            - starci-passed-build-linux-arm64-44c855f8b8f1e01e-{{ checksum "/tmp/starci-inputs" }}
-      - run:
-          name: "Stop here if it has"
-          command: |
-            if [ -e ~/starci-passed/at ]; then
-              echo "Passed before with the same inputs, on $(cat ~/starci-passed/at). Nothing to do."
-              circleci-agent step halt
-            fi
-      - run:
           name: "Tool: go"
           command: |
             mkdir -p "$HOME/starci-tools/go"
-            curl -fsSL 'https://go.dev/dl/go1.26.5.linux-amd64.tar.gz' -o "/tmp/go.download"
+            curl -fsSL 'https://go.dev/dl/go1.26.5.{os}-amd64.tar.gz' -o "/tmp/go.download"
             echo "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053  /tmp/go.download" | sha256sum -c -
             tar -xf "/tmp/go.download" -C "$HOME/starci-tools/go"
-      - run:
-          name: "Image with ca-certificates"
-          command: |
-            docker build -q -t starci-env-build-linux-arm64 - \<<'DOCKERFILE'
-            FROM debian:12-slim
-            RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
-            DOCKERFILE
       - restore_cache:
           name: "Cache: go-build"
           keys:
@@ -312,18 +212,22 @@ jobs:
             STARCI_RUN: |-
               go build -o /dev/null ./...
           command: |
-            image_path=$(docker image inspect starci-env-build-linux-arm64 --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^PATH=//p')
-            docker run --rm \
-              -v "$PWD:/workspace" \
-              -w /workspace \
-              -v "$HOME/starci-tools/go:/opt/starci/tools/go:ro" \
-              -v "$HOME/starci-cache/go-build:/root/.cache/go-build" \
-              -v "$HOME/starci-cache/go-mod:/root/go/pkg/mod" \
-              -e "PATH=/opt/starci/tools/go/go/bin:$image_path" \
-              -e 'CGO_ENABLED=0' \
-              -e 'GOARCH=arm64' \
-              -e 'GOOS=linux' \
-              starci-env-build-linux-arm64 sh -c "$STARCI_RUN"
+            starci_root="$(mktemp -d)"
+            mkdir "$starci_root/home" "$starci_root/tmp"
+            mkdir -p "$HOME/starci-cache/go-build"
+            mkdir -p "$HOME/starci-cache/go-mod"
+            env -i \
+              HOME="$starci_root/home" \
+              TMPDIR="$starci_root/tmp" \
+              LANG=C.UTF-8 \
+              STARCI_WORKSPACE="$PWD" \
+              'CGO_ENABLED=0' \
+              'GOARCH=arm64' \
+              'GOOS=linux' \
+              GOCACHE="$HOME/starci-cache/go-build" \
+              GOMODCACHE="$HOME/starci-cache/go-mod" \
+              PATH="$HOME/starci-tools/go/go/bin:""$PATH" \
+              /bin/sh -c "$STARCI_RUN"
       - save_cache:
           name: "Save cache: go-build"
           key: starci-cache-go-build-{{ .Revision }}
@@ -334,14 +238,6 @@ jobs:
           key: starci-cache-go-mod-{{ .Revision }}
           paths:
             - ~/starci-cache/go-mod
-      - run:
-          name: "Remember this pass"
-          command: |
-            mkdir -p ~/starci-passed && date > ~/starci-passed/at
-      - save_cache:
-          key: starci-passed-build-linux-arm64-44c855f8b8f1e01e-{{ checksum "/tmp/starci-inputs" }}
-          paths:
-            - ~/starci-passed
 
   build-darwin-arm64:
     machine:
@@ -354,34 +250,12 @@ jobs:
           command: |
             git sparse-checkout set --no-cone '/**/*.go' '/go.mod' '/go.sum'
       - run:
-          name: "Identify the inputs"
-          command: |
-            git ls-files -s -- ':(top,glob)**/*.go' ':(top,literal)go.mod' ':(top,literal)go.sum' > /tmp/starci-inputs
-      - restore_cache:
-          name: Has this already passed with these inputs?
-          keys:
-            - starci-passed-build-darwin-arm64-a8bd365e9e73d5b8-{{ checksum "/tmp/starci-inputs" }}
-      - run:
-          name: "Stop here if it has"
-          command: |
-            if [ -e ~/starci-passed/at ]; then
-              echo "Passed before with the same inputs, on $(cat ~/starci-passed/at). Nothing to do."
-              circleci-agent step halt
-            fi
-      - run:
           name: "Tool: go"
           command: |
             mkdir -p "$HOME/starci-tools/go"
-            curl -fsSL 'https://go.dev/dl/go1.26.5.linux-amd64.tar.gz' -o "/tmp/go.download"
+            curl -fsSL 'https://go.dev/dl/go1.26.5.{os}-amd64.tar.gz' -o "/tmp/go.download"
             echo "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053  /tmp/go.download" | sha256sum -c -
             tar -xf "/tmp/go.download" -C "$HOME/starci-tools/go"
-      - run:
-          name: "Image with ca-certificates"
-          command: |
-            docker build -q -t starci-env-build-darwin-arm64 - \<<'DOCKERFILE'
-            FROM debian:12-slim
-            RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
-            DOCKERFILE
       - restore_cache:
           name: "Cache: go-build"
           keys:
@@ -396,18 +270,22 @@ jobs:
             STARCI_RUN: |-
               go build -o /dev/null ./...
           command: |
-            image_path=$(docker image inspect starci-env-build-darwin-arm64 --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^PATH=//p')
-            docker run --rm \
-              -v "$PWD:/workspace" \
-              -w /workspace \
-              -v "$HOME/starci-tools/go:/opt/starci/tools/go:ro" \
-              -v "$HOME/starci-cache/go-build:/root/.cache/go-build" \
-              -v "$HOME/starci-cache/go-mod:/root/go/pkg/mod" \
-              -e "PATH=/opt/starci/tools/go/go/bin:$image_path" \
-              -e 'CGO_ENABLED=0' \
-              -e 'GOARCH=arm64' \
-              -e 'GOOS=darwin' \
-              starci-env-build-darwin-arm64 sh -c "$STARCI_RUN"
+            starci_root="$(mktemp -d)"
+            mkdir "$starci_root/home" "$starci_root/tmp"
+            mkdir -p "$HOME/starci-cache/go-build"
+            mkdir -p "$HOME/starci-cache/go-mod"
+            env -i \
+              HOME="$starci_root/home" \
+              TMPDIR="$starci_root/tmp" \
+              LANG=C.UTF-8 \
+              STARCI_WORKSPACE="$PWD" \
+              'CGO_ENABLED=0' \
+              'GOARCH=arm64' \
+              'GOOS=darwin' \
+              GOCACHE="$HOME/starci-cache/go-build" \
+              GOMODCACHE="$HOME/starci-cache/go-mod" \
+              PATH="$HOME/starci-tools/go/go/bin:""$PATH" \
+              /bin/sh -c "$STARCI_RUN"
       - save_cache:
           name: "Save cache: go-build"
           key: starci-cache-go-build-{{ .Revision }}
@@ -418,14 +296,6 @@ jobs:
           key: starci-cache-go-mod-{{ .Revision }}
           paths:
             - ~/starci-cache/go-mod
-      - run:
-          name: "Remember this pass"
-          command: |
-            mkdir -p ~/starci-passed && date > ~/starci-passed/at
-      - save_cache:
-          key: starci-passed-build-darwin-arm64-a8bd365e9e73d5b8-{{ checksum "/tmp/starci-inputs" }}
-          paths:
-            - ~/starci-passed
 
 workflows:
   ci:
