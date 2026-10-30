@@ -16,10 +16,9 @@
 #    rule about branch names does not, and every other branch is treated alike.
 #  - A step with cache = True is skipped when it passed before with the same
 #    inputs, if the `store` parameter names a shared store (STARCI_STORE, as
-#    for a machine); without one every step runs every time. The init image
-#    must then hold starci, and the pods need the store's credentials from the
-#    cluster. A pass is keyed on the step's image by name: a tag that moves
-#    does not run it again.
+#    for a machine); without one every step runs every time. The pods then need
+#    the store's credentials from the cluster. A pass is keyed on the step's
+#    image by name: a tag that moves does not run it again.
 #  - A schedule is a CronWorkflow you create from this template, with the
 #    `event` parameter set to schedule and `schedule` to its name. Overlap and
 #    catch-up are Argo's to decide.
@@ -67,39 +66,22 @@ spec:
                 - name: "starci-prepare"
                   image: "registry.example/starci-init:latest"
                   command:
-                    - "sh"
-                    - "-c"
-                  args:
-                    - |-
-                      set -eu
-                      cd /workspace
-                      git init -q .
-                      git remote add origin "$STARCI_CLONE_URL"
-                      git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
-                      git checkout -q FETCH_HEAD
-                      if [ -n "${STARCI_STORE:-}" ]; then
-                        mkdir -p /opt/starci
-                        cp "$(command -v starci)" /opt/starci/starci
-                        printf '%s' "$STARCI_STEP" | starci pass key > /opt/starci/key
-                        if starci pass get "$(cat /opt/starci/key)"; then touch /opt/starci/hit; chmod -R a+rX /opt/starci; exit 0; fi
-                        chmod -R a+rX /opt/starci
-                      fi
-                      rm -rf .git
-                      chmod -R a+rwX /workspace
-                      chmod -R a+rX /opt/starci/tools 2>/dev/null || true
+                    - "starci"
+                    - "pod"
+                    - "prepare"
                   env:
                     - name: "STARCI_CLONE_URL"
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
-                    - name: "STARCI_STEP"
-                      value: "{\"name\":\"lint\",\"image\":\"node:22-bookworm-slim\",\"run\":\"npm ci && npm run lint\",\"needs\":[],\"env\":{},\"inputs\":[\".\"],\"caches\":{},\"cache\":true,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
                     - name: "STARCI_ARCH"
                       value: "amd64"
+                    - name: "STARCI_STEP"
+                      value: "{\"name\":\"lint\",\"image\":\"node:22-bookworm-slim\",\"run\":\"npm ci && npm run lint\",\"needs\":[],\"env\":{},\"inputs\":[\".\"],\"caches\":{},\"cache\":true,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
                     - name: "STARCI_STORE"
                       value: "{{workflow.parameters.store}}"
                     - name: "STARCI_STATE"
-                      value: "/tmp/starci-state"
+                      value: "/opt/starci/state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
@@ -114,16 +96,19 @@ spec:
                   - "-c"
                 args:
                   - |-
-                    if [ -e /opt/starci/hit ]; then echo 'starci: passed before with the same inputs; not run again'; exit 0; fi
+                    if [ -e /opt/starci/hit ]; then
+                      echo 'starci: passed before with the same inputs; not run again'
+                      exit 0
+                    fi
                     (
                     npm ci && npm run lint
                     )
                     rc=$?
-                    if [ "$rc" -eq 0 ] && [ -e /opt/starci/key ]; then
-                      /opt/starci/starci pass put "$(cat /opt/starci/key)" 'lint' || echo 'starci: could not record the pass' >&2
-                    fi
+                    if [ "$rc" -eq 0 ]; then /opt/starci/starci pod finish || exit 1; fi
                     exit $rc
                 env:
+                  - name: "STARCI_STEP"
+                    value: "{\"name\":\"lint\",\"image\":\"node:22-bookworm-slim\",\"run\":\"npm ci && npm run lint\",\"needs\":[],\"env\":{},\"inputs\":[\".\"],\"caches\":{},\"cache\":true,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
                   - name: "STARCI_STORE"
                     value: "{{workflow.parameters.store}}"
                   - name: "STARCI_STATE"
@@ -148,39 +133,22 @@ spec:
                 - name: "starci-prepare"
                   image: "registry.example/starci-init:latest"
                   command:
-                    - "sh"
-                    - "-c"
-                  args:
-                    - |-
-                      set -eu
-                      cd /workspace
-                      git init -q .
-                      git remote add origin "$STARCI_CLONE_URL"
-                      git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
-                      git checkout -q FETCH_HEAD
-                      if [ -n "${STARCI_STORE:-}" ]; then
-                        mkdir -p /opt/starci
-                        cp "$(command -v starci)" /opt/starci/starci
-                        printf '%s' "$STARCI_STEP" | starci pass key > /opt/starci/key
-                        if starci pass get "$(cat /opt/starci/key)"; then touch /opt/starci/hit; chmod -R a+rX /opt/starci; exit 0; fi
-                        chmod -R a+rX /opt/starci
-                      fi
-                      rm -rf .git
-                      chmod -R a+rwX /workspace
-                      chmod -R a+rX /opt/starci/tools 2>/dev/null || true
+                    - "starci"
+                    - "pod"
+                    - "prepare"
                   env:
                     - name: "STARCI_CLONE_URL"
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
-                    - name: "STARCI_STEP"
-                      value: "{\"name\":\"test\",\"image\":\"node:22-bookworm-slim\",\"run\":\"npm ci && npm test\",\"needs\":[],\"env\":{},\"inputs\":[\".\"],\"caches\":{},\"cache\":true,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
                     - name: "STARCI_ARCH"
                       value: "amd64"
+                    - name: "STARCI_STEP"
+                      value: "{\"name\":\"test\",\"image\":\"node:22-bookworm-slim\",\"run\":\"npm ci && npm test\",\"needs\":[],\"env\":{},\"inputs\":[\".\"],\"caches\":{},\"cache\":true,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
                     - name: "STARCI_STORE"
                       value: "{{workflow.parameters.store}}"
                     - name: "STARCI_STATE"
-                      value: "/tmp/starci-state"
+                      value: "/opt/starci/state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
@@ -195,16 +163,19 @@ spec:
                   - "-c"
                 args:
                   - |-
-                    if [ -e /opt/starci/hit ]; then echo 'starci: passed before with the same inputs; not run again'; exit 0; fi
+                    if [ -e /opt/starci/hit ]; then
+                      echo 'starci: passed before with the same inputs; not run again'
+                      exit 0
+                    fi
                     (
                     npm ci && npm test
                     )
                     rc=$?
-                    if [ "$rc" -eq 0 ] && [ -e /opt/starci/key ]; then
-                      /opt/starci/starci pass put "$(cat /opt/starci/key)" 'test' || echo 'starci: could not record the pass' >&2
-                    fi
+                    if [ "$rc" -eq 0 ]; then /opt/starci/starci pod finish || exit 1; fi
                     exit $rc
                 env:
+                  - name: "STARCI_STEP"
+                    value: "{\"name\":\"test\",\"image\":\"node:22-bookworm-slim\",\"run\":\"npm ci && npm test\",\"needs\":[],\"env\":{},\"inputs\":[\".\"],\"caches\":{},\"cache\":true,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
                   - name: "STARCI_STORE"
                     value: "{{workflow.parameters.store}}"
                   - name: "STARCI_STATE"
@@ -227,31 +198,33 @@ spec:
               volumes:
                 - name: "workspace"
                   emptyDir: {}
+                - name: "starci"
+                  emptyDir: {}
               initContainers:
                 - name: "starci-prepare"
                   image: "registry.example/starci-init:latest"
                   command:
-                    - "sh"
-                    - "-c"
-                  args:
-                    - |-
-                      set -eu
-                      cd /workspace
-                      git init -q .
-                      git remote add origin "$STARCI_CLONE_URL"
-                      git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
-                      git checkout -q FETCH_HEAD
-                      rm -rf .git
-                      chmod -R a+rwX /workspace
-                      chmod -R a+rX /opt/starci/tools 2>/dev/null || true
+                    - "starci"
+                    - "pod"
+                    - "prepare"
                   env:
                     - name: "STARCI_CLONE_URL"
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
+                    - name: "STARCI_ARCH"
+                      value: "amd64"
+                    - name: "STARCI_STEP"
+                      value: "{\"name\":\"deploy staging\",\"image\":\"node:22-bookworm-slim\",\"run\":\"npm ci && npm run deploy:staging\",\"needs\":[\"lint\",\"test\"],\"env\":{},\"inputs\":[\".\"],\"caches\":{},\"cache\":false,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
+                    - name: "STARCI_STORE"
+                      value: "{{workflow.parameters.store}}"
+                    - name: "STARCI_STATE"
+                      value: "/opt/starci/state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
+                    - name: "starci"
+                      mountPath: "/opt/starci"
               container:
                 name: "main"
                 image: "node:22-bookworm-slim"
@@ -264,6 +237,9 @@ spec:
                 volumeMounts:
                   - name: "workspace"
                     mountPath: "/workspace"
+                  - name: "starci"
+                    mountPath: "/opt/starci"
+                    readOnly: true
           - name: "publish"
             dependencies:
               - "lint"
@@ -276,31 +252,33 @@ spec:
               volumes:
                 - name: "workspace"
                   emptyDir: {}
+                - name: "starci"
+                  emptyDir: {}
               initContainers:
                 - name: "starci-prepare"
                   image: "registry.example/starci-init:latest"
                   command:
-                    - "sh"
-                    - "-c"
-                  args:
-                    - |-
-                      set -eu
-                      cd /workspace
-                      git init -q .
-                      git remote add origin "$STARCI_CLONE_URL"
-                      git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
-                      git checkout -q FETCH_HEAD
-                      rm -rf .git
-                      chmod -R a+rwX /workspace
-                      chmod -R a+rX /opt/starci/tools 2>/dev/null || true
+                    - "starci"
+                    - "pod"
+                    - "prepare"
                   env:
                     - name: "STARCI_CLONE_URL"
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
+                    - name: "STARCI_ARCH"
+                      value: "amd64"
+                    - name: "STARCI_STEP"
+                      value: "{\"name\":\"publish\",\"image\":\"node:22-bookworm-slim\",\"run\":\"npm ci && npm publish\",\"needs\":[\"lint\",\"test\"],\"env\":{},\"inputs\":[\".\"],\"caches\":{},\"cache\":false,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
+                    - name: "STARCI_STORE"
+                      value: "{{workflow.parameters.store}}"
+                    - name: "STARCI_STATE"
+                      value: "/opt/starci/state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
+                    - name: "starci"
+                      mountPath: "/opt/starci"
               container:
                 name: "main"
                 image: "node:22-bookworm-slim"
@@ -313,6 +291,9 @@ spec:
                 volumeMounts:
                   - name: "workspace"
                     mountPath: "/workspace"
+                  - name: "starci"
+                    mountPath: "/opt/starci"
+                    readOnly: true
           - name: "preview"
             dependencies:
               - "lint"
@@ -325,31 +306,33 @@ spec:
               volumes:
                 - name: "workspace"
                   emptyDir: {}
+                - name: "starci"
+                  emptyDir: {}
               initContainers:
                 - name: "starci-prepare"
                   image: "registry.example/starci-init:latest"
                   command:
-                    - "sh"
-                    - "-c"
-                  args:
-                    - |-
-                      set -eu
-                      cd /workspace
-                      git init -q .
-                      git remote add origin "$STARCI_CLONE_URL"
-                      git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
-                      git checkout -q FETCH_HEAD
-                      rm -rf .git
-                      chmod -R a+rwX /workspace
-                      chmod -R a+rX /opt/starci/tools 2>/dev/null || true
+                    - "starci"
+                    - "pod"
+                    - "prepare"
                   env:
                     - name: "STARCI_CLONE_URL"
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
+                    - name: "STARCI_ARCH"
+                      value: "amd64"
+                    - name: "STARCI_STEP"
+                      value: "{\"name\":\"preview\",\"image\":\"node:22-bookworm-slim\",\"run\":\"npm ci && npm run deploy:preview\",\"needs\":[\"lint\",\"test\"],\"env\":{},\"inputs\":[\".\"],\"caches\":{},\"cache\":false,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
+                    - name: "STARCI_STORE"
+                      value: "{{workflow.parameters.store}}"
+                    - name: "STARCI_STATE"
+                      value: "/opt/starci/state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
+                    - name: "starci"
+                      mountPath: "/opt/starci"
               container:
                 name: "main"
                 image: "node:22-bookworm-slim"
@@ -362,6 +345,9 @@ spec:
                 volumeMounts:
                   - name: "workspace"
                     mountPath: "/workspace"
+                  - name: "starci"
+                    mountPath: "/opt/starci"
+                    readOnly: true
           - name: "end-to-end"
             dependencies:
               - "lint"
@@ -380,39 +366,22 @@ spec:
                 - name: "starci-prepare"
                   image: "registry.example/starci-init:latest"
                   command:
-                    - "sh"
-                    - "-c"
-                  args:
-                    - |-
-                      set -eu
-                      cd /workspace
-                      git init -q .
-                      git remote add origin "$STARCI_CLONE_URL"
-                      git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
-                      git checkout -q FETCH_HEAD
-                      if [ -n "${STARCI_STORE:-}" ]; then
-                        mkdir -p /opt/starci
-                        cp "$(command -v starci)" /opt/starci/starci
-                        printf '%s' "$STARCI_STEP" | starci pass key > /opt/starci/key
-                        if starci pass get "$(cat /opt/starci/key)"; then touch /opt/starci/hit; chmod -R a+rX /opt/starci; exit 0; fi
-                        chmod -R a+rX /opt/starci
-                      fi
-                      rm -rf .git
-                      chmod -R a+rwX /workspace
-                      chmod -R a+rX /opt/starci/tools 2>/dev/null || true
+                    - "starci"
+                    - "pod"
+                    - "prepare"
                   env:
                     - name: "STARCI_CLONE_URL"
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
-                    - name: "STARCI_STEP"
-                      value: "{\"name\":\"end to end\",\"image\":\"node:22-bookworm-slim\",\"run\":\"npm ci && npm run test:e2e\",\"needs\":[\"lint\",\"test\"],\"env\":{},\"inputs\":[\".\"],\"caches\":{},\"cache\":true,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
                     - name: "STARCI_ARCH"
                       value: "amd64"
+                    - name: "STARCI_STEP"
+                      value: "{\"name\":\"end to end\",\"image\":\"node:22-bookworm-slim\",\"run\":\"npm ci && npm run test:e2e\",\"needs\":[\"lint\",\"test\"],\"env\":{},\"inputs\":[\".\"],\"caches\":{},\"cache\":true,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
                     - name: "STARCI_STORE"
                       value: "{{workflow.parameters.store}}"
                     - name: "STARCI_STATE"
-                      value: "/tmp/starci-state"
+                      value: "/opt/starci/state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
@@ -427,16 +396,19 @@ spec:
                   - "-c"
                 args:
                   - |-
-                    if [ -e /opt/starci/hit ]; then echo 'starci: passed before with the same inputs; not run again'; exit 0; fi
+                    if [ -e /opt/starci/hit ]; then
+                      echo 'starci: passed before with the same inputs; not run again'
+                      exit 0
+                    fi
                     (
                     npm ci && npm run test:e2e
                     )
                     rc=$?
-                    if [ "$rc" -eq 0 ] && [ -e /opt/starci/key ]; then
-                      /opt/starci/starci pass put "$(cat /opt/starci/key)" 'end to end' || echo 'starci: could not record the pass' >&2
-                    fi
+                    if [ "$rc" -eq 0 ]; then /opt/starci/starci pod finish || exit 1; fi
                     exit $rc
                 env:
+                  - name: "STARCI_STEP"
+                    value: "{\"name\":\"end to end\",\"image\":\"node:22-bookworm-slim\",\"run\":\"npm ci && npm run test:e2e\",\"needs\":[\"lint\",\"test\"],\"env\":{},\"inputs\":[\".\"],\"caches\":{},\"cache\":true,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
                   - name: "STARCI_STORE"
                     value: "{{workflow.parameters.store}}"
                   - name: "STARCI_STATE"
@@ -456,31 +428,33 @@ spec:
               volumes:
                 - name: "workspace"
                   emptyDir: {}
+                - name: "starci"
+                  emptyDir: {}
               initContainers:
                 - name: "starci-prepare"
                   image: "registry.example/starci-init:latest"
                   command:
-                    - "sh"
-                    - "-c"
-                  args:
-                    - |-
-                      set -eu
-                      cd /workspace
-                      git init -q .
-                      git remote add origin "$STARCI_CLONE_URL"
-                      git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
-                      git checkout -q FETCH_HEAD
-                      rm -rf .git
-                      chmod -R a+rwX /workspace
-                      chmod -R a+rX /opt/starci/tools 2>/dev/null || true
+                    - "starci"
+                    - "pod"
+                    - "prepare"
                   env:
                     - name: "STARCI_CLONE_URL"
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
+                    - name: "STARCI_ARCH"
+                      value: "amd64"
+                    - name: "STARCI_STEP"
+                      value: "{\"name\":\"audit\",\"image\":\"node:22-bookworm-slim\",\"run\":\"npm ci && npm audit --audit-level=high\",\"needs\":[],\"env\":{},\"inputs\":[\".\"],\"caches\":{},\"cache\":false,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
+                    - name: "STARCI_STORE"
+                      value: "{{workflow.parameters.store}}"
+                    - name: "STARCI_STATE"
+                      value: "/opt/starci/state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
+                    - name: "starci"
+                      mountPath: "/opt/starci"
               container:
                 name: "main"
                 image: "node:22-bookworm-slim"
@@ -493,3 +467,6 @@ spec:
                 volumeMounts:
                   - name: "workspace"
                     mountPath: "/workspace"
+                  - name: "starci"
+                    mountPath: "/opt/starci"
+                    readOnly: true

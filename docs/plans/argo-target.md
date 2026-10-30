@@ -9,9 +9,12 @@ container type, so `restartPolicy: Always` and `startupProbe` are accepted;
 `retryPolicy: OnError` exists. Argo's own strict decoder and validator accept
 every file produced. **Not verified:** that a cluster runs it, in particular
 that Argo's executor finishes a pod with a native sidecar still running.
-Passes work through `starci pass key|get|put` and a `store` parameter (key checked
-locally against a real git remote; the pod wiring not run). **Not built:**
-artifacts, a service's `files`.
+Each pod's init container is `starci pod prepare` (`step.PreparePod`) and a
+step that keeps something or remembers passes ends with `starci pod finish`,
+so the init script is no longer a third shell copy of a machine. Passes and
+artifacts go through the `store` parameter; artifacts' pointers travel as the
+`kept` output parameter. `run_test.go` plays each pod with the real starci
+against a real store (STARCI_TEST_S3). **Not built:** a service's `files`.
 
 ## Decided
 

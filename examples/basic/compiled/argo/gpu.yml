@@ -11,10 +11,9 @@
 # What does not carry over:
 #  - A step with cache = True is skipped when it passed before with the same
 #    inputs, if the `store` parameter names a shared store (STARCI_STORE, as
-#    for a machine); without one every step runs every time. The init image
-#    must then hold starci, and the pods need the store's credentials from the
-#    cluster. A pass is keyed on the step's image by name: a tag that moves
-#    does not run it again.
+#    for a machine); without one every step runs every time. The pods then need
+#    the store's credentials from the cluster. A pass is keyed on the step's
+#    image by name: a tag that moves does not run it again.
 #  - A step that fails fails its pod and is not run again; a pod lost to its
 #    node is tried again, twice. Steps that need a failed step are omitted by
 #    Argo, not skipped.
@@ -59,40 +58,22 @@ spec:
                 - name: "starci-prepare"
                   image: "registry.example/starci-init:latest"
                   command:
-                    - "sh"
-                    - "-c"
-                  args:
-                    - |-
-                      set -eu
-                      cd /workspace
-                      git init -q .
-                      git remote add origin "$STARCI_CLONE_URL"
-                      git sparse-checkout set --no-cone '/pyproject.toml' '/src/**/*.py' '/tests/conftest.py' '/tests/test_runs.py' '/tests/test_runs2.py' '/uv.lock'
-                      git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
-                      git checkout -q FETCH_HEAD
-                      if [ -n "${STARCI_STORE:-}" ]; then
-                        mkdir -p /opt/starci
-                        cp "$(command -v starci)" /opt/starci/starci
-                        printf '%s' "$STARCI_STEP" | starci pass key > /opt/starci/key
-                        if starci pass get "$(cat /opt/starci/key)"; then touch /opt/starci/hit; chmod -R a+rX /opt/starci; exit 0; fi
-                        chmod -R a+rX /opt/starci
-                      fi
-                      rm -rf .git
-                      chmod -R a+rwX /workspace
-                      chmod -R a+rX /opt/starci/tools 2>/dev/null || true
+                    - "starci"
+                    - "pod"
+                    - "prepare"
                   env:
                     - name: "STARCI_CLONE_URL"
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
-                    - name: "STARCI_STEP"
-                      value: "{\"name\":\"unit\",\"image\":\"ghcr.io/astral-sh/uv:python3.13-bookworm-slim\",\"run\":\"uv sync --frozen && uv run pytest -q tests/test_runs.py tests/test_runs2.py\",\"needs\":[],\"env\":{},\"inputs\":[\"pyproject.toml\",\"src/**/*.py\",\"tests/conftest.py\",\"tests/test_runs.py\",\"tests/test_runs2.py\",\"uv.lock\"],\"caches\":{},\"cache\":true,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
                     - name: "STARCI_ARCH"
                       value: "amd64"
+                    - name: "STARCI_STEP"
+                      value: "{\"name\":\"unit\",\"image\":\"ghcr.io/astral-sh/uv:python3.13-bookworm-slim\",\"run\":\"uv sync --frozen && uv run pytest -q tests/test_runs.py tests/test_runs2.py\",\"needs\":[],\"env\":{},\"inputs\":[\"pyproject.toml\",\"src/**/*.py\",\"tests/conftest.py\",\"tests/test_runs.py\",\"tests/test_runs2.py\",\"uv.lock\"],\"caches\":{},\"cache\":true,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
                     - name: "STARCI_STORE"
                       value: "{{workflow.parameters.store}}"
                     - name: "STARCI_STATE"
-                      value: "/tmp/starci-state"
+                      value: "/opt/starci/state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
@@ -107,16 +88,19 @@ spec:
                   - "-c"
                 args:
                   - |-
-                    if [ -e /opt/starci/hit ]; then echo 'starci: passed before with the same inputs; not run again'; exit 0; fi
+                    if [ -e /opt/starci/hit ]; then
+                      echo 'starci: passed before with the same inputs; not run again'
+                      exit 0
+                    fi
                     (
                     uv sync --frozen && uv run pytest -q tests/test_runs.py tests/test_runs2.py
                     )
                     rc=$?
-                    if [ "$rc" -eq 0 ] && [ -e /opt/starci/key ]; then
-                      /opt/starci/starci pass put "$(cat /opt/starci/key)" 'unit' || echo 'starci: could not record the pass' >&2
-                    fi
+                    if [ "$rc" -eq 0 ]; then /opt/starci/starci pod finish || exit 1; fi
                     exit $rc
                 env:
+                  - name: "STARCI_STEP"
+                    value: "{\"name\":\"unit\",\"image\":\"ghcr.io/astral-sh/uv:python3.13-bookworm-slim\",\"run\":\"uv sync --frozen && uv run pytest -q tests/test_runs.py tests/test_runs2.py\",\"needs\":[],\"env\":{},\"inputs\":[\"pyproject.toml\",\"src/**/*.py\",\"tests/conftest.py\",\"tests/test_runs.py\",\"tests/test_runs2.py\",\"uv.lock\"],\"caches\":{},\"cache\":true,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
                   - name: "STARCI_STORE"
                     value: "{{workflow.parameters.store}}"
                   - name: "STARCI_STATE"
@@ -151,40 +135,22 @@ spec:
                 - name: "starci-prepare"
                   image: "registry.example/starci-init:latest"
                   command:
-                    - "sh"
-                    - "-c"
-                  args:
-                    - |-
-                      set -eu
-                      cd /workspace
-                      git init -q .
-                      git remote add origin "$STARCI_CLONE_URL"
-                      git sparse-checkout set --no-cone '/pyproject.toml' '/src/**/*.py' '/tests/conftest.py' '/tests/integration/**/*.py' '/uv.lock'
-                      git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
-                      git checkout -q FETCH_HEAD
-                      if [ -n "${STARCI_STORE:-}" ]; then
-                        mkdir -p /opt/starci
-                        cp "$(command -v starci)" /opt/starci/starci
-                        printf '%s' "$STARCI_STEP" | starci pass key > /opt/starci/key
-                        if starci pass get "$(cat /opt/starci/key)"; then touch /opt/starci/hit; chmod -R a+rX /opt/starci; exit 0; fi
-                        chmod -R a+rX /opt/starci
-                      fi
-                      rm -rf .git
-                      chmod -R a+rwX /workspace
-                      chmod -R a+rX /opt/starci/tools 2>/dev/null || true
+                    - "starci"
+                    - "pod"
+                    - "prepare"
                   env:
                     - name: "STARCI_CLONE_URL"
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
-                    - name: "STARCI_STEP"
-                      value: "{\"name\":\"integration\",\"image\":\"ghcr.io/astral-sh/uv:python3.13-bookworm-slim\",\"run\":\"uv sync --frozen && uv run pytest -q tests/integration/**/*.py\",\"needs\":[],\"env\":{},\"inputs\":[\"pyproject.toml\",\"src/**/*.py\",\"tests/conftest.py\",\"tests/integration/**/*.py\",\"uv.lock\"],\"caches\":{},\"cache\":true,\"on\":{},\"prefer\":{\"speed\":\"fast\"},\"avoid\":{},\"tools\":[],\"packages\":[]}"
                     - name: "STARCI_ARCH"
                       value: "amd64"
+                    - name: "STARCI_STEP"
+                      value: "{\"name\":\"integration\",\"image\":\"ghcr.io/astral-sh/uv:python3.13-bookworm-slim\",\"run\":\"uv sync --frozen && uv run pytest -q tests/integration/**/*.py\",\"needs\":[],\"env\":{},\"inputs\":[\"pyproject.toml\",\"src/**/*.py\",\"tests/conftest.py\",\"tests/integration/**/*.py\",\"uv.lock\"],\"caches\":{},\"cache\":true,\"on\":{},\"prefer\":{\"speed\":\"fast\"},\"avoid\":{},\"tools\":[],\"packages\":[]}"
                     - name: "STARCI_STORE"
                       value: "{{workflow.parameters.store}}"
                     - name: "STARCI_STATE"
-                      value: "/tmp/starci-state"
+                      value: "/opt/starci/state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
@@ -199,16 +165,19 @@ spec:
                   - "-c"
                 args:
                   - |-
-                    if [ -e /opt/starci/hit ]; then echo 'starci: passed before with the same inputs; not run again'; exit 0; fi
+                    if [ -e /opt/starci/hit ]; then
+                      echo 'starci: passed before with the same inputs; not run again'
+                      exit 0
+                    fi
                     (
                     uv sync --frozen && uv run pytest -q tests/integration/**/*.py
                     )
                     rc=$?
-                    if [ "$rc" -eq 0 ] && [ -e /opt/starci/key ]; then
-                      /opt/starci/starci pass put "$(cat /opt/starci/key)" 'integration' || echo 'starci: could not record the pass' >&2
-                    fi
+                    if [ "$rc" -eq 0 ]; then /opt/starci/starci pod finish || exit 1; fi
                     exit $rc
                 env:
+                  - name: "STARCI_STEP"
+                    value: "{\"name\":\"integration\",\"image\":\"ghcr.io/astral-sh/uv:python3.13-bookworm-slim\",\"run\":\"uv sync --frozen && uv run pytest -q tests/integration/**/*.py\",\"needs\":[],\"env\":{},\"inputs\":[\"pyproject.toml\",\"src/**/*.py\",\"tests/conftest.py\",\"tests/integration/**/*.py\",\"uv.lock\"],\"caches\":{},\"cache\":true,\"on\":{},\"prefer\":{\"speed\":\"fast\"},\"avoid\":{},\"tools\":[],\"packages\":[]}"
                   - name: "STARCI_STORE"
                     value: "{{workflow.parameters.store}}"
                   - name: "STARCI_STATE"
@@ -235,40 +204,22 @@ spec:
                 - name: "starci-prepare"
                   image: "registry.example/starci-init:latest"
                   command:
-                    - "sh"
-                    - "-c"
-                  args:
-                    - |-
-                      set -eu
-                      cd /workspace
-                      git init -q .
-                      git remote add origin "$STARCI_CLONE_URL"
-                      git sparse-checkout set --no-cone '/pyproject.toml' '/src/**/*.py' '/tests/conftest.py' '/tests/test_gpu.py' '/uv.lock'
-                      git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
-                      git checkout -q FETCH_HEAD
-                      if [ -n "${STARCI_STORE:-}" ]; then
-                        mkdir -p /opt/starci
-                        cp "$(command -v starci)" /opt/starci/starci
-                        printf '%s' "$STARCI_STEP" | starci pass key > /opt/starci/key
-                        if starci pass get "$(cat /opt/starci/key)"; then touch /opt/starci/hit; chmod -R a+rX /opt/starci; exit 0; fi
-                        chmod -R a+rX /opt/starci
-                      fi
-                      rm -rf .git
-                      chmod -R a+rwX /workspace
-                      chmod -R a+rX /opt/starci/tools 2>/dev/null || true
+                    - "starci"
+                    - "pod"
+                    - "prepare"
                   env:
                     - name: "STARCI_CLONE_URL"
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
-                    - name: "STARCI_STEP"
-                      value: "{\"name\":\"gpu\",\"image\":\"ghcr.io/astral-sh/uv:python3.13-bookworm-slim\",\"run\":\"uv sync --frozen && uv run pytest -q tests/test_gpu.py\",\"needs\":[],\"env\":{},\"inputs\":[\"pyproject.toml\",\"src/**/*.py\",\"tests/conftest.py\",\"tests/test_gpu.py\",\"uv.lock\"],\"caches\":{},\"cache\":true,\"on\":{\"gpu\":\"true\"},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
                     - name: "STARCI_ARCH"
                       value: "amd64"
+                    - name: "STARCI_STEP"
+                      value: "{\"name\":\"gpu\",\"image\":\"ghcr.io/astral-sh/uv:python3.13-bookworm-slim\",\"run\":\"uv sync --frozen && uv run pytest -q tests/test_gpu.py\",\"needs\":[],\"env\":{},\"inputs\":[\"pyproject.toml\",\"src/**/*.py\",\"tests/conftest.py\",\"tests/test_gpu.py\",\"uv.lock\"],\"caches\":{},\"cache\":true,\"on\":{\"gpu\":\"true\"},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
                     - name: "STARCI_STORE"
                       value: "{{workflow.parameters.store}}"
                     - name: "STARCI_STATE"
-                      value: "/tmp/starci-state"
+                      value: "/opt/starci/state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
@@ -283,16 +234,19 @@ spec:
                   - "-c"
                 args:
                   - |-
-                    if [ -e /opt/starci/hit ]; then echo 'starci: passed before with the same inputs; not run again'; exit 0; fi
+                    if [ -e /opt/starci/hit ]; then
+                      echo 'starci: passed before with the same inputs; not run again'
+                      exit 0
+                    fi
                     (
                     uv sync --frozen && uv run pytest -q tests/test_gpu.py
                     )
                     rc=$?
-                    if [ "$rc" -eq 0 ] && [ -e /opt/starci/key ]; then
-                      /opt/starci/starci pass put "$(cat /opt/starci/key)" 'gpu' || echo 'starci: could not record the pass' >&2
-                    fi
+                    if [ "$rc" -eq 0 ]; then /opt/starci/starci pod finish || exit 1; fi
                     exit $rc
                 env:
+                  - name: "STARCI_STEP"
+                    value: "{\"name\":\"gpu\",\"image\":\"ghcr.io/astral-sh/uv:python3.13-bookworm-slim\",\"run\":\"uv sync --frozen && uv run pytest -q tests/test_gpu.py\",\"needs\":[],\"env\":{},\"inputs\":[\"pyproject.toml\",\"src/**/*.py\",\"tests/conftest.py\",\"tests/test_gpu.py\",\"uv.lock\"],\"caches\":{},\"cache\":true,\"on\":{\"gpu\":\"true\"},\"prefer\":{},\"avoid\":{},\"tools\":[],\"packages\":[]}"
                   - name: "STARCI_STORE"
                     value: "{{workflow.parameters.store}}"
                   - name: "STARCI_STATE"

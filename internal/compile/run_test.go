@@ -1,10 +1,12 @@
 package compile
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +15,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	"go.yaml.in/yaml/v3"
 
 	"git.phin.tech/sam/starci/internal/plan"
@@ -413,5 +417,182 @@ def ci(ctx):
 	// again, keyed on that, is skipped too; use, never reused, runs.
 	if got := strings.Join(strings.Fields(string(data)), " "); got != "built used again used" {
 		t.Errorf("the steps ran as %q, want %q", got, "built used again used")
+	}
+}
+
+// A stand-in for Argo, the same way: each task a pod played by processes
+// here, its init container the real starci (`starci pod prepare`) and its main
+// container the template's script in bash, the image's own paths moved into
+// directories of the test's, and Argo's parameters substituted. The pods share
+// nothing but a real store, which STARCI_TEST_S3 names.
+func TestACompiledArgoWorkflowHandsOnWhatATaskKept(t *testing.T) {
+	location := os.Getenv("STARCI_TEST_S3")
+	if location == "" {
+		t.Skip("STARCI_TEST_S3 is not set: Argo's pods share files only through a store (docs/development.md)")
+	}
+	starci := filepath.Join(t.TempDir(), "starci")
+	if out, err := exec.Command("go", "build", "-o", starci, "../../cmd/starci").CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	repo := t.TempDir()
+	os.WriteFile(filepath.Join(repo, "a.txt"), []byte("a\n"), 0o644)
+	for _, args := range [][]string{{"init", "-q"}, {"add", "-A"}, {"-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"}} {
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git: %v\n%s", err, out)
+		}
+	}
+	sha, _ := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
+	log := filepath.Join(t.TempDir(), "log")
+	makeBucket(t, location)
+	// A prefix of its own, so that nothing an earlier run stored is found.
+	store := strings.Replace(location, "?", fmt.Sprintf("/argo-%d?", os.Getpid()), 1)
+	if !strings.Contains(store, "?") {
+		store += fmt.Sprintf("/argo-%d", os.Getpid())
+	}
+	src := []byte(`
+def ci(ctx):
+    build = step("build", image = "alpine:3", keep = ["out"],
+                 run = "mkdir -p out && printf '#!/bin/sh\\necho made\\n' > out/app && chmod +x out/app && echo built >> ` + log + `")
+    return [build, step("use", image = "alpine:3", cache = False, artifacts = {"bin": artifact(build, "out")},
+                        run = "test \"$(./bin/app)\" = made && echo used >> ` + log + `")]
+`)
+	out, err := Argo("ci.star", src, Options{InitImage: "init"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wf struct {
+		Spec struct {
+			Templates []struct {
+				DAG struct {
+					Tasks []struct {
+						Name      string
+						Arguments struct {
+							Parameters []struct{ Name, Value string }
+						}
+						Inline struct {
+							InitContainers []struct {
+								Command []string
+								Env     []struct{ Name, Value string }
+							} `yaml:"initContainers"`
+							Container struct {
+								Command []string
+								Args    []string
+								Env     []struct{ Name, Value string }
+							}
+							Outputs struct {
+								Parameters []struct {
+									Name      string
+									ValueFrom struct{ Path string } `yaml:"valueFrom"`
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if err := yaml.Unmarshal([]byte(out), &wf); err != nil {
+		t.Fatal(err)
+	}
+	params := map[string]string{"clone_url": repo, "sha": strings.TrimSpace(string(sha)), "store": store}
+
+	runOnce := func() {
+		outputs := map[string]string{}
+		for _, task := range wf.Spec.Templates[0].DAG.Tasks {
+			root := t.TempDir()
+			workspace, shared, tmp := filepath.Join(root, "workspace"), filepath.Join(root, "opt-starci"), filepath.Join(root, "tmp")
+			os.MkdirAll(workspace, 0o755)
+			os.MkdirAll(tmp, 0o755)
+			args := map[string]string{}
+			for _, a := range task.Arguments.Parameters {
+				args[a.Name] = taskOutput.ReplaceAllStringFunc(a.Value, func(m string) string {
+					return outputs[taskOutput.FindStringSubmatch(m)[1]]
+				})
+			}
+			move := strings.NewReplacer("/opt/starci", shared, "/workspace", workspace, "/tmp/", tmp+"/")
+			sub := regexp.MustCompile(`\{\{(workflow|inputs)\.parameters\.([a-z_]+)\}\}`)
+			value := func(v string) string {
+				return move.Replace(sub.ReplaceAllStringFunc(v, func(m string) string {
+					g := sub.FindStringSubmatch(m)
+					if g[1] == "workflow" {
+						return params[g[2]]
+					}
+					return args[g[2]]
+				}))
+			}
+			environ := func(env []struct{ Name, Value string }) []string {
+				e := append(os.Environ(), "AWS_ACCESS_KEY_ID=test", "AWS_SECRET_ACCESS_KEY=test")
+				for _, kv := range env {
+					v := kv.Value
+					if kv.Name != "STARCI_STEP" && kv.Name != "STARCI_GIVEN" {
+						v = value(v)
+					} else {
+						v = sub.ReplaceAllStringFunc(v, func(m string) string { return args[sub.FindStringSubmatch(m)[2]] })
+					}
+					e = append(e, kv.Name+"="+v)
+				}
+				return e
+			}
+			init := task.Inline.InitContainers[0]
+			cmd := exec.Command(starci, append(init.Command[1:], "--workspace", workspace, "--shared", shared)...)
+			cmd.Env = environ(init.Env)
+			if b, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("task %s, init: %v\n%s", task.Name, err, b)
+			}
+			c := task.Inline.Container
+			script := strings.Join(c.Args, " ")
+			script = strings.ReplaceAll(script, "/opt/starci/starci pod finish", "/opt/starci/starci pod finish --workspace /workspace --shared /opt/starci --out /tmp/starci-kept.json")
+			main := exec.Command("bash", "-c", move.Replace(script))
+			if c.Command[0] != "sh" {
+				main = exec.Command(c.Command[0], c.Command[1:]...)
+			}
+			main.Dir = workspace
+			main.Env = environ(c.Env)
+			if b, err := main.CombinedOutput(); err != nil {
+				t.Fatalf("task %s, main: %v\n%s", task.Name, err, b)
+			}
+			for _, p := range task.Inline.Outputs.Parameters {
+				data, err := os.ReadFile(move.Replace(p.ValueFrom.Path))
+				if err != nil {
+					data = []byte("{}")
+				}
+				outputs[task.Name] = string(data)
+			}
+		}
+	}
+	runOnce()
+	runOnce()
+	data, _ := os.ReadFile(log)
+	if got := strings.Join(strings.Fields(string(data)), " "); got != "built used used" {
+		t.Errorf("the steps ran as %q; want build once, and use both times, handed the binary the second time by a build that passed before", got)
+	}
+}
+
+// taskOutput is how an Argo task names what a task before it left.
+var taskOutput = regexp.MustCompile(`\{\{tasks\.([a-z0-9-]+)\.outputs\.parameters\.kept\}\}`)
+
+// makeBucket makes the bucket an s3:// location names, if it is missing, as
+// the store's own tests do.
+func makeBucket(t *testing.T, location string) {
+	t.Helper()
+	u, err := url.Parse(location)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := minio.New(u.Query().Get("endpoint"), &minio.Options{
+		Creds:  credentials.NewStaticV4("test", "test", ""),
+		Secure: u.Query().Get("insecure") == "",
+		Region: u.Query().Get("region"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if ok, err := client.BucketExists(ctx, u.Host); err != nil {
+		t.Fatal(err)
+	} else if !ok {
+		if err := client.MakeBucket(ctx, u.Host, minio.MakeBucketOptions{Region: u.Query().Get("region")}); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

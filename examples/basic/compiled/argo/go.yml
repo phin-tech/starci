@@ -61,29 +61,22 @@ spec:
                 - name: "starci-prepare"
                   image: "registry.example/starci-init:latest"
                   command:
-                    - "sh"
-                    - "-c"
-                  args:
-                    - |-
-                      set -eu
-                      cd /workspace
-                      git init -q .
-                      git remote add origin "$STARCI_CLONE_URL"
-                      git sparse-checkout set --no-cone '/**/*.go' '/go.mod' '/go.sum'
-                      git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
-                      git checkout -q FETCH_HEAD
-                      rm -rf .git
-                      chmod -R a+rwX /workspace
-                      mkdir -p "/opt/starci/tools/go"
-                      curl -fsSL 'https://go.dev/dl/go1.26.5.{os}-amd64.tar.gz' -o "/tmp/go.download"
-                      echo "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053  /tmp/go.download" | sha256sum -c -
-                      tar -xf "/tmp/go.download" -C "/opt/starci/tools/go"
-                      chmod -R a+rX /opt/starci/tools 2>/dev/null || true
+                    - "starci"
+                    - "pod"
+                    - "prepare"
                   env:
                     - name: "STARCI_CLONE_URL"
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
+                    - name: "STARCI_ARCH"
+                      value: "amd64"
+                    - name: "STARCI_STEP"
+                      value: "{\"name\":\"vet\",\"image\":\"registry.example/starci-bare:latest\",\"run\":\"go vet ./...\",\"needs\":[],\"env\":{\"CGO_ENABLED\":\"0\"},\"inputs\":[\"**/*.go\",\"go.mod\",\"go.sum\"],\"caches\":{\"go-build\":\"GOCACHE\",\"go-mod\":\"GOMODCACHE\"},\"cache\":false,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[{\"name\":\"go\",\"url\":\"https://go.dev/dl/go1.26.5.{os}-{arch}.tar.gz\",\"sha256\":{\"amd64\":\"5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053\",\"arm64\":\"fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49\",\"darwin/amd64\":\"6231d8d3b8f5552ec6cbf6d685bdd5482e1e703214b120e89b3bf0d7bf1ef725\",\"darwin/arm64\":\"efb87ff28af9a188d0536ef5d42e63dd52ba8263cd7344a993cc48dd11dedb6a\"},\"arch_names\":{},\"bin\":[\"go/bin\"]}],\"packages\":[]}"
+                    - name: "STARCI_STORE"
+                      value: "{{workflow.parameters.store}}"
+                    - name: "STARCI_STATE"
+                      value: "/opt/starci/state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
@@ -98,7 +91,7 @@ spec:
                   - "-c"
                 args:
                   - |-
-                    PATH="/opt/starci/tools/go/go/bin:"$PATH; export PATH
+                    PATH="$(cat /opt/starci/path):"$PATH; export PATH
                     go vet ./...
                 env:
                   - name: "CGO_ENABLED"
@@ -133,29 +126,22 @@ spec:
                 - name: "starci-prepare"
                   image: "registry.example/starci-init:latest"
                   command:
-                    - "sh"
-                    - "-c"
-                  args:
-                    - |-
-                      set -eu
-                      cd /workspace
-                      git init -q .
-                      git remote add origin "$STARCI_CLONE_URL"
-                      git sparse-checkout set --no-cone '/**/*.go' '/go.mod' '/go.sum'
-                      git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
-                      git checkout -q FETCH_HEAD
-                      rm -rf .git
-                      chmod -R a+rwX /workspace
-                      mkdir -p "/opt/starci/tools/go"
-                      curl -fsSL 'https://go.dev/dl/go1.26.5.{os}-amd64.tar.gz' -o "/tmp/go.download"
-                      echo "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053  /tmp/go.download" | sha256sum -c -
-                      tar -xf "/tmp/go.download" -C "/opt/starci/tools/go"
-                      chmod -R a+rX /opt/starci/tools 2>/dev/null || true
+                    - "starci"
+                    - "pod"
+                    - "prepare"
                   env:
                     - name: "STARCI_CLONE_URL"
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
+                    - name: "STARCI_ARCH"
+                      value: "amd64"
+                    - name: "STARCI_STEP"
+                      value: "{\"name\":\"test\",\"image\":\"registry.example/starci-bare:latest\",\"run\":\"go test ./...\",\"needs\":[],\"env\":{\"CGO_ENABLED\":\"0\"},\"inputs\":[\"**/*.go\",\"go.mod\",\"go.sum\"],\"caches\":{\"go-build\":\"GOCACHE\",\"go-mod\":\"GOMODCACHE\"},\"cache\":false,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[{\"name\":\"go\",\"url\":\"https://go.dev/dl/go1.26.5.{os}-{arch}.tar.gz\",\"sha256\":{\"amd64\":\"5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053\",\"arm64\":\"fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49\",\"darwin/amd64\":\"6231d8d3b8f5552ec6cbf6d685bdd5482e1e703214b120e89b3bf0d7bf1ef725\",\"darwin/arm64\":\"efb87ff28af9a188d0536ef5d42e63dd52ba8263cd7344a993cc48dd11dedb6a\"},\"arch_names\":{},\"bin\":[\"go/bin\"]}],\"packages\":[]}"
+                    - name: "STARCI_STORE"
+                      value: "{{workflow.parameters.store}}"
+                    - name: "STARCI_STATE"
+                      value: "/opt/starci/state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
@@ -170,7 +156,7 @@ spec:
                   - "-c"
                 args:
                   - |-
-                    PATH="/opt/starci/tools/go/go/bin:"$PATH; export PATH
+                    PATH="$(cat /opt/starci/path):"$PATH; export PATH
                     go test ./...
                 env:
                   - name: "CGO_ENABLED"
@@ -208,29 +194,22 @@ spec:
                 - name: "starci-prepare"
                   image: "registry.example/starci-init:latest"
                   command:
-                    - "sh"
-                    - "-c"
-                  args:
-                    - |-
-                      set -eu
-                      cd /workspace
-                      git init -q .
-                      git remote add origin "$STARCI_CLONE_URL"
-                      git sparse-checkout set --no-cone '/**/*.go' '/go.mod' '/go.sum'
-                      git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
-                      git checkout -q FETCH_HEAD
-                      rm -rf .git
-                      chmod -R a+rwX /workspace
-                      mkdir -p "/opt/starci/tools/go"
-                      curl -fsSL 'https://go.dev/dl/go1.26.5.{os}-amd64.tar.gz' -o "/tmp/go.download"
-                      echo "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053  /tmp/go.download" | sha256sum -c -
-                      tar -xf "/tmp/go.download" -C "/opt/starci/tools/go"
-                      chmod -R a+rX /opt/starci/tools 2>/dev/null || true
+                    - "starci"
+                    - "pod"
+                    - "prepare"
                   env:
                     - name: "STARCI_CLONE_URL"
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
+                    - name: "STARCI_ARCH"
+                      value: "amd64"
+                    - name: "STARCI_STEP"
+                      value: "{\"name\":\"build linux/amd64\",\"image\":\"registry.example/starci-bare:latest\",\"run\":\"go build -o /dev/null ./...\",\"needs\":[\"vet\",\"test\"],\"env\":{\"CGO_ENABLED\":\"0\",\"GOARCH\":\"amd64\",\"GOOS\":\"linux\"},\"inputs\":[\"**/*.go\",\"go.mod\",\"go.sum\"],\"caches\":{\"go-build\":\"GOCACHE\",\"go-mod\":\"GOMODCACHE\"},\"cache\":false,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[{\"name\":\"go\",\"url\":\"https://go.dev/dl/go1.26.5.{os}-{arch}.tar.gz\",\"sha256\":{\"amd64\":\"5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053\",\"arm64\":\"fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49\",\"darwin/amd64\":\"6231d8d3b8f5552ec6cbf6d685bdd5482e1e703214b120e89b3bf0d7bf1ef725\",\"darwin/arm64\":\"efb87ff28af9a188d0536ef5d42e63dd52ba8263cd7344a993cc48dd11dedb6a\"},\"arch_names\":{},\"bin\":[\"go/bin\"]}],\"packages\":[]}"
+                    - name: "STARCI_STORE"
+                      value: "{{workflow.parameters.store}}"
+                    - name: "STARCI_STATE"
+                      value: "/opt/starci/state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
@@ -245,7 +224,7 @@ spec:
                   - "-c"
                 args:
                   - |-
-                    PATH="/opt/starci/tools/go/go/bin:"$PATH; export PATH
+                    PATH="$(cat /opt/starci/path):"$PATH; export PATH
                     go build -o /dev/null ./...
                 env:
                   - name: "CGO_ENABLED"
@@ -287,29 +266,22 @@ spec:
                 - name: "starci-prepare"
                   image: "registry.example/starci-init:latest"
                   command:
-                    - "sh"
-                    - "-c"
-                  args:
-                    - |-
-                      set -eu
-                      cd /workspace
-                      git init -q .
-                      git remote add origin "$STARCI_CLONE_URL"
-                      git sparse-checkout set --no-cone '/**/*.go' '/go.mod' '/go.sum'
-                      git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
-                      git checkout -q FETCH_HEAD
-                      rm -rf .git
-                      chmod -R a+rwX /workspace
-                      mkdir -p "/opt/starci/tools/go"
-                      curl -fsSL 'https://go.dev/dl/go1.26.5.{os}-amd64.tar.gz' -o "/tmp/go.download"
-                      echo "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053  /tmp/go.download" | sha256sum -c -
-                      tar -xf "/tmp/go.download" -C "/opt/starci/tools/go"
-                      chmod -R a+rX /opt/starci/tools 2>/dev/null || true
+                    - "starci"
+                    - "pod"
+                    - "prepare"
                   env:
                     - name: "STARCI_CLONE_URL"
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
+                    - name: "STARCI_ARCH"
+                      value: "amd64"
+                    - name: "STARCI_STEP"
+                      value: "{\"name\":\"build linux/arm64\",\"image\":\"registry.example/starci-bare:latest\",\"run\":\"go build -o /dev/null ./...\",\"needs\":[\"vet\",\"test\"],\"env\":{\"CGO_ENABLED\":\"0\",\"GOARCH\":\"arm64\",\"GOOS\":\"linux\"},\"inputs\":[\"**/*.go\",\"go.mod\",\"go.sum\"],\"caches\":{\"go-build\":\"GOCACHE\",\"go-mod\":\"GOMODCACHE\"},\"cache\":false,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[{\"name\":\"go\",\"url\":\"https://go.dev/dl/go1.26.5.{os}-{arch}.tar.gz\",\"sha256\":{\"amd64\":\"5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053\",\"arm64\":\"fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49\",\"darwin/amd64\":\"6231d8d3b8f5552ec6cbf6d685bdd5482e1e703214b120e89b3bf0d7bf1ef725\",\"darwin/arm64\":\"efb87ff28af9a188d0536ef5d42e63dd52ba8263cd7344a993cc48dd11dedb6a\"},\"arch_names\":{},\"bin\":[\"go/bin\"]}],\"packages\":[]}"
+                    - name: "STARCI_STORE"
+                      value: "{{workflow.parameters.store}}"
+                    - name: "STARCI_STATE"
+                      value: "/opt/starci/state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
@@ -324,7 +296,7 @@ spec:
                   - "-c"
                 args:
                   - |-
-                    PATH="/opt/starci/tools/go/go/bin:"$PATH; export PATH
+                    PATH="$(cat /opt/starci/path):"$PATH; export PATH
                     go build -o /dev/null ./...
                 env:
                   - name: "CGO_ENABLED"
@@ -366,29 +338,22 @@ spec:
                 - name: "starci-prepare"
                   image: "registry.example/starci-init:latest"
                   command:
-                    - "sh"
-                    - "-c"
-                  args:
-                    - |-
-                      set -eu
-                      cd /workspace
-                      git init -q .
-                      git remote add origin "$STARCI_CLONE_URL"
-                      git sparse-checkout set --no-cone '/**/*.go' '/go.mod' '/go.sum'
-                      git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"
-                      git checkout -q FETCH_HEAD
-                      rm -rf .git
-                      chmod -R a+rwX /workspace
-                      mkdir -p "/opt/starci/tools/go"
-                      curl -fsSL 'https://go.dev/dl/go1.26.5.{os}-amd64.tar.gz' -o "/tmp/go.download"
-                      echo "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053  /tmp/go.download" | sha256sum -c -
-                      tar -xf "/tmp/go.download" -C "/opt/starci/tools/go"
-                      chmod -R a+rX /opt/starci/tools 2>/dev/null || true
+                    - "starci"
+                    - "pod"
+                    - "prepare"
                   env:
                     - name: "STARCI_CLONE_URL"
                       value: "{{workflow.parameters.clone_url}}"
                     - name: "STARCI_SHA"
                       value: "{{workflow.parameters.sha}}"
+                    - name: "STARCI_ARCH"
+                      value: "amd64"
+                    - name: "STARCI_STEP"
+                      value: "{\"name\":\"build darwin/arm64\",\"image\":\"registry.example/starci-bare:latest\",\"run\":\"go build -o /dev/null ./...\",\"needs\":[\"vet\",\"test\"],\"env\":{\"CGO_ENABLED\":\"0\",\"GOARCH\":\"arm64\",\"GOOS\":\"darwin\"},\"inputs\":[\"**/*.go\",\"go.mod\",\"go.sum\"],\"caches\":{\"go-build\":\"GOCACHE\",\"go-mod\":\"GOMODCACHE\"},\"cache\":false,\"on\":{},\"prefer\":{},\"avoid\":{},\"tools\":[{\"name\":\"go\",\"url\":\"https://go.dev/dl/go1.26.5.{os}-{arch}.tar.gz\",\"sha256\":{\"amd64\":\"5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053\",\"arm64\":\"fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49\",\"darwin/amd64\":\"6231d8d3b8f5552ec6cbf6d685bdd5482e1e703214b120e89b3bf0d7bf1ef725\",\"darwin/arm64\":\"efb87ff28af9a188d0536ef5d42e63dd52ba8263cd7344a993cc48dd11dedb6a\"},\"arch_names\":{},\"bin\":[\"go/bin\"]}],\"packages\":[]}"
+                    - name: "STARCI_STORE"
+                      value: "{{workflow.parameters.store}}"
+                    - name: "STARCI_STATE"
+                      value: "/opt/starci/state"
                   volumeMounts:
                     - name: "workspace"
                       mountPath: "/workspace"
@@ -403,7 +368,7 @@ spec:
                   - "-c"
                 args:
                   - |-
-                    PATH="/opt/starci/tools/go/go/bin:"$PATH; export PATH
+                    PATH="$(cat /opt/starci/path):"$PATH; export PATH
                     go build -o /dev/null ./...
                 env:
                   - name: "CGO_ENABLED"

@@ -55,12 +55,14 @@ def ci(ctx):
 	wants(t, out, `when: "{{=workflow.parameters.event == 'tag'}}"`)
 }
 
-func TestArgoInputsAreTheOnlyThingCheckedOut(t *testing.T) {
+// The init container is starci, which checks out the step's inputs, and only
+// them, the way a machine does (step.PreparePod); it is given the step.
+func TestArgoPreparesAPodWithStarci(t *testing.T) {
 	out := compileArgo(t, `
 def ci(ctx):
     return [step("lint", image = "alpine:3", run = "true", inputs = ["src", "go.mod"])]
 `)
-	wants(t, out, `git sparse-checkout set --no-cone '/go.mod' '/src'`, "rm -rf .git")
+	wants(t, out, "- \"starci\"\n                    - \"pod\"\n                    - \"prepare\"", `\"inputs\":[\"go.mod\",\"src\"]`)
 }
 
 func TestArgoServicesAreNativeSidecars(t *testing.T) {
@@ -84,7 +86,6 @@ func TestArgoRefusesWhatAPodCannotKeepTo(t *testing.T) {
 		"offline":  {`step("a", image = "alpine:3", run = "true", network = False)`, "network = False"},
 		"packages": {`step("a", image = "debian:12", run = "true", packages = ["curl"])`, "packages"},
 		"template": {`step("a", image = "alpine:3", run = "echo {{ nope }}")`, `"{{"`},
-		"keep":     {`step("a", image = "alpine:3", run = "make", keep = ["out"])`, "artifacts"},
 		"bare":     {`step("a", run = "true")`, "--bare-image"},
 	} {
 		_, err := Argo("ci.star", []byte("def ci(ctx):\n    return ["+tc.script+"]\n"), Options{InitImage: argoInit})
@@ -168,13 +169,31 @@ def ci(ctx):
 `)
 	wants(t, out,
 		`name: "store"`,
-		`starci pass key > /opt/starci/key`,
-		`starci pass get`,
-		`/opt/starci/starci pass put`,
+		`if [ -e /opt/starci/hit ]; then`,
+		`/opt/starci/starci pod finish`,
 		`value: "{{workflow.parameters.store}}"`)
 	// Only the step that asks to be reused has any of it.
 	i := strings.Index(out, `- name: "always"`)
-	if i < 0 || strings.Contains(out[i:], "pass put") {
+	if i < 0 || strings.Contains(out[i:], "pod finish") {
 		t.Errorf("a step with cache = False records passes:\n%s", out[i:])
+	}
+}
+
+// What a task keeps leaves it as an output parameter, the pointers starci
+// wrote, and reaches the task handed it as an argument, for starci to fetch.
+func TestArgoHandsOnWhatATaskKept(t *testing.T) {
+	out := compileArgo(t, `
+def ci(ctx):
+    build = step("build", image = "alpine:3", run = "make", keep = ["out"], cache = False)
+    return [build, step("use", image = "alpine:3", run = "ls bin", artifacts = {"bin": artifact(build, "out")}, cache = False)]
+`)
+	wants(t, out,
+		`path: "/tmp/starci-kept.json"`,
+		`value: "{\"build\":{{tasks.build.outputs.parameters.kept}}}"`,
+		`value: "{{inputs.parameters.given}}"`,
+		`/opt/starci/starci pod finish`)
+	// A step that only keeps does not look for a pass.
+	if strings.Contains(out, "/opt/starci/hit") {
+		t.Errorf("a step with cache = False looks for a pass")
 	}
 }

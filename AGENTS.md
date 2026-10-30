@@ -173,7 +173,10 @@ and like services there is no capability for them
 - In a basic plan, `Next` puts the real pointer in place of an
   `artifact(step, path)` placeholder before handing the step out. The step as
   handed out is what ran, and what its result answers.
-- The Argo target refuses artifacts. The Temporal target hands a step out
+- The Argo target runs `starci pod prepare` and `starci pod finish` in each
+  pod (`step.PreparePod`, `step.FinishPod`), so a pod is given its inputs,
+  artifacts and tools by the code a machine uses; pointers travel as the
+  task's `kept` output parameter. The Temporal target hands a step out
   with its `artifact()` placeholders and the results of the steps it needs
   that kept something (`given`); `starci step` resolves them with
   `plan.Resolve`, as `Next` does.

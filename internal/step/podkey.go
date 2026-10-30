@@ -4,9 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
-	"os/exec"
-	"strings"
 
 	"git.phin.tech/sam/starci/internal/plan"
 )
@@ -17,32 +14,9 @@ import (
 // workflows do, so a tag that moves does not run a step again. The two keys
 // are not the same and never meet: this one says "pod" in its material.
 
-// InputsID identifies the files a step's inputs select in the checkout in dir,
-// by path, mode and blob id, asked of git with the pathspecs a machine uses.
-// It is contentID for a checkout that is not a machine's own.
-func InputsID(dir string, inputs []string) (string, error) {
-	specs := make([]string, len(inputs))
-	for i, in := range inputs {
-		out, err := exec.Command("git", "-C", dir, "ls-files", "--", pathspec(in)).CombinedOutput()
-		if err != nil {
-			return "", fmt.Errorf("input %q: %s", in, strings.TrimSpace(string(out)))
-		}
-		if len(out) == 0 {
-			return "", fmt.Errorf("input %q matches nothing in this commit", in)
-		}
-		specs[i] = pathspec(in)
-	}
-	out, err := exec.Command("git", append([]string{"-C", dir, "ls-files", "-s", "--"}, specs...)...).Output()
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(out)
-	return hex.EncodeToString(sum[:]), nil
-}
-
 // PodKey is the key a pass of s is stored under when s is run in a pod: its
 // image by name, its command, env, tools and services, the architecture of
-// the nodes, and content, which InputsID gives.
+// the nodes, what it is handed and keeps, and the content of its inputs.
 func PodKey(s plan.Step, arch, content string) string {
 	env := [][2]string{}
 	for _, k := range sortedKeys(s.Env) {
@@ -60,6 +34,7 @@ func PodKey(s plan.Step, arch, content string) string {
 	if len(s.Services) > 0 {
 		parts = append(parts, "services", s.Services)
 	}
+	parts = append(parts, artifactKey(s)...)
 	material, _ := json.Marshal(parts)
 	sum := sha256.Sum256(material)
 	return hex.EncodeToString(sum[:])

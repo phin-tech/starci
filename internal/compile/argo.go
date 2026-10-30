@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"path"
 	"regexp"
 	"strings"
 
@@ -15,8 +14,10 @@ import (
 // with a task for each step, asked once for each kind of event as the GitHub
 // target is.
 //
-// A task runs in the step's own image, as a pod: an init container (o.InitImage)
-// checks out only the step's inputs and fetches its tools by checksum, the
+// A task runs in the step's own image, as a pod: an init container (o.InitImage,
+// which holds starci) runs `starci pod prepare`, which checks out only the
+// step's inputs, fetches what it is handed and its tools by checksum, and asks
+// the shared store whether it passed before (step.PreparePod); the
 // step's services are native sidecars (init containers that keep running, held
 // to their `ready` by a startup probe), and the command runs in the main
 // container. Nothing here needs Docker, which a cluster rarely allows.
@@ -34,7 +35,7 @@ func Argo(filename string, src []byte, o Options) (string, error) {
 		o.Name = "starci"
 	}
 	if o.InitImage == "" {
-		return "", fmt.Errorf("the Argo target needs --init-image: an image with git, curl, tar and unzip, which puts each step's inputs and tools in place. starci names none")
+		return "", fmt.Errorf("the Argo target needs --init-image: an image with starci and git, which puts each step's inputs, artifacts and tools in place (dev/argo-init.Dockerfile builds one). starci names none")
 	}
 	u, err := eventUnion(filename, src, o)
 	if err != nil {
@@ -61,7 +62,10 @@ func Argo(filename string, src []byte, o Options) (string, error) {
 		}
 	}
 	if remembers {
-		notes = append(notes, "A step with cache = True is skipped when it passed before with the same inputs, if the `store` parameter names a shared store (STARCI_STORE, as for a machine); without one every step runs every time. The init image must then hold starci, and the pods need the store's credentials from the cluster. A pass is keyed on the step's image by name: a tag that moves does not run it again.")
+		notes = append(notes, "A step with cache = True is skipped when it passed before with the same inputs, if the `store` parameter names a shared store (STARCI_STORE, as for a machine); without one every step runs every time. The pods then need the store's credentials from the cluster. A pass is keyed on the step's image by name: a tag that moves does not run it again.")
+	}
+	if keepsArtifacts(merged) {
+		notes = append(notes, "Artifacts go from pod to pod through the shared store, so a run that keeps or is handed one needs the `store` parameter; their pointers travel as each task's `kept` output parameter. A task skipped because it passed before hands on what it kept then.")
 	}
 	if len(placed) > 0 {
 		notes = append(notes, fmt.Sprintf("A step's caches (%s) are directories of the pod and are gone when it ends.", strings.Join(placed, ", ")))
@@ -154,8 +158,6 @@ func argoRefusal(s plan.Step, o Options) error {
 		return no("sets network = False: a pod's network policy covers the whole pod, including the container that fetches its inputs")
 	case len(s.Packages) > 0:
 		return no("lists packages: installing them needs root and the network, and an image cannot be built without privilege")
-	case len(s.Artifacts) > 0 || len(s.Keep) > 0:
-		return no("keeps or is handed artifacts: nothing carries files from one pod to another yet")
 	case s.Bare() && o.BareImage == "":
 		return no("has no image: give --bare-image, the image such steps run in")
 	}
@@ -251,16 +253,11 @@ func argoTask(s plan.Step, ids map[string]string, cond string, o Options) (any, 
 	}
 	tmpl = append(tmpl, kv{"retryStrategy", obj{{"limit", 2}, {"retryPolicy", "OnError"}}})
 
-	// What the pod holds.
-	volumes := []any{obj{{"name", "workspace"}, {"emptyDir", obj{}}}}
+	// What the pod holds. /opt/starci is what the init container leaves the
+	// main one (step.PreparePod): the tools, whether the step passed before,
+	// and starci, to finish a step that keeps something or remembers passes.
+	volumes := []any{obj{{"name", "workspace"}, {"emptyDir", obj{}}}, obj{{"name", "starci"}, {"emptyDir", obj{}}}}
 	mounts := []any{obj{{"name", "workspace"}, {"mountPath", "/workspace"}}}
-	// /opt/starci holds what the init container leaves for the main one: the
-	// tools, and for a step that remembers its passes the key, a mark that it
-	// has passed, and starci to record a new pass with.
-	shared := len(s.Tools) > 0 || s.Cache
-	if shared {
-		volumes = append(volumes, obj{{"name", "starci"}, {"emptyDir", obj{}}})
-	}
 	var cacheMounts []any
 	for _, name := range sortedKeys(s.Caches) {
 		vol := "cache-" + notNameChar.ReplaceAllString(strings.ToLower(name), "-")
@@ -268,80 +265,45 @@ func argoTask(s plan.Step, ids map[string]string, cond string, o Options) (any, 
 		cacheMounts = append(cacheMounts, obj{{"name", vol}, {"mountPath", s.Caches[name]}})
 	}
 
-	// Prepare: the step's inputs, and its tools.
-	var script []string
-	script = append(script, "set -eu", "cd /workspace", "git init -q .", `git remote add origin "$STARCI_CLONE_URL"`)
-	if !(len(s.Inputs) == 1 && s.Inputs[0] == ".") {
-		var patterns []string
-		for _, in := range s.Inputs {
-			patterns = append(patterns, shq(sparsePattern(in)))
-		}
-		script = append(script, "git sparse-checkout set --no-cone "+strings.Join(patterns, " "))
-	}
-	script = append(script,
-		`git fetch -q --depth 1 --filter=blob:none origin "$STARCI_SHA"`,
-		"git checkout -q FETCH_HEAD")
-	if s.Cache {
-		// Has this passed before with these inputs? If so there is nothing
-		// more to set up: the main container sees the mark and ends.
-		script = append(script,
-			`if [ -n "${STARCI_STORE:-}" ]; then`,
-			"  mkdir -p /opt/starci",
-			`  cp "$(command -v starci)" /opt/starci/starci`,
-			`  printf '%s' "$STARCI_STEP" | starci pass key > /opt/starci/key`,
-			`  if starci pass get "$(cat /opt/starci/key)"; then touch /opt/starci/hit; chmod -R a+rX /opt/starci; exit 0; fi`,
-			"  chmod -R a+rX /opt/starci",
-			"fi")
-	}
-	script = append(script,
-		// The commit is out of the step's reach; the step is given its inputs.
-		"rm -rf .git",
-		"chmod -R a+rwX /workspace")
-	var pathDirs []string
-	prepareMounts := []any{obj{{"name", "workspace"}, {"mountPath", "/workspace"}}}
-	if shared {
-		prepareMounts = append(prepareMounts, obj{{"name", "starci"}, {"mountPath", "/opt/starci"}})
-	}
+	// Prepare: starci, in the init image, does for the pod what a machine
+	// does before a step, with the same code: only the step's inputs, what it
+	// is handed, its tools by checksum, and whether it passed before.
 	for _, t := range s.Tools {
-		sum, ok := t.Sum("linux/" + o.Arch)
-		if !ok {
+		if _, ok := t.Sum("linux/" + o.Arch); !ok {
 			return nil, fmt.Errorf("step %q: tool %q has no build for %s, which is what the cluster's nodes are (--arch)", s.Name, t.Name, o.Arch)
 		}
-		arch := o.Arch
-		if name, ok := t.ArchNames[o.Arch]; ok {
-			arch = name
-		}
-		script = append(script, toolInstall(t, sum, arch, "/tmp/"+t.Name+".download", "/opt/starci/tools/"+t.Name)...)
-		for _, b := range t.Bin {
-			pathDirs = append(pathDirs, path.Join("/opt/starci/tools", t.Name, strings.ReplaceAll(b, "{arch}", arch)))
+	}
+	embedded := s
+	embedded.Image = image
+	stepJSON, err := jsonText(embedded)
+	if err != nil {
+		return nil, err
+	}
+	stepEnv := []any{obj{{"name", "STARCI_STEP"}, {"value", stepJSON}}}
+	if len(s.Artifacts) > 0 {
+		stepEnv = append(stepEnv, obj{{"name", "STARCI_GIVEN"}, {"value", "{{inputs.parameters.given}}"}})
+	}
+	storeEnv := func(state string) []any {
+		return []any{
+			obj{{"name", "STARCI_STORE"}, {"value", "{{workflow.parameters.store}}"}},
+			obj{{"name", "STARCI_STATE"}, {"value", state}},
 		}
 	}
-	script = append(script, "chmod -R a+rX /opt/starci/tools 2>/dev/null || true")
 	prepareEnv := []any{
 		obj{{"name", "STARCI_CLONE_URL"}, {"value", "{{workflow.parameters.clone_url}}"}},
 		obj{{"name", "STARCI_SHA"}, {"value", "{{workflow.parameters.sha}}"}},
+		obj{{"name", "STARCI_ARCH"}, {"value", o.Arch}},
 	}
-	storeEnv := []any{
-		obj{{"name", "STARCI_STORE"}, {"value", "{{workflow.parameters.store}}"}},
-		obj{{"name", "STARCI_STATE"}, {"value", "/tmp/starci-state"}},
-	}
-	if s.Cache {
-		embedded := s
-		embedded.Image = image
-		stepJSON, err := jsonText(embedded)
-		if err != nil {
-			return nil, err
-		}
-		prepareEnv = append(prepareEnv, obj{{"name", "STARCI_STEP"}, {"value", stepJSON}}, obj{{"name", "STARCI_ARCH"}, {"value", o.Arch}})
-		prepareEnv = append(prepareEnv, storeEnv...)
-	}
+	prepareEnv = append(append(prepareEnv, stepEnv...), storeEnv("/opt/starci/state")...)
 	inits := []any{obj{
 		{"name", "starci-prepare"},
 		{"image", o.InitImage},
-		{"command", strs([]string{"sh", "-c"})},
-		{"args", strs([]string{strings.Join(script, "\n")})},
+		{"command", strs([]string{"starci", "pod", "prepare"})},
 		{"env", prepareEnv},
-		{"volumeMounts", prepareMounts},
+		{"volumeMounts", []any{
+			obj{{"name", "workspace"}, {"mountPath", "/workspace"}},
+			obj{{"name", "starci"}, {"mountPath", "/opt/starci"}},
+		}},
 	}}
 
 	// Services: native sidecars, so that the step starts when they are ready
@@ -384,36 +346,43 @@ func argoTask(s plan.Step, ids map[string]string, cond string, o Options) (any, 
 	}
 
 	// The step itself. Tools go in front of the image's own PATH, which only
-	// the container can say.
+	// the container can say; a step that keeps something or remembers its
+	// passes is finished by starci once it has passed (step.FinishPod).
 	main := obj{{"name", "main"}, {"image", image}, {"workingDir", "/workspace"}}
 	var env []any
 	for _, k := range sortedKeys(s.Env) {
-		if k == "PATH" && len(pathDirs) > 0 {
+		if k == "PATH" && len(s.Tools) > 0 {
 			continue
 		}
 		env = append(env, obj{{"name", k}, {"value", s.Env[k]}})
 	}
-	var setPath string
-	if len(pathDirs) > 0 {
-		base := "$PATH"
-		if p, ok := s.Env["PATH"]; ok {
-			base = shq(p)
-		}
-		setPath = "PATH=\"" + strings.Join(pathDirs, ":") + ":\"" + base + "; export PATH\n"
-	}
+	finish := s.Cache || len(s.Keep) > 0
 	switch {
-	case s.Cache:
-		// Ends at once if the init container found a pass; otherwise runs the
-		// step and, if it passed, records that.
-		line := "if [ -e /opt/starci/hit ]; then echo 'starci: passed before with the same inputs; not run again'; exit 0; fi\n" +
-			setPath + "(\n" + execCommand(s) + "\n)\nrc=$?\n" +
-			"if [ \"$rc\" -eq 0 ] && [ -e /opt/starci/key ]; then\n" +
-			"  /opt/starci/starci pass put \"$(cat /opt/starci/key)\" " + shq(s.Name) + " || echo 'starci: could not record the pass' >&2\n" +
-			"fi\nexit $rc"
-		main = append(main, kv{"command", strs([]string{"sh", "-c"})}, kv{"args", strs([]string{line})})
-		env = append(env, storeEnv...)
-	case len(pathDirs) > 0:
-		main = append(main, kv{"command", strs([]string{"sh", "-c"})}, kv{"args", strs([]string{setPath + execCommand(s)})})
+	case finish || len(s.Tools) > 0:
+		var script strings.Builder
+		if s.Cache {
+			script.WriteString("if [ -e /opt/starci/hit ]; then\n  echo 'starci: passed before with the same inputs; not run again'\n")
+			if len(s.Keep) > 0 {
+				// What it kept then is handed on as if it had kept it now.
+				script.WriteString("  cp /opt/starci/kept.json /tmp/starci-kept.json\n")
+			}
+			script.WriteString("  exit 0\nfi\n")
+		}
+		if len(s.Tools) > 0 {
+			base := "$PATH"
+			if p, ok := s.Env["PATH"]; ok {
+				base = shq(p)
+			}
+			script.WriteString("PATH=\"$(cat /opt/starci/path):\"" + base + "; export PATH\n")
+		}
+		if finish {
+			script.WriteString("(\n" + execCommand(s) + "\n)\nrc=$?\n" +
+				"if [ \"$rc\" -eq 0 ]; then /opt/starci/starci pod finish || exit 1; fi\nexit $rc")
+			env = append(append(env, stepEnv...), storeEnv("/tmp/starci-state")...)
+		} else {
+			script.WriteString(execCommand(s))
+		}
+		main = append(main, kv{"command", strs([]string{"sh", "-c"})}, kv{"args", strs([]string{script.String()})})
 	case len(s.Argv) > 0:
 		main = append(main, kv{"command", strs(s.Argv)})
 	default:
@@ -423,12 +392,27 @@ func argoTask(s plan.Step, ids map[string]string, cond string, o Options) (any, 
 		main = append(main, kv{"env", env})
 	}
 	all := append(append([]any{}, mounts...), cacheMounts...)
-	if shared {
-		all = append(all, obj{{"name", "starci"}, {"mountPath", "/opt/starci"}, {"readOnly", true}})
-	}
+	all = append(all, obj{{"name", "starci"}, {"mountPath", "/opt/starci"}, {"readOnly", true}})
 	main = append(main, kv{"volumeMounts", all})
 	tmpl = append(tmpl, kv{"container", main})
 
+	// What it keeps leaves as the pointers starci wrote, and what it is
+	// handed arrives as the pointers the steps it needs left.
+	if len(s.Keep) > 0 {
+		tmpl = append(tmpl, kv{"outputs", obj{{"parameters", []any{obj{
+			{"name", "kept"},
+			{"valueFrom", obj{{"path", "/tmp/starci-kept.json"}, {"default", "{}"}}},
+		}}}}})
+	}
+	if len(s.Artifacts) > 0 {
+		var parts []string
+		for _, from := range handedFrom(s) {
+			name, _ := json.Marshal(from)
+			parts = append(parts, fmt.Sprintf("%s:{{tasks.%s.outputs.parameters.kept}}", name, ids[from]))
+		}
+		task = append(task, kv{"arguments", obj{{"parameters", []any{obj{{"name", "given"}, {"value", "{" + strings.Join(parts, ",") + "}"}}}}}})
+		tmpl = append(obj{{"inputs", obj{{"parameters", []any{obj{{"name", "given"}}}}}}}, tmpl...)
+	}
 	return append(task, kv{"inline", tmpl}), nil
 }
 

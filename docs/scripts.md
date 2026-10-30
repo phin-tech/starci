@@ -61,7 +61,7 @@ it is keyed on that hash: if `build` runs again and makes the same binary,
 inputs gave it, and a step that passes without making a path it keeps fails.
 Shared between machines through the same store as results
 ([Sharing results between machines](inputs.md#sharing-results-between-machines)).
-GitHub Actions, CircleCI and Temporal workflows compiled from a script carry them too; Argo refuses them for now ([Compiling](compiling.md)).
+Workflows compiled from a script carry them too, for every target ([Compiling](compiling.md)).
 
 ## Two modes
 

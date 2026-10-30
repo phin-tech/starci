@@ -46,7 +46,7 @@ const usage = `usage:
   starci next   CHECKOUT [--sha SHA] [--file FILE] [--clone-url URL] < what is done so far
   starci step   [--bare[=false]] [--bare-image IMAGE] < a step next asked for
   starci sweep  [MACHINE]
-  starci pass   key [DIR] < step | get KEY | put KEY [NAME]`
+  starci pod    prepare | finish   (in a pod the Argo target made)`
 
 func main() {
 	// Before anything else, even a script this executable carries: a
@@ -86,8 +86,8 @@ func main() {
 		err = stepCmd(os.Args[2:])
 	case "sweep":
 		err = sweepCmd(os.Args[2:])
-	case "pass":
-		err = passCmd(os.Args[2:])
+	case "pod":
+		err = podCmd(os.Args[2:])
 	default:
 		die(usage)
 	}
