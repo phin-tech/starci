@@ -80,6 +80,11 @@ an engine yet.
 3. If the engine needs a service to test against, gate its test behind an
    environment variable (`STARCI_TEST_<NAME>`), and say how to run it in
    `docs/development.md`.
+4. If the engine imports an orchestrator's SDK, put its package, and the
+   file in `cmd/starci` that makes it, behind a build tag named after it,
+   with an untagged stub that says how to build it in
+   (`docs/adr/0004-an-engine-sdk-behind-a-build-tag.md`). Vet and test with
+   the tag as well as without it.
 
 ### Durable engines and replay
 

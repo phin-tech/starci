@@ -109,3 +109,4 @@ nav:
           - starci names no tool: adr/0001-starci-names-no-tool.md
           - A store of pointers: adr/0002-a-store-of-pointers.md
           - starci says what is next: adr/0003-starci-says-what-is-next.md
+          - An engine's SDK behind a build tag: adr/0004-an-engine-sdk-behind-a-build-tag.md
