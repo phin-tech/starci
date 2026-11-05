@@ -7,12 +7,16 @@ CI whose pipelines are Starlark scripts. starci decides what a run is; an engine
 ### Running
 
 **Engine**:
-What gets a run's steps onto machines and waits for them. The local engine, which runs everything on the machine it is on, is the one there is.
+What gets a run's steps onto machines and waits for them. The local engine runs everything on the machine it is on; the Temporal engine hands steps to a pool of machines.
 _Avoid_: backend, executor, runner
 
 **Machine**:
 Whatever runs one step: the computer `starci run` is on, a CI tool's runner, and for another engine a Lambda invocation or a pod.
 _Avoid_: worker, host, runner, node
+
+**Pool**:
+The machines an engine hands steps to, which join it with `starci machine` and may serve every repository that starts runs on it.
+_Avoid_: fleet, cluster
 
 **Placement**:
 What a step says about the machine it needs (`on`, `prefer`, `avoid`). Well-known keys (`os`, `arch`) mean the same on every engine; any other key is one engine's own, and an engine that cannot honour a key says so before the run starts.

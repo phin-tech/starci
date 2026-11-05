@@ -9,6 +9,7 @@
 //	                tools it pins download as pinned; runs nothing
 //	starci next     say what a run does next, given its results so far
 //	starci step     run one step that next asked for, on this machine
+//	starci machine  join an engine's pool of machines, and run its steps
 package main
 
 import (
@@ -40,11 +41,12 @@ import (
 
 const usage = `usage:
   starci plan   [--file .ci.star] [--repo owner/name] [--sha SHA] [--ref REF] [--changed a,b,c]
-  starci run    CHECKOUT [-v] [--slots N] [--bare[=false]] [--bare-image IMAGE] [--sha SHA] [--file FILE] [--clone-url URL]
+  starci run    CHECKOUT [-v] [--engine local|temporal] [--slots N] [--bare[=false]] [--bare-image IMAGE] [--sha SHA] [--file FILE] [--clone-url URL]
   starci compile [--target github|circleci|argo|temporal|binary] [--init-image IMAGE --bare-image IMAGE --name NAME] [-o FILE|DIR --freeze --base STARCI] [--file .ci.star] [--runs-on NAME] [--arch amd64] [--offline] [--check FILE|DIR]
   starci validate [--file .ci.star] [--arch amd64,arm64]
   starci next   CHECKOUT [--sha SHA] [--file FILE] [--clone-url URL] < what is done so far
   starci step   [--bare[=false]] [--bare-image IMAGE] < a step next asked for
+  starci machine --engine temporal [-v] [--name NAME] [--slots N] [--bare[=false]] [--bare-image IMAGE]
   starci sweep  [MACHINE]
   starci pod    prepare | finish   (in a pod the Argo target made)`
 
@@ -86,6 +88,8 @@ func main() {
 		err = stepCmd(os.Args[2:])
 	case "sweep":
 		err = sweepCmd(os.Args[2:])
+	case "machine":
+		err = machineCmd(os.Args[2:])
 	case "pod":
 		err = podCmd(os.Args[2:])
 	default:
@@ -146,9 +150,10 @@ func evalFile(file string, c plan.Context) (*plan.Plan, error) {
 
 func runCmd(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	// Every run is on this machine; --local is what that was asked for with
-	// when there was another kind, and is still accepted.
-	fs.Bool("local", true, "accepted, and means nothing: every run is on this machine")
+	engineName := fs.String("engine", os.Getenv("STARCI_ENGINE"), "what carries the run out: local, this machine (the default), or temporal (default: STARCI_ENGINE)")
+	// --local is what running here was asked for with before there was a
+	// choice, and is still accepted.
+	fs.Bool("local", true, "accepted, and means nothing: say --engine instead")
 	var bare optionalBool
 	fs.Var(&bare, "bare", "run bare steps, or with --bare=false refuse them (default: STARCI_BARE, else yes but for a pull request from a fork)")
 	bareImage := fs.String("bare-image", os.Getenv("STARCI_BARE_IMAGE"), "run bare steps in this image instead of on the machine, each in a container of its own (default: STARCI_BARE_IMAGE)")
@@ -217,9 +222,17 @@ func runCmd(args []string) error {
 	}
 	defer flush()
 
-	eng, err := localEngine(*slots, *verbose, c, bare, *bareImage)
+	eng, err := pickEngine(*engineName, func() (engine.Engine, error) {
+		return localEngine(*slots, *verbose, c, bare, *bareImage)
+	})
 	if err != nil {
 		return err
+	}
+	if _, pooled := eng.(engine.Pool); pooled {
+		if why := fetchable(run.CloneURL); why != "" {
+			return errors.New(why)
+		}
+		fmt.Printf("on %s: steps run on the pool's machines, and print there\n", eng.Name())
 	}
 	// Whatever the run asks for that this engine does not do is said now,
 	// not left to be discovered.

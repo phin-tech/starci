@@ -9,6 +9,7 @@ file is for whoever changes the code. `CONTEXT.md` is the glossary, and
 go test ./...          # runs real containers; needs Docker
 go test -short ./...   # without them
 go vet ./... && gofmt -l .
+go vet -tags temporal ./... && go test -tags temporal -short ./...   # with the Temporal engine
 ```
 
 Commits to this repository on git.phin.tech are authored as `bender` and pushed
@@ -26,9 +27,11 @@ history has it.
 ## Engines
 
 starci decides what a run is. Something else gets its steps onto machines and
-waits for them: an **engine**. There is one today, `internal/engine/local`,
-which runs everything on the machine it is on, and the seam is kept for others
-(Lambda, Temporal, DBOS, Kubernetes Jobs). Keep it that way, and add to it
+waits for them: an **engine**. There are two: `internal/engine/local`, which
+runs everything on the machine it is on, and `internal/engine/temporal`,
+compiled in with `-tags temporal`, whose steps run on a pool of machines
+(`starci machine`). The seam is kept for others (Lambda, DBOS, Kubernetes
+Jobs). Keep it that way, and add to it
 only what an engine that exists needs.
 
 ### Where engine code may live
@@ -221,7 +224,6 @@ before relying on it.
 |---|---|---|
 | Lambda | A step is an invocation. | The step's image would be the function's image, or a bare step runs in a default one. Not durable on its own. Placement is architecture and memory; other labels are missing. |
 | DBOS | A library plus Postgres; no server. | Durable scripts map naturally onto its workflows. No label matching, so `on`/`prefer`/`avoid` would become queues at best. No dashboard to link a status to. Confirm cross-process queues, cancellation, and recovery by another machine first. |
-| Temporal | A server and long-lived workers. | The workflow would loop over `Next` (an activity, so Starlark never runs under the workflow's own determinism rules), keep results in its history, and run each step as an activity. Its Go SDK has an OpenTelemetry interceptor that handles propagation. History has size limits, which pointers in place of bytes are for. `starci compile --target temporal` already writes a frozen-plan workflow for basic scripts (activities run `starci step`; `docs/compiling.md`), which is not this engine. |
 | Kubernetes Jobs | A step is a Job. | Not durable on its own: there is no record to resume a script from unless the results are kept somewhere (ADR 0003, "Later, and how"). Placement maps onto node selectors. Each Job could run `starci step`. Tracing needs nothing but the `Carrier`. |
 
 The local engine is the reference for "an engine with none of the

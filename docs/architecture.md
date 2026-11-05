@@ -6,6 +6,7 @@
 | `internal/step` | Running one step on one machine: fetch, sandbox, container, result cache, the artifacts it keeps and is handed. Knows no engine either. |
 | `internal/engine` | What starci asks of whatever carries a run out: the `Engine` interface. |
 | `internal/engine/local` | The engine that is this machine: it asks `plan` what is next and runs each step with `step`, several at once. |
+| `internal/engine/temporal` | The engine whose steps run on a pool of machines through a Temporal server. Compiled in only with `-tags temporal`. |
 | `internal/engine/enginetest` | What an engine has to get right, as tests every engine is put through. |
 | `internal/compile` | Writing a basic plan out for GitHub Actions, CircleCI, Argo or Temporal, or as an executable. |
 | `internal/ciinfo` | Reading why a run started from the CI tool starci is running inside. |
@@ -43,9 +44,15 @@ an interruption, and placing steps by label. What a run asks for that its
 engine cannot do is said before the run starts, not dropped: `starci run` on a
 script with `on` rules prints which steps lost them.
 
-There is one engine, the local one, and it has neither: there is nowhere else
-to place a step and no record to resume from. Hatchet was the other until it
-was taken out (see the [decision](adr/0001-starci-names-no-tool.md)). A new
+The local engine has neither: there is nowhere else to place a step and no
+record to resume from. The Temporal engine runs a run as a workflow that asks
+what is next as an activity, and each step as an activity on whichever of its
+pool's machines takes it (`starci machine --engine temporal`). It claims
+neither yet either (see [the plan](plans/temporal-engine.md)), and is compiled
+in only when asked for (see the
+[decision](adr/0004-an-engine-sdk-behind-a-build-tag.md)). Hatchet was an
+engine until it was taken out (see the
+[decision](adr/0001-starci-names-no-tool.md)). A new
 engine is a package that implements `Engine` and passes the shared tests,
 which put real containers through basic and advanced runs and hold the engine
 to what `Can` claims:
@@ -55,7 +62,8 @@ func TestEngine(t *testing.T) { enginetest.Run(t, myEngine) }
 ```
 
 An engine with abilities beyond running a run adds a small interface for
-each, asked for with a type assertion.
+each, asked for with a type assertion. The one there is, `engine.Pool`, is an
+engine whose steps run on machines that join it: `starci machine` asks for it.
 
 ## The store
 

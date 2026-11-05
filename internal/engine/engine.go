@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"git.phin.tech/sam/starci/internal/plan"
+	"git.phin.tech/sam/starci/internal/step"
 )
 
 // Engine carries runs out.
@@ -29,6 +30,30 @@ type Engine interface {
 	// run could not be carried out at all; a run whose steps failed is a
 	// Result, not an error.
 	Execute(ctx context.Context, r Run) (Result, error)
+}
+
+// Pool is an engine whose steps run on machines that join it, rather than in
+// the process that asked for the run. Serve makes the machine it is called on
+// one of them, taking steps until ctx ends. An engine is asked for it with a
+// type assertion; the local engine is not one.
+type Pool interface {
+	Serve(ctx context.Context, m Machine) error
+}
+
+// Machine is what a machine brings to a pool.
+type Machine struct {
+	// Config is how it runs steps. Its Bare is used for every run unless
+	// Bare below says otherwise.
+	Config step.Config
+	// Bare, if set, decides for each run whether this machine runs its bare
+	// steps: a machine serving many repositories cannot decide once for all
+	// of them (a pull request from a fork, for one).
+	Bare func(plan.Context) bool
+	// Slots is how many steps it runs at once.
+	Slots int
+	// Log receives each line a step prints, with the step's number and
+	// name. Optional.
+	Log func(step, line string)
 }
 
 // Run is one run, as an engine is asked to carry it out.

@@ -9,6 +9,31 @@ The engine tests run against the local engine with everything else. An engine
 that needs a service to test against runs its tests when asked, with
 `STARCI_TEST_<NAME>=1`.
 
+The Temporal engine is compiled only with `-tags temporal`
+([decision](adr/0004-an-engine-sdk-behind-a-build-tag.md)), so everything is
+vetted and tested twice, with the tag and without:
+
+```sh
+go vet ./... && go test -short ./...
+go vet -tags temporal ./... && go test -tags temporal -short ./...
+```
+
+Give gopls the tag, or it treats the engine as dead code: in its settings,
+`"buildFlags": ["-tags=temporal"]`.
+
+Without a server, the engine's workflow is tested under the SDK's test
+environment, with a stand-in for running a step. The shared engine tests run
+against a real server when `STARCI_TEST_TEMPORAL_SERVER=1`, connecting as the
+SDK's environment says, with a machine in the test's own process on a task
+queue of its own:
+
+```sh
+STARCI_TEST_TEMPORAL_SERVER=1 TEMPORAL_ADDRESS=host:7233 \
+  go test -tags temporal ./internal/engine/temporal
+```
+
+`temporal server start-dev` is enough of a server.
+
 The Temporal compile target writes a Go module. Building it against the Temporal
 SDK, and running its workflow under the SDK's test environment with a stand-in
 for `starci step`, needs the network to fetch the SDK, and runs when
