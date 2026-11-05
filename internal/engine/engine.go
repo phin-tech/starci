@@ -49,6 +49,9 @@ type Machine struct {
 	// steps: a machine serving many repositories cannot decide once for all
 	// of them (a pull request from a fork, for one).
 	Bare func(plan.Context) bool
+	// Labels are what it offers a step's on, beside its os and arch, which
+	// an engine knows for itself.
+	Labels map[string]string
 	// Slots is how many steps it runs at once.
 	Slots int
 	// Log receives each line a step prints, with the step's number and
@@ -89,9 +92,13 @@ type Capabilities struct {
 	// advanced script picks up where it was, without repeating finished
 	// steps.
 	Durable bool
-	// Placement: a step's on, prefer and avoid decide where it runs. Without
-	// it, os and arch are still checked by the machine the step lands on.
+	// Placement: a step's on decides where it runs: it goes only to a
+	// machine that has every label it asks for. Without it, os and arch are
+	// still checked by the machine the step lands on.
 	Placement bool
+	// Preference: a step's prefer and avoid decide where it runs too. Only
+	// an engine with Placement can have it.
+	Preference bool
 }
 
 // Missing lists, in plain sentences, what r asks for that these capabilities
@@ -99,15 +106,20 @@ type Capabilities struct {
 // nothing is quietly not done.
 func (c Capabilities) Missing(r Run) []string {
 	var missing []string
-	if !c.Placement && r.Plan != nil {
-		var placed []string
+	if r.Plan != nil {
+		var placed, preferring []string
 		for _, s := range r.Plan.Steps {
-			if labelled(s) {
+			if !c.Placement && (labelled(s.On) || prefers(s)) {
 				placed = append(placed, s.Name)
+			} else if c.Placement && !c.Preference && prefers(s) {
+				preferring = append(preferring, s.Name)
 			}
 		}
 		if len(placed) > 0 {
 			missing = append(missing, fmt.Sprintf("on, prefer and avoid are ignored but for os and arch: there is only one place to run (%s)", strings.Join(placed, ", ")))
+		}
+		if len(preferring) > 0 {
+			missing = append(missing, fmt.Sprintf("prefer and avoid are ignored but for os and arch: a step goes to any machine that has what its on asks for (%s)", strings.Join(preferring, ", ")))
 		}
 	}
 	if !c.Durable && r.Mode == plan.Advanced {
@@ -116,17 +128,17 @@ func (c Capabilities) Missing(r Run) []string {
 	return missing
 }
 
-// labelled reports whether a step places itself by anything but the
-// well-known keys, which the machine a step lands on checks for itself.
-func labelled(s plan.Step) bool {
-	if len(s.Prefer) > 0 {
-		return true
-	}
-	for _, m := range []map[string]string{s.On, s.Avoid} {
-		for k := range m {
-			if k != plan.PlaceOS && k != plan.PlaceArch {
-				return true
-			}
+// prefers reports whether a step says where it would rather run, beyond
+// the well-known keys, which the machine a step lands on checks for itself.
+func prefers(s plan.Step) bool {
+	return len(s.Prefer) > 0 || labelled(s.Avoid)
+}
+
+// labelled reports whether m names anything but the well-known keys.
+func labelled(m map[string]string) bool {
+	for k := range m {
+		if k != plan.PlaceOS && k != plan.PlaceArch {
+			return true
 		}
 	}
 	return false

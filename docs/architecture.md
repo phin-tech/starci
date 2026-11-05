@@ -47,8 +47,9 @@ script with `on` rules prints which steps lost them.
 The local engine has neither: there is nowhere else to place a step and no
 record to resume from. The Temporal engine runs a run as a workflow that asks
 what is next as an activity, and each step as an activity on whichever of its
-pool's machines takes it (`starci machine --engine temporal`). It claims
-neither yet either (see [the plan](plans/temporal-engine.md)), and is compiled
+pool's machines takes it (`starci machine --engine temporal`). It is
+durable, and places steps by `on` though not by `prefer` or `avoid` (see
+[the plan](plans/temporal-engine.md)). It is compiled
 in only when asked for (see the
 [decision](adr/0004-an-engine-sdk-behind-a-build-tag.md)). Hatchet was an
 engine until it was taken out (see the

@@ -1,10 +1,10 @@
 # Plan: a Temporal engine
 
-**Status:** work order steps 1–3 are built (`internal/engine/temporal`,
-`starci run --engine temporal`, `starci machine`), against SDK v1.50.0 and a
-1.32 server. The workflow is tested under the SDK's test environment. The
-shared engine tests against a real server, the placement split, the refusal of
-artifacts without a store, and the durability tests are not done.
+**Status:** built (`internal/engine/temporal`, `starci run --engine
+temporal`, `starci machine`), against SDK v1.50.0 and a 1.32 server. It
+claims `Durable` and `Placement`, not `Preference`. Every test below passes,
+the kill-mid-step test included. Not done: streaming a step's lines to where
+the run started, and a workflow ID from the CI tool's run.
 
 This is not `starci compile --target temporal` (`docs/plans/temporal-target.md`).
 That target freezes a basic plan into a generated module and refuses advanced
@@ -79,14 +79,26 @@ A loop with the shape of `local.drive`:
 
 ### Capabilities
 
-- **`Durable: true`,** claimed only once the kill-mid-step test below passes.
-- **Placement.** `on` maps to a task queue per sorted label set, as in the
-  compile target. `prefer` and `avoid` have no equivalent. `Capabilities.Placement`
-  is one bool, so split it (for example `Placement` for `on`, and `Preference`
-  for `prefer` and `avoid`) rather than claim what is not done.
-  `Capabilities.Missing` and the local engine change with it.
-- **Artifacts** need a shared `STARCI_STORE`. A run that keeps or is handed
-  artifacts without one is refused before it starts.
+- **`Durable: true`,** claimed now that the kill-mid-step test passes: a
+  machine killed partway through the middle of three steps of an advanced
+  script, another machine started, and the run passes with the first and
+  last steps run once and the middle one twice. Its history, with the
+  heartbeat timeout and the retry, is kept for the replay test.
+- **Placement (built).** A step goes to the task queue named by its `on`
+  (`starci/gpu=true,os=linux`, as in the compile target). A machine serves
+  the queue of every set of its labels (`--label`, `STARCI_LABELS`), its os
+  and arch among them, so at most six labels. `Capabilities` has
+  `Placement` for `on` and `Preference` for `prefer` and `avoid`, which have
+  no equivalent here and are reported as ignored. A step that no machine
+  takes within an hour is reported as not run.
+- **The machine's limit on steps** is a gate in the step activity, which
+  heartbeats while it waits. Temporal's own slots are reserved before each
+  poll, so slots shared between a machine's queues leave some unpolled for
+  up to a long poll.
+- **Artifacts (built).** A machine with no shared `STARCI_STORE` refuses a
+  step that keeps or is handed one, with a result that says so, and says at
+  start that it will. Whether the pool has a store is not known where the
+  run starts, so this is the machine's refusal, not the run's.
 
 ### Execute and the CLI
 
@@ -168,13 +180,10 @@ input (`load()` is refused, so the source is the whole script).
 - **Unit:** the workflow under `testsuite` with a stand-in step activity,
   covering order, concurrency, skipping after a failure, a failed step not
   being retried, and an advanced script's branches.
-- **Engine:** `enginetest.Run(t, eng)` against `temporal server start-dev` or
-  the SDK's dev server. It needs Docker and a server, so it is gated behind an
-  environment variable. `STARCI_TEST_TEMPORAL` already gates the compile
-  target's module test, which needs only the network. Either give the engine
-  its own variable (for example `STARCI_TEST_TEMPORAL_SERVER`) or have one
-  variable mean "Temporal tests may use the network and a server". Decide this
-  when writing it.
+- **Engine:** `enginetest.Run(t, eng)` against a server, behind
+  `STARCI_TEST_TEMPORAL_SERVER`, with placement between two machines, the
+  refusal without a store, and cancellation leaving no containers or
+  networks.
 - **Replay:** histories recorded from real runs, replayed against the current
   workflow code, to catch a change that is not deterministic.
 - **Kill mid-step** (AGENTS.md): kill a worker partway through a step of an

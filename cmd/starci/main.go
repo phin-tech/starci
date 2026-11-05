@@ -46,7 +46,7 @@ const usage = `usage:
   starci validate [--file .ci.star] [--arch amd64,arm64]
   starci next   CHECKOUT [--sha SHA] [--file FILE] [--clone-url URL] < what is done so far
   starci step   [--bare[=false]] [--bare-image IMAGE] < a step next asked for
-  starci machine --engine temporal [-v] [--name NAME] [--slots N] [--bare[=false]] [--bare-image IMAGE]
+  starci machine --engine temporal [-v] [--name NAME] [--label key=value ...] [--slots N] [--bare[=false]] [--bare-image IMAGE]
   starci sweep  [MACHINE]
   starci pod    prepare | finish   (in a pod the Argo target made)`
 

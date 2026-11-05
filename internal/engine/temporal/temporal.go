@@ -11,9 +11,20 @@
 // What it adds to the local engine: steps run on other machines, a pool of
 // them shared by every repository that starts runs on it, with dispatch
 // shared fairly between repositories (Temporal's fairness keys, which the
-// server has to have turned on). It does not yet claim to be durable, or to
-// place steps: every step goes to one task queue, and os and arch are checked
-// by the machine that takes it.
+// server has to have turned on).
+//
+// Durability: a run's answers and results are in its workflow's history, so
+// a run whose machines are lost carries on when another takes its tasks.
+// Finished steps are not run again; the step a lost machine was running is
+// run again on another, after the heartbeat timeout.
+//
+// Placement: a step goes to the task queue named by its on, and a machine
+// serves the queue of every set of its labels, its os and arch among them,
+// so a step is taken only by a machine that has all it asks for. prefer and
+// avoid have no equivalent and are not claimed.
+//
+// Artifacts: a machine with no shared store refuses a step that keeps or is
+// handed one, since another machine could not reach it.
 //
 // It is compiled only with -tags temporal
 // (docs/adr/0004-an-engine-sdk-behind-a-build-tag.md).
@@ -25,10 +36,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"runtime"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
@@ -61,6 +75,12 @@ const (
 	// machine lost) is tried. A step that ran and failed is a result, and is
 	// never run again.
 	attempts = 3
+	// waitTimeout is how long a step may wait for a machine that has what
+	// its on asks for, before the run is told none came.
+	waitTimeout = time.Hour
+	// maxLabels bounds a machine's labels, os and arch included: it serves
+	// a queue for every set of them.
+	maxLabels = 6
 )
 
 // DefaultQueue is the task queue runs and steps go to when none is named.
@@ -84,16 +104,62 @@ var (
 
 func (e *Engine) Name() string { return "temporal" }
 
-// Can claims nothing yet. Runs survive a lost machine by design, but that is
-// not claimed until it has been shown (docs/plans/temporal-engine.md); and
-// every step goes to one queue.
-func (e *Engine) Can() engine.Capabilities { return engine.Capabilities{} }
+// Can claims durability, shown by killing a machine partway through a step
+// of an advanced script (TestKilledMachine), and placement by on. prefer and
+// avoid have no equivalent.
+func (e *Engine) Can() engine.Capabilities {
+	return engine.Capabilities{Durable: true, Placement: true}
+}
 
 func (e *Engine) queue() string {
 	if e.Queue == "" {
 		return DefaultQueue
 	}
 	return e.Queue
+}
+
+// stepQueue is the task queue for a step that asks for on: the run's own
+// queue if it asks for nothing, else the run's queue and the labels, sorted.
+// The compiled Temporal workflow names them the same way.
+func stepQueue(base string, on map[string]string) string {
+	if len(on) == 0 {
+		return base
+	}
+	keys := make([]string, 0, len(on))
+	for k := range on {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = k + "=" + on[k]
+	}
+	return base + "/" + strings.Join(parts, ",")
+}
+
+// nextQueue is where asking what is next goes, apart from the steps, so that
+// a machine whose slots are all running steps still answers it.
+func nextQueue(base string) string { return base + "/next" }
+
+// servedQueues are the queues a machine with these labels serves: one for
+// every set of them, the empty set (the run's own queue) included.
+func servedQueues(base string, labels map[string]string) []string {
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var queues []string
+	for mask := 0; mask < 1<<len(keys); mask++ {
+		on := map[string]string{}
+		for i, k := range keys {
+			if mask&(1<<i) != 0 {
+				on[k] = labels[k]
+			}
+		}
+		queues = append(queues, stepQueue(base, on))
+	}
+	return queues
 }
 
 // runInput is what a run's workflow is started with, and all it knows. A
@@ -169,9 +235,16 @@ func (e *Engine) Execute(ctx context.Context, r engine.Run) (engine.Result, erro
 	return result, nil
 }
 
-// Serve makes this computer one of the pool's machines: it takes runs and
-// their steps from the engine's queue until ctx ends.
+// Serve makes this computer one of the pool's machines: it takes runs, and
+// the steps whose on its labels satisfy, until ctx ends.
 func (e *Engine) Serve(ctx context.Context, m engine.Machine) error {
+	labels := map[string]string{plan.PlaceOS: runtime.GOOS, plan.PlaceArch: runtime.GOARCH}
+	for k, v := range m.Labels {
+		labels[k] = v
+	}
+	if len(labels) > maxLabels {
+		return fmt.Errorf("a machine may have at most %d labels, os and arch among them; this one has %d", maxLabels, len(labels))
+	}
 	// A machine killed partway through a step left that step's services
 	// running. They are this machine's, by its name.
 	step.Sweep(m.Config.Machine)
@@ -180,20 +253,51 @@ func (e *Engine) Serve(ctx context.Context, m engine.Machine) error {
 	if slots < 1 {
 		slots = 1
 	}
-	w := worker.New(e.Client, e.queue(), worker.Options{
-		// Asking what is next is an activity too, so it has a slot of its
-		// own beyond the steps'.
-		MaxConcurrentActivityExecutionSize: slots + 1,
-	})
-	w.RegisterWorkflowWithOptions(runWorkflow, workflow.RegisterOptions{Name: workflowName})
-	a := &activities{m: m}
-	w.RegisterActivityWithOptions(a.Next, activity.RegisterOptions{Name: nextName})
-	w.RegisterActivityWithOptions(a.Step, activity.RegisterOptions{Name: stepName})
-	if err := w.Start(); err != nil {
-		return fmt.Errorf("joining the pool on queue %s: %w", e.queue(), err)
+	// The machine's limit on steps is a gate in the step activity, not
+	// Temporal's slots: those are reserved before each poll, so slots
+	// shared between this machine's queues would leave some queues unpolled
+	// until another's long poll ended. A step waiting at the gate holds its
+	// task, heartbeating, so a machine can hold at most a queue's worth of
+	// slots for each queue it serves.
+	a := &activities{m: m, gate: make(chan struct{}, slots)}
+	var workers []worker.Worker
+	start := func(queue string, register func(worker.Worker)) error {
+		w := worker.New(e.Client, queue, worker.Options{MaxConcurrentActivityExecutionSize: slots})
+		register(w)
+		if err := w.Start(); err != nil {
+			return fmt.Errorf("joining the pool on queue %s: %w", queue, err)
+		}
+		workers = append(workers, w)
+		return nil
+	}
+	stopAll := func() {
+		for _, w := range workers {
+			w.Stop()
+		}
+	}
+	base := e.queue()
+	// Runs, and asking what is next, on queues of their own.
+	if err := start(nextQueue(base), func(w worker.Worker) {
+		w.RegisterActivityWithOptions(a.Next, activity.RegisterOptions{Name: nextName})
+	}); err != nil {
+		stopAll()
+		return err
+	}
+	for _, q := range servedQueues(base, labels) {
+		q := q
+		err := start(q, func(w worker.Worker) {
+			if q == base {
+				w.RegisterWorkflowWithOptions(runWorkflow, workflow.RegisterOptions{Name: workflowName})
+			}
+			w.RegisterActivityWithOptions(a.Step, activity.RegisterOptions{Name: stepName})
+		})
+		if err != nil {
+			stopAll()
+			return err
+		}
 	}
 	<-ctx.Done()
-	w.Stop()
+	stopAll()
 	return nil
 }
 
@@ -202,13 +306,16 @@ func (e *Engine) Serve(ctx context.Context, m engine.Machine) error {
 // It reads no clock and makes no ids of its own, so that it does the same
 // thing each time Temporal replays it.
 func runWorkflow(ctx workflow.Context, in runInput) (engine.Result, error) {
+	base := workflow.GetInfo(ctx).TaskQueueName
 	nextCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		TaskQueue:           nextQueue(base),
 		StartToCloseTimeout: time.Minute,
 		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: attempts},
 	})
-	stepCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout: stepTimeout,
-		HeartbeatTimeout:    heartbeatTimeout,
+	stepOptions := workflow.ActivityOptions{
+		ScheduleToStartTimeout: waitTimeout,
+		StartToCloseTimeout:    stepTimeout,
+		HeartbeatTimeout:       heartbeatTimeout,
 		// A cancelled step is waited for, so that its containers are gone
 		// before the run says it is over.
 		WaitForCancellation: true,
@@ -216,7 +323,7 @@ func runWorkflow(ctx workflow.Context, in runInput) (engine.Result, error) {
 		// Repositories sharing a pool take turns on it, where the server
 		// has fairness turned on. Ignored where it does not.
 		Priority: temporal.Priority{FairnessKey: fairnessKey(in.Context.Repo)},
-	})
+	}
 
 	var results []plan.Result
 	started := map[int]bool{}
@@ -245,6 +352,9 @@ func runWorkflow(ctx workflow.Context, in runInput) (engine.Result, error) {
 			// The time a step was asked for is the workflow's, not the
 			// clock's, so that every replay hands out the same job.
 			carrier.Asked = workflow.Now(ctx)
+			opts := stepOptions
+			opts.TaskQueue = stepQueue(base, asked.Step.On)
+			stepCtx := workflow.WithActivityOptions(ctx, opts)
 			f := workflow.ExecuteActivity(stepCtx, stepName, stepJob{Asked: asked, Context: in.Context, CloneURL: in.CloneURL, Trace: carrier})
 			running[asked.Number] = f
 			sel.AddFuture(f, func(f workflow.Future) {
@@ -254,9 +364,7 @@ func runWorkflow(ctx workflow.Context, in runInput) (engine.Result, error) {
 					if cancelled {
 						return
 					}
-					// The step could not be run at all, on any machine, in
-					// as many attempts as it was given.
-					r = asked.Answer(plan.Result{Status: "failed", Detail: "could not be run: " + err.Error()})
+					r = asked.Answer(plan.Result{Status: "failed", Detail: notRun(asked.Step, err)})
 				}
 				results = append(results, r)
 			})
@@ -269,6 +377,28 @@ func runWorkflow(ctx workflow.Context, in runInput) (engine.Result, error) {
 			return stopped(ctx, results, running), nil
 		}
 	}
+}
+
+// notRun says why a step could not be run at all, on any machine, in as many
+// attempts as it was given.
+func notRun(s plan.Step, err error) string {
+	var timeout *temporal.TimeoutError
+	if errors.As(err, &timeout) && timeout.TimeoutType() == enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START {
+		return fmt.Sprintf("could not be run: no machine with %s took it within %s", describeOn(s.On), waitTimeout)
+	}
+	return "could not be run: " + err.Error()
+}
+
+func describeOn(on map[string]string) string {
+	if len(on) == 0 {
+		return "nothing in particular asked of it"
+	}
+	keys := make([]string, 0, len(on))
+	for k := range on {
+		keys = append(keys, k+" = "+on[k])
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ", ")
 }
 
 // stopped ends a run that was cancelled: its steps are waited for until they
@@ -299,6 +429,8 @@ func fairnessKey(repo string) string {
 // activities are what a machine does for the pool.
 type activities struct {
 	m engine.Machine
+	// gate holds a place for each step running on this machine.
+	gate chan struct{}
 }
 
 // Next decides what a run does next. It evaluates the script on the machine
@@ -319,12 +451,23 @@ func (a *activities) Next(ctx context.Context, in nextInput) (plan.Decision, err
 func (a *activities) Step(ctx context.Context, job stepJob) (plan.Result, error) {
 	stop := heartbeat(ctx)
 	defer stop()
+	if a.gate != nil {
+		select {
+		case a.gate <- struct{}{}:
+			defer func() { <-a.gate }()
+		case <-ctx.Done():
+			return plan.Result{}, ctx.Err()
+		}
+	}
 
 	cfg := a.m.Config
 	if a.m.Bare != nil {
 		cfg.Bare = a.m.Bare(job.Context)
 	}
 	s := job.Asked.Step
+	if why := unshared(cfg, s); why != "" {
+		return job.Asked.Answer(plan.Result{Status: "failed", Machine: cfg.Machine, Detail: why}), nil
+	}
 	log := func(string) {}
 	if a.m.Log != nil {
 		label := fmt.Sprintf("#%d %s", job.Asked.Number, s.Name)
@@ -338,6 +481,19 @@ func (a *activities) Step(ctx context.Context, job stepJob) (plan.Result, error)
 		return plan.Result{}, err
 	}
 	return job.Asked.Answer(result), nil
+}
+
+// unshared says why this machine refuses s, or "": a step that keeps
+// something, or is handed something another kept, needs a store every
+// machine reaches.
+func unshared(cfg step.Config, s plan.Step) string {
+	if len(s.Keep) == 0 && len(s.Artifacts) == 0 {
+		return ""
+	}
+	if _, ok := cfg.Shared.(step.Blobs); ok {
+		return ""
+	}
+	return "this machine has no store shared with the rest of the pool (STARCI_STORE), so what this step keeps or is handed could not travel between machines"
 }
 
 // heartbeat tells Temporal this machine is alive while a step runs, which is

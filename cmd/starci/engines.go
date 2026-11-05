@@ -38,6 +38,31 @@ func fetchable(cloneURL string) string {
 	return ""
 }
 
+// labelFlag is key=value labels, given one at a time or comma-separated.
+type labelFlag map[string]string
+
+func (l labelFlag) String() string {
+	var parts []string
+	for _, k := range sortedKeys(l) {
+		parts = append(parts, k+"="+l[k])
+	}
+	return strings.Join(parts, ",")
+}
+
+func (l labelFlag) Set(v string) error {
+	for _, part := range strings.Split(v, ",") {
+		if part = strings.TrimSpace(part); part == "" {
+			continue
+		}
+		k, val, ok := strings.Cut(part, "=")
+		if !ok || k == "" {
+			return fmt.Errorf("a label is key=value, got %q", part)
+		}
+		l[k] = val
+	}
+	return nil
+}
+
 // machineCmd makes this computer one of an engine's machines, taking steps
 // from it until it is stopped.
 func machineCmd(args []string) error {
@@ -50,6 +75,11 @@ func machineCmd(args []string) error {
 	fs.Var(&bare, "bare", "run bare steps, or with --bare=false refuse them (default: STARCI_BARE, else yes but for a pull request from a fork)")
 	bareImage := fs.String("bare-image", os.Getenv("STARCI_BARE_IMAGE"), "run bare steps in this image instead of on the machine (default: STARCI_BARE_IMAGE)")
 	verbose := fs.Bool("v", false, "print each step's output as it runs")
+	labels := labelFlag{}
+	if err := labels.Set(os.Getenv("STARCI_LABELS")); err != nil {
+		return fmt.Errorf("STARCI_LABELS: %w", err)
+	}
+	fs.Var(labels, "label", "a label this machine offers a step's on, as key=value; may be given again (default: STARCI_LABELS, comma-separated). Its os and arch are known")
 	fs.Parse(args)
 
 	if *engineName == "" {
@@ -79,8 +109,12 @@ func machineCmd(args []string) error {
 	if _, err := bareHere(os.Getenv, plan.Context{}, bare); err != nil {
 		return err
 	}
+	if cfg.Shared == nil {
+		fmt.Println("note: no store shared with the rest of the pool (STARCI_STORE): steps that keep or are handed artifacts are refused here")
+	}
 	m := engine.Machine{
 		Config: cfg,
+		Labels: labels,
 		Slots:  *slots,
 		Bare: func(c plan.Context) bool {
 			ok, _ := bareHere(os.Getenv, c, bare)

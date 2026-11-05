@@ -353,6 +353,16 @@ func claims(t *testing.T, eng engine.Engine, r repo) {
 	if can.Durable == strings.Contains(missing, "cannot pick up where it was") {
 		t.Errorf("Durable = %v, but for an advanced run Missing says %q", can.Durable, missing)
 	}
+	if can.Preference && !can.Placement {
+		t.Errorf("Preference without Placement: an engine that ignores on cannot honour prefer")
+	}
+	if can.Placement {
+		run := engine.Run{Mode: plan.Basic, Plan: &plan.Plan{Steps: []plan.Step{{Name: "fast", Prefer: map[string]string{"fast": "true"}}}}}
+		missing := strings.Join(can.Missing(run), "; ")
+		if can.Preference == strings.Contains(missing, "prefer and avoid are ignored") {
+			t.Errorf("Preference = %v, but for a step that prefers a label Missing says %q", can.Preference, missing)
+		}
+	}
 	// Whether an engine that places steps puts them where they ask cannot be
 	// asked of every engine alike: it depends on what machines it has. Such an
 	// engine tests that itself.

@@ -22,17 +22,27 @@ Give gopls the tag, or it treats the engine as dead code: in its settings,
 `"buildFlags": ["-tags=temporal"]`.
 
 Without a server, the engine's workflow is tested under the SDK's test
-environment, with a stand-in for running a step. The shared engine tests run
-against a real server when `STARCI_TEST_TEMPORAL_SERVER=1`, connecting as the
-SDK's environment says, with a machine in the test's own process on a task
-queue of its own:
+environment, with a stand-in for running a step, and the histories in
+`internal/engine/temporal/testdata` are replayed against it: a change that
+would not replay them would strand runs in flight when a pool is upgraded.
+Against a real server, when `STARCI_TEST_TEMPORAL_SERVER=1`, the shared
+engine tests run, and so do placement between two machines, the refusal of
+artifacts without a shared store, cancellation, and a machine killed partway
+through a step of an advanced script, with another left to finish the run.
+They connect as the SDK's environment says, with machines in the test's own
+process (or the test binary run again, to be killed), each test on task
+queues of its own:
 
 ```sh
 STARCI_TEST_TEMPORAL_SERVER=1 TEMPORAL_ADDRESS=host:7233 \
   go test -tags temporal ./internal/engine/temporal
 ```
 
-`temporal server start-dev` is enough of a server.
+`STARCI_RECORD_HISTORY=1` as well writes the histories of the replay and
+killed-machine runs to `testdata`, replacing what is there. `temporal server
+start-dev` is enough of a server. On a Mac with a firewall that asks per
+program, such as Little Snitch, allow connections to the server from any
+program: every build of a test binary is a new one.
 
 The Temporal compile target writes a Go module. Building it against the Temporal
 SDK, and running its workflow under the SDK's test environment with a stand-in
